@@ -102,10 +102,16 @@ export interface Overview {
   default_runtime: string;
   llm_backend: string;
   clients: { total: number; installed: number; connected: number; attention: number };
-  doctor: { pass: number; warn: number; fail: number };
+  /** `warn` leaves out `optional`: integrations that are simply not set up. */
+  doctor: { pass: number; warn: number; fail: number; optional?: number };
   providers: { configured: number; total: number };
   runs: RunSummary[];
+  /** Why the runs could not be read, when they could not. */
+  runs_error?: string | null;
   running_jobs: JobSnapshot[];
+  /** For showing paths short: the home folder, and [resolved root, name it is reached by]. */
+  home?: string;
+  path_aliases?: [string, string][];
 }
 
 export interface DoctorSurface {
@@ -117,6 +123,8 @@ export interface DoctorSurface {
   expected_version: string | null;
   launcher: string | null;
   remediation: string | null;
+  /** Part of an optional integration that is not set up at all: not a problem to fix. */
+  optional?: boolean;
 }
 
 export interface Doctor {
@@ -387,6 +395,9 @@ export interface ChatMessage {
   base?: string;
   files?: string[];
   file_count?: number;
+  /** An Auto result: Ouroboros' state and Python bytecode, listed apart from `files` but counted. */
+  internal_files?: string[];
+  internal_count?: number;
   uncommitted?: number;
   /** An Auto result: how it ended, the run status it reported, and the folder it worked in. */
   outcome?: "completed" | "failed" | "stopped" | "unverified";
@@ -512,6 +523,8 @@ export interface ChatSession extends ChatSessionRow {
   auto_job_id?: string;
   /** Auto chats started since the structured view exists; older ones have only their log. */
   auto?: AutoView | null;
+  /** The agent and Execute model an Auto chat's run uses, as configured when it started. */
+  auto_model?: { model: string; backend: string | null; configured: string | null } | null;
   suggestion?: Suggestion;
   activity?: string[];
 }

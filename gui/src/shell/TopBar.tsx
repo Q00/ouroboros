@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useT } from "../i18n";
 import { backendName } from "../core/format";
 import { jobs, openJobs } from "../core/jobs";
+import { learnPaths } from "../core/paths";
 import { invalidate, useResource } from "../core/resource";
 import { href, useRoute } from "../core/router";
 import { useStore } from "../core/store";
@@ -21,6 +22,7 @@ export function TopBar() {
   const [drawer, setDrawer] = useState(false);
   useEffect(() => setDrawer(false), [route.page, route.rest]);
   const data = overview.data;
+  useEffect(() => learnPaths(data?.home, data?.path_aliases), [data?.home, data?.path_aliases]);
   const running = Object.values(jobState.jobs).filter((job) => job.status === "running").length;
   const issues = data ? data.doctor.fail || data.doctor.warn : 0;
   const clock = overview.updatedAt ? new Date(overview.updatedAt).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }) : "";

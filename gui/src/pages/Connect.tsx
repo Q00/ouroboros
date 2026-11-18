@@ -5,7 +5,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useT } from "../i18n";
 import { explain, useAction } from "../core/action";
 import { get, post } from "../core/api";
-import { backendName, shortPath } from "../core/format";
+import { backendName } from "../core/format";
+import { useShortPath } from "../core/paths";
 import { openJobs, trackJob } from "../core/jobs";
 import { invalidate, useResource } from "../core/resource";
 import { href, navigate } from "../core/router";
@@ -252,6 +253,7 @@ interface DetailProps {
 
 /** Everything about one tool: where it stands and the one next step. */
 function Detail({ client, busy, onOpen }: DetailProps) {
+  const shortPath = useShortPath();
   const { t, tx } = useT();
   const { integration, sign_in: signIn } = client;
   const working = busy ?? (client.running_job ? "setup" : undefined);

@@ -707,6 +707,68 @@ def test_canonical_link_rejects_conflicting_selected_run_ids(tmp_path) -> None:
         list_recent_executions(db, limit=2)
 
 
+def test_progress_naming_the_agents_own_session_still_lists_its_run(tmp_path) -> None:
+    """A Codex run's progress carries Codex's thread id as ``session_id`` (#3046)."""
+    db = tmp_path / "native-session-progress.db"
+    native = "01a1ef58-c1b1-71d0-99aa-7d3578685cf5"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch-a",
+                "orchestrator.session.started",
+                {"execution_id": "exec-a", "seed_goal": "g"},
+            ),
+            (
+                "orch-a",
+                "orchestrator.progress.updated",
+                {
+                    "session_id": native,
+                    "resume_session_id": native,
+                    "runtime_status": "running",
+                    "progress": {"runtime_status": "running"},
+                },
+            ),
+            (
+                "exec-a",
+                "workflow.progress.updated",
+                {
+                    "session_id": "orch-a",
+                    "acceptance_criteria": [{"index": 0, "content": "c", "status": "completed"}],
+                    "completed_count": 1,
+                    "total_count": 1,
+                },
+            ),
+            ("orch-a", "orchestrator.session.completed", {"summary": "done"}),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert [(run["execution_id"], run["session_id"], run["status"]) for run in runs] == [
+        ("exec-a", "orch-a", "completed")
+    ]
+    assert runs[0]["last_row"] == 4
+    # The run board reads the same rows by aggregate too.
+    tail_types = [event["event_type"] for event in EventTail(db, "exec-a").fetch_new()]
+    assert "orchestrator.progress.updated" in tail_types
+
+
+def test_progress_naming_another_selected_run_still_fails_closed(tmp_path) -> None:
+    db = tmp_path / "progress-conflict.db"
+    _make_events_db(
+        db,
+        [
+            ("orch-a", "orchestrator.session.started", {"execution_id": "exec-a"}),
+            ("orch-b", "orchestrator.session.started", {"execution_id": "exec-b"}),
+            ("orch-a", "orchestrator.progress.updated", {"session_id": "orch-b"}),
+        ],
+    )
+
+    with pytest.raises(PickerIndexContractError, match="conflicting selected payload ids"):
+        list_recent_executions(db, limit=2)
+
+
 def test_run_identity_fails_closed_for_cross_namespace_collision(tmp_path) -> None:
     db = tmp_path / "cross-namespace-collision.db"
     _make_events_db(

@@ -1,4 +1,4 @@
-import { Activity, ArrowLeft, RefreshCw } from "lucide-react";
+import { Activity, ArrowLeft, CircleAlert, RefreshCw } from "lucide-react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 
 import type { Key, Translator } from "../i18n";
@@ -7,10 +7,10 @@ import { backendName, compactNumber, timeAgo } from "../core/format";
 import { useResource } from "../core/resource";
 import { href } from "../core/router";
 import { useSnapshotStream } from "../core/stream";
-import type { Board, BoardCard, InterviewSummary, RunSummary } from "../core/types";
+import type { Board, BoardCard, ChatMessage, InterviewSummary, RunSummary } from "../core/types";
 import { PageHead } from "../shell/PageHead";
 import type { Tone } from "../ui/bits";
-import { Chip, CopyButton, Empty, Kpis, LoadError, SectionTitle, Skeleton } from "../ui/bits";
+import { Chip, CopyButton, Empty, Kpis, LoadError, Notice, SectionTitle, Skeleton } from "../ui/bits";
 import { Button } from "../ui/Button";
 import { GLIDE, SETTLE } from "../core/motion";
 
@@ -75,6 +75,15 @@ export function Progress({ done, total, failed = 0, label }: { done: number; tot
       {failed ? <motion.span className="progress-failed" animate={{ width: `${(failed / safeTotal) * 100}%` }} transition={GLIDE} /> : null}
     </div>
   );
+}
+
+/**
+ * A run card's run is live but has no tasks yet: it is still planning them,
+ * which can take minutes. A run that ended with none is not "preparing".
+ */
+export function runPreparing(message: Pick<ChatMessage, "progress" | "run_status"> | undefined): boolean {
+  if (!message?.progress) return false;
+  return message.progress.total === 0 && (message.run_status ?? "running") === "running";
 }
 
 /** One execution in a list; links to its board. */
@@ -214,7 +223,7 @@ function BoardView({ runId }: { runId: string }) {
 
 function RunList() {
   const { t, tx } = useT();
-  const runs = useResource<{ runs: RunSummary[]; interviews: InterviewSummary[] }>("/api/runs", { interval: 6000 });
+  const runs = useResource<{ runs: RunSummary[]; runs_error?: string | null; interviews: InterviewSummary[] }>("/api/runs", { interval: 6000 });
   const data = runs.data;
   return (
     <>
@@ -247,7 +256,12 @@ function RunList() {
             <SectionTitle aside={<span className="count-note">{data.runs.length}</span>}>
               <span id="runs-list">{t("runs.executions")}</span>
             </SectionTitle>
-            {data.runs.length === 0 ? (
+            {data.runs_error ? (
+              // The run index refused to answer: say so, rather than "no runs yet".
+              <Notice tone="warn" icon={<CircleAlert size={16} aria-hidden />} title={t("runs.unreadable")}>
+                {t("runs.unreadableBody", { error: data.runs_error })}
+              </Notice>
+            ) : data.runs.length === 0 ? (
               <Empty
                 icon={<Activity size={20} aria-hidden />}
                 title={t("runs.empty")}

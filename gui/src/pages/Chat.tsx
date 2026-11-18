@@ -2,6 +2,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  ChevronDown,
   CircleAlert,
   CircleCheck,
   CircleDashed,
@@ -32,9 +33,10 @@ import type { Key, Translator } from "../i18n";
 import { useT } from "../i18n";
 import { useAction } from "../core/action";
 import { ApiFailure, del, get, post } from "../core/api";
-import { backendName, shortPath, timeAgo } from "../core/format";
+import { backendName, timeAgo } from "../core/format";
 import { adoptRunningJobs } from "../core/jobs";
 import { askModelHint, listedModels } from "../core/modelChoices";
+import { useShortPath } from "../core/paths";
 import { invalidate, useResource } from "../core/resource";
 import { href, navigate } from "../core/router";
 import { useSnapshotStream } from "../core/stream";
@@ -47,8 +49,8 @@ import { Modal } from "../ui/Modal";
 import { Picker } from "../ui/Picker";
 import { Segmented } from "../ui/Segmented";
 import { AutoInterview, AutoLog, AutoReview, AutoStepper, autoActivity, autoEnding } from "./AutoView";
-import { Progress, RunStatus, activityLabel, phaseLabel } from "./Runs";
-import { GLIDE, SETTLE } from "../core/motion";
+import { Progress, RunStatus, activityLabel, phaseLabel, runPreparing } from "./Runs";
+import { EASE_OUT, GLIDE, SETTLE } from "../core/motion";
 
 const FOLLOW = "__settings__";
 
@@ -208,6 +210,7 @@ function FolderStatus({ probe, mode }: { probe: FolderProbe | null; mode: ChatMo
 
 function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
   const { t, tx } = useT();
+  const shortPath = useShortPath();
   const ids = useId();
   const [goal, setGoal] = useState("");
   const [mode, setMode] = useState<ChatMode>("interview");
@@ -414,6 +417,7 @@ function RunCard({ message }: { message: ChatMessage }) {
   const { t } = useT();
   const progress = message.progress;
   const status = message.run_status ?? "running";
+  const preparing = runPreparing(message);
   return (
     <div className="bubble-card run-card">
       <div className="run-card-head">
@@ -429,7 +433,11 @@ function RunCard({ message }: { message: ChatMessage }) {
           </a>
         ) : null}
       </div>
-      {progress ? (
+      {preparing ? (
+        <p className="run-card-activity" role="status">
+          <Spinner size={13} /> {t("chat.run.preparing")}
+        </p>
+      ) : progress ? (
         <>
           <div className="run-card-progress">
             <Progress done={progress.done} total={progress.total} failed={progress.counts.failed} label={t("runs.progress")} />
@@ -533,12 +541,49 @@ const OUTCOME: Record<NonNullable<ChatMessage["outcome"]>, { key: Key; tone: Ton
   unverified: { key: "chat.result.outcome.unverified", tone: "warn" },
 };
 
+/**
+ * Ouroboros' own state and Python bytecode an Auto result lists apart: folded
+ * under one muted line with their count, never dropped.
+ */
+function InternalFiles({ files, count }: { files: string[]; count: number }) {
+  const { t } = useT();
+  const ids = useId();
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="file-group">
+      <button type="button" className="file-group-toggle" aria-expanded={open} aria-controls={`${ids}-files`} onClick={() => setOpen((value) => !value)}>
+        <ChevronDown className="auto-chevron" size={14} aria-hidden data-open={open || undefined} />
+        <span>{t("chat.result.internal")}</span>
+        <span className="file-group-count">{count}</span>
+      </button>
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.div id={`${ids}-files`} className="auto-collapse" initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.22, ease: EASE_OUT }}>
+            <p className="section-note">{t("chat.result.internalNote")}</p>
+            <ul className="file-list file-list-muted">
+              {files.map((file) => (
+                <li key={file}>
+                  <code>{file}</code>
+                </li>
+              ))}
+            </ul>
+            {count > files.length ? <p className="section-note">{t("chat.result.more", { count: count - files.length })}</p> : null}
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 /** What an Auto chat left behind. Auto works in the project folder itself, not a worktree. */
 function AutoResultCard({ message }: { message: ChatMessage }) {
   const { t } = useT();
+  const shortPath = useShortPath();
   const files = message.files ?? [];
   const outcome = OUTCOME[message.outcome ?? "unverified"] ?? OUTCOME.unverified;
   const count = message.file_count ?? files.length;
+  const internal = message.internal_files ?? [];
+  const internalCount = message.internal_count ?? internal.length;
   return (
     <div className="bubble-card result-card">
       <div className="seed-head">
@@ -560,17 +605,24 @@ function AutoResultCard({ message }: { message: ChatMessage }) {
         </dl>
       ) : null}
       {message.in_repo ? (
-        count > 0 ? (
+        count > 0 || internalCount > 0 ? (
           <>
-            <h4>{t("chat.result.folderFiles", { count })}</h4>
-            <ul className="file-list">
-              {files.map((file) => (
-                <li key={file}>
-                  <code>{file}</code>
-                </li>
-              ))}
-            </ul>
-            {count > files.length ? <p className="section-note">{t("chat.result.more", { count: count - files.length })}</p> : null}
+            {count > 0 ? (
+              <>
+                <h4>{internalCount > 0 ? t("chat.result.projectFiles", { count }) : t("chat.result.folderFiles", { count })}</h4>
+                <ul className="file-list">
+                  {files.map((file) => (
+                    <li key={file}>
+                      <code>{file}</code>
+                    </li>
+                  ))}
+                </ul>
+                {count > files.length ? <p className="section-note">{t("chat.result.more", { count: count - files.length })}</p> : null}
+              </>
+            ) : (
+              <p className="section-note">{t("chat.result.noProjectFiles")}</p>
+            )}
+            {internalCount > 0 ? <InternalFiles files={internal} count={internalCount} /> : null}
             <p className="section-note">{t("chat.result.folderNote")}</p>
           </>
         ) : (
@@ -802,10 +854,15 @@ const STEP_LABEL = { interview: "chat.mode.interview", seed: "chat.seed.title", 
 /** The right-hand pane: where this conversation is in the pipeline, and its facts. */
 function ContextPane({ session }: { session: ChatSession }) {
   const { t, locale } = useT();
+  const shortPath = useShortPath();
   const seed = [...session.messages].reverse().find((message) => message.kind === "seed");
   const run = [...session.messages].reverse().find((message) => message.kind === "run");
   const reply = [...session.messages].reverse().find((message) => message.kind === "text" && message.role === "assistant" && message.model);
-  const model = session.model || reply?.model;
+  // An Auto chat names the agent and model its run uses, as configured when it started.
+  const autoModel = session.mode === "auto" ? session.auto_model : null;
+  const model = session.model || reply?.model || autoModel?.model;
+  const hint = autoModel && !session.model ? { backend: autoModel.backend, configured: autoModel.configured } : { backend: reply?.model_backend, configured: reply?.model_default };
+  const agent = session.backend || autoModel?.backend;
   return (
     <aside className="chat-pane-side" aria-label={t("chat.pane.title")}>
       {session.mode === "interview" ? (
@@ -838,13 +895,13 @@ function ContextPane({ session }: { session: ChatSession }) {
           ) : null}
           <div>
             <dt>{t("models.agent")}</dt>
-            <dd>{session.backend ? backendName(session.backend) : t("chat.new.followPlain")}</dd>
+            <dd>{agent ? backendName(agent) : t("chat.new.followPlain")}</dd>
           </div>
           {model ? (
             <div>
               <dt>{t("models.model")}</dt>
               <dd>
-                <code>{modelText(t, model, { backend: reply?.model_backend, configured: reply?.model_default })}</code>
+                <code>{modelText(t, model, hint)}</code>
               </dd>
             </div>
           ) : null}
@@ -880,8 +937,14 @@ function ContextPane({ session }: { session: ChatSession }) {
       {run?.progress ? (
         <section>
           <h2 className="pane-title">{t("chat.run.title")}</h2>
-          <Progress done={run.progress.done} total={run.progress.total} failed={run.progress.counts.failed} label={t("runs.progress")} />
-          <p className="pane-note">{t("runs.count", { done: run.progress.done, total: run.progress.total })}</p>
+          {runPreparing(run) ? (
+            <p className="pane-note">{t("chat.run.preparing")}</p>
+          ) : (
+            <>
+              <Progress done={run.progress.done} total={run.progress.total} failed={run.progress.counts.failed} label={t("runs.progress")} />
+              <p className="pane-note">{t("runs.count", { done: run.progress.done, total: run.progress.total })}</p>
+            </>
+          )}
           {run.execution_id ? (
             <a className="more-link" href={href("runs", run.execution_id)}>
               {t("chat.run.board")}
@@ -917,6 +980,7 @@ function ModesPane() {
 
 function Thread({ id }: { id: string }) {
   const { t, tx } = useT();
+  const shortPath = useShortPath();
   const path = `/api/chat/sessions/${encodeURIComponent(id)}`;
   const loaded = useResource<ChatSession>(path);
   const stream = useSnapshotStream<ChatSession>(`${path}/stream`);
@@ -1081,7 +1145,8 @@ function Thread({ id }: { id: string }) {
           <ArrowLeft size={16} aria-hidden />
         </a>
         <div className="thread-title">
-          <h1>{session.title}</h1>
+          {/* The goal's whole first line, cut by the header's width with an ellipsis; all of it on hover. */}
+          <h1 title={session.goal || session.title}>{goalLine(session.goal) || session.title}</h1>
           <p>
             <Chip>{t(`chat.mode.${mode}`)}</Chip>
             {session.project ? <Chip>{t(`chat.new.project.${session.project}`)}</Chip> : null}
@@ -1358,6 +1423,11 @@ function Thread({ id }: { id: string }) {
     <ContextPane session={session} />
     </div>
   );
+}
+
+/** The first line of a goal with text, for the thread header. */
+function goalLine(goal: string | undefined): string {
+  return (goal ?? "").split("\n").map((line) => line.trim()).find(Boolean) ?? "";
 }
 
 // ── Page ─────────────────────────────────────────────────────────────

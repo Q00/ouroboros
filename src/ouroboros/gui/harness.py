@@ -94,6 +94,28 @@ def _now() -> float:
     return time.time()
 
 
+_TITLE_MAX = 80
+
+
+def chat_title(goal: object) -> str:
+    """A chat's title: the goal's first line, shortened at a word with an ellipsis.
+
+    A line longer than ``_TITLE_MAX`` characters is cut at the last space in
+    its second half, else at the limit (text without spaces), and ends in
+    "…". Returns ``""`` for a goal with no text.
+    """
+    if not isinstance(goal, str):
+        return ""
+    line = next((part.strip() for part in goal.splitlines() if part.strip()), "")
+    if len(line) <= _TITLE_MAX:
+        return line
+    cut = line[: _TITLE_MAX - 1]
+    space = cut.rfind(" ")
+    if space >= _TITLE_MAX // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:.-—") + "…"
+
+
 def _msg(role: str, kind: str, text: str = "", **data: Any) -> dict[str, Any]:
     """A transcript entry. A ``key`` names a fixed sentence the page translates; ``text`` is its English."""
     return {
@@ -427,7 +449,8 @@ class Harness:
             rows = [
                 {
                     "id": s["id"],
-                    "title": s.get("title") or "Untitled",
+                    # From the goal, so chats saved with a mid-word cut read whole too.
+                    "title": chat_title(s.get("goal")) or s.get("title") or "Untitled",
                     "mode": s.get("mode"),
                     "backend": s.get("backend"),
                     "model": s.get("model"),
@@ -473,7 +496,7 @@ class Harness:
         session_id = uuid.uuid4().hex[:12]
         session: dict[str, Any] = {
             "id": session_id,
-            "title": goal.splitlines()[0][:80],
+            "title": chat_title(goal),
             "goal": goal,
             "cwd": cwd,
             "mode": mode,
@@ -1263,10 +1286,13 @@ class Harness:
             cwd=session["cwd"],
             watch=_AUTO_WATCH,
         )
+        model = _auto_model(session.get("backend"))
 
         def apply(s: dict[str, Any]) -> None:
             s["auto_job_id"] = job.id
             s["status"] = "running"
+            if model is not None:
+                s["auto_model"] = model
             s["auto"] = auto_progress.new_view()
             s["messages"].append(
                 _msg("assistant", "log", "ouroboros auto", lines=[], job_id=job.id)
@@ -1457,6 +1483,9 @@ class Harness:
                     in_repo=changes is not None,
                     files=list(changes.files) if changes else [],
                     file_count=changes.count if changes else 0,
+                    # Ouroboros state and bytecode: listed apart, still counted.
+                    internal_files=list(changes.internal) if changes else [],
+                    internal_count=changes.internal_count if changes else 0,
                 )
             )
 
@@ -1723,6 +1752,40 @@ def _default_model_hint(backend: str | None, model: object) -> dict[str, Any]:
         "model_backend": capability.name,
         "model_default": configured_default_model(capability.name),
     }
+
+
+def _auto_model(backend: str | None) -> dict[str, Any] | None:
+    """The agent and Execute model an Auto chat's run uses, as configured when it starts.
+
+    Display only. ``backend`` is the chat's agent, else the Execute stage's
+    agent from settings. ``model`` is the configured Execute model, or the
+    ``default`` sentinel when the agent runs on its own default; ``configured``
+    then names that default when the CLI's config says it
+    (``configured_default_model``). ``None`` when the agent or its model
+    cannot be resolved: the page then shows no Model row rather than a guess.
+    """
+    from ouroboros.backends import get_backend_capability
+    from ouroboros.backends.model_catalog import DEFAULT_MODEL_SENTINEL, configured_default_model
+    from ouroboros.config.loader import resolve_execution_model
+    from ouroboros.config_tui.persistence import ConfigWriteError
+    from ouroboros.core.errors import OuroborosError
+    from ouroboros.gui.settings import SettingsModel
+
+    try:
+        agent = backend or SettingsModel().effective_stage_backend(settings_stage("execute"))
+        capability = get_backend_capability(agent)
+        if capability is None:
+            return None
+        model = resolve_execution_model(capability.name)
+    except (OSError, ValueError, yaml.YAMLError, ConfigWriteError, OuroborosError):
+        return None  # an unreadable config: no row rather than a failed chat
+    if model is None:
+        return {
+            "model": DEFAULT_MODEL_SENTINEL,
+            "backend": capability.name,
+            "configured": configured_default_model(capability.name),
+        }
+    return {"model": model, "backend": capability.name, "configured": None}
 
 
 def _empty_model_default(backend: str) -> str | None:

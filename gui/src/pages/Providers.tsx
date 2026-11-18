@@ -5,7 +5,7 @@ import { useId, useMemo, useState } from "react";
 import { useT } from "../i18n";
 import { useAction } from "../core/action";
 import { del, post, put } from "../core/api";
-import { shortPath } from "../core/format";
+import { useShortPath } from "../core/paths";
 import { invalidate, useResource } from "../core/resource";
 import { href } from "../core/router";
 import { toast } from "../core/toast";
@@ -149,6 +149,7 @@ function Editor({ row, onSaved, onRemove }: EditorProps) {
 }
 
 export function ProvidersPage({ rest }: { rest: string }) {
+  const shortPath = useShortPath();
   const { t, tx } = useT();
   const providers = useResource<ProvidersView>("/api/providers");
   const view = providers.data;

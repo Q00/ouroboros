@@ -21,10 +21,10 @@ settings app.
 | Page | What it does |
 | --- | --- |
 | Home | Version, default agent, connected tools, recent runs, a setup checklist. |
-| Health | `ouroboros doctor install` checks, and one-click installs of the optional components (`[claude]`, `[litellm]`, `[mcp]`, `[tui]`) pinned to this release. |
+| Health | `ouroboros doctor install` checks, and one-click installs of the optional components (`[claude]`, `[litellm]`, `[mcp]`, `[tui]`) pinned to this release. A client integration nobody set up (none of its plugin or launcher files exist) is shown as *Not set up* and counted apart from the warnings; a stale, broken or half-installed one stays a warning. |
 | Chat | Interview, Auto and Ask modes with an agent/provider + model picker. *Suggest an answer* drafts a reply from the repository (or a default when the code can't settle it). *Hand off to agents* starts the run and follows it live, then shows the run's worktree, branch and changed files. See [Interview chats](#interview-chats) and [Auto chats](#auto-chats). |
 | Connect | Install agent CLIs with their published installers and run `ouroboros setup --runtime <tool>` per tool, optionally keeping the current default agent. |
-| Runs | Every execution from the EventStore with a live board per run. |
+| Runs | Every execution from the EventStore with a live board per run. When the EventStore's run index fails its consistency check, the page says so instead of showing "No runs yet". |
 | Agents & models | Default agent, per-stage agents and models, routing presets. Saves through the same validated, undoable path as `ouroboros config set`; `ouroboros config undo` reverts the last save. |
 | Shared MCP | Turn the shared MCP server on, point tools at it and restore them, and start the console at login. |
 | Providers | API keys for the LiteLLM backend in `~/.ouroboros/credentials.yaml` (mode 600). A running [opencodex](https://github.com/lidge-jun/opencodex) can be used as the gateway in one click. |
@@ -95,7 +95,12 @@ and Spanish (side rail → language).
     moved (for example B → A), the repair rounds, and what the review asked
     for;
   - the run card with its acceptance-criterion tiles, once the run has an
-    execution id.
+    execution id. Until the run has planned its tasks, which can take
+    minutes, the card says it is preparing them.
+
+  The side pane names the agent and the Execute model the run uses, as
+  configured when the chat started (for example *Codex CLI default
+  (gpt-6.2-astra)*).
 
   The raw output stays under *Show detailed log*, with the structlog lines
   hidden until asked for. The view is saved with the chat, and is bounded (the
@@ -106,6 +111,9 @@ and Spanish (side rail → language).
   job succeeded without that report), a link to the run board, the folder,
   and the files `git status` reports as changed there. Those are all
   uncommitted changes in the folder, including any made before Auto started.
+  Ouroboros' own state (`.ouroboros/`) and Python bytecode (`__pycache__/`,
+  `*.pyc`) are listed apart, under one line that opens, and counted there:
+  the stepper says, for example, "3 files (+2 cache)".
   In a folder that is not a git repository the console cannot list them, and
   says so. A chat you stop is shown as stopped, not failed. A stopped, failed
   or unverified chat ends with a line saying where it stopped and where to

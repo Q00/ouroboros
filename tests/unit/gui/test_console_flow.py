@@ -322,7 +322,43 @@ def test_a_finished_auto_job_ends_with_its_result(
         "in_repo": True,
         "files": ["palindrome.py"],
         "file_count": 1,
+        "internal_files": [],
+        "internal_count": 0,
     }
+
+
+_NOISY_AUTO_SCRIPT = """
+from pathlib import Path
+Path("md2csv.py").write_text("x\\n")
+Path(".ouroboros").mkdir()
+Path(".ouroboros/state.json").write_text("{{}}")
+Path("__pycache__").mkdir()
+Path("__pycache__/md2csv.cpython-312.pyc").write_bytes(b"")
+print("  Execution ID: exec_20e9d3785fd6")
+print("Run handoff status: completed")
+"""
+
+
+def test_an_auto_result_lists_ouroboros_state_and_bytecode_apart_and_counts_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        harness,
+        "ouroboros_command",
+        lambda *_args: [sys.executable, "-c", _NOISY_AUTO_SCRIPT.format()],
+    )
+    folder = _repo(tmp_path / "proj")
+    state = _state()
+    chat = state.harness.create({"goal": "md2csv", "mode": "auto", "cwd": str(folder)})
+
+    session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
+
+    result = session["messages"][-1]
+    assert (result["files"], result["file_count"]) == (["md2csv.py"], 1)
+    assert (result["internal_files"], result["internal_count"]) == (
+        [".ouroboros/", "__pycache__/"],
+        2,
+    )
 
 
 @pytest.mark.parametrize(
@@ -679,6 +715,107 @@ def test_refusals_reach_the_page_with_their_code(tmp_path: Path) -> None:
 
 
 # ── 6. the model a sentinel backend reports ───────────────────────────
+
+
+def test_an_auto_chat_records_the_agent_and_model_its_run_uses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.backends import model_catalog
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text('model = "gpt-6.2-astra"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(model_catalog, "detect_backend_cli", lambda _name: "/bin/codex")
+    _fake_auto(monkeypatch)
+    state = _state()
+    chat = state.harness.create(
+        {"goal": "palindrome", "mode": "auto", "backend": "codex", "cwd": str(tmp_path)}
+    )
+
+    session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
+
+    assert session["auto_model"] == {
+        "model": "default",
+        "backend": "codex",
+        "configured": "gpt-6.2-astra",
+    }
+
+
+def test_an_auto_model_names_a_configured_execute_model_as_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.config import loader
+
+    monkeypatch.setattr(loader, "resolve_execution_model", lambda _backend: "gpt-6-sol")
+    assert harness._auto_model("codex") == {
+        "model": "gpt-6-sol",
+        "backend": "codex",
+        "configured": None,
+    }
+
+
+def test_an_auto_model_follows_the_execute_agent_from_settings(isolated_home: Path) -> None:
+    config = isolated_home / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("orchestrator:\n  runtime_backend: codex\n", encoding="utf-8")
+    model = harness._auto_model(None)
+    assert model is not None and model["backend"] == "codex"
+
+
+def test_an_unreadable_config_gives_no_auto_model_rather_than_a_guess(
+    isolated_home: Path,
+) -> None:
+    config = isolated_home / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("- not a mapping\n", encoding="utf-8")
+    assert harness._auto_model(None) is None
+    assert harness._auto_model("not-an-agent") is None
+
+
+@pytest.mark.parametrize(
+    ("goal", "title"),
+    [
+        ("Build a palindrome checker", "Build a palindrome checker"),
+        ("\n  First line  \nsecond line", "First line"),
+        (
+            "Build a Python CLI that converts Markdown tables to CSV (file or stdin in, "
+            "CSV to stdout), with pytest tests.",
+            "Build a Python CLI that converts Markdown tables to CSV (file or stdin in, CSV…",
+        ),
+        ("x" * 100, "x" * 79 + "…"),
+        ("a" * 70 + " " + "b" * 40, "a" * 70 + "…"),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_a_chat_title_is_cut_at_a_word_and_says_so(goal: object, title: str) -> None:
+    assert harness.chat_title(goal) == title
+    assert len(harness.chat_title(goal)) <= 80
+
+
+def test_the_chat_list_titles_old_chats_from_their_goal(tmp_path: Path) -> None:
+    h = harness.Harness()
+    goal = (
+        "Build a Python CLI that converts Markdown tables to CSV (file or stdin in, CSV to stdout)"
+    )
+    h._sessions["old"] = {
+        "id": "old",
+        "title": goal[:80],  # saved before titles were cut at a word
+        "goal": goal,
+        "cwd": str(tmp_path),
+        "mode": "auto",
+        "status": "done",
+        "version": 0,
+        "messages": [],
+    }
+    h._sessions["bare"] = {"id": "bare", "title": "", "mode": "ask", "messages": []}
+
+    rows = {row["id"]: row["title"] for row in h.list_sessions()}
+
+    assert rows["old"] == harness.chat_title(goal)
+    assert rows["old"].endswith("…")
+    assert rows["bare"] == "Untitled"
 
 
 def test_a_default_model_names_the_agent_and_its_configured_model(
