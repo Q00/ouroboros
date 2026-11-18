@@ -564,6 +564,7 @@ const zh: Catalog = {
   "chat.suggest.edit": "先编辑",
   "chat.suggest.send": "直接发送",
   "chat.suggest.failed": "这次没有给出建议",
+  "chat.suggest.otherLanguage": "此回答可能使用了其他语言。",
   "chat.seed.title": "Seed",
   "chat.seed.criteria": "验收标准（{count}）",
   "chat.seed.constraints": "约束",

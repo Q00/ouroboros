@@ -563,8 +563,10 @@ def test_without_a_readable_state_no_question_is_echoed(
 def test_suggest_reads_no_repository_for_a_new_project_or_a_checked_question(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def default_answer(self: harness.Harness, session: dict[str, Any], question: str) -> str:
-        return "A sensible default."
+    async def default_answer(
+        self: harness.Harness, session: dict[str, Any], question: str
+    ) -> tuple[str, bool]:
+        return "A sensible default.", True
 
     monkeypatch.setattr(harness.Harness, "_default_answer", default_answer)
     repo = _git_repo(tmp_path / "app", {"pyproject.toml": "[project]\n"})

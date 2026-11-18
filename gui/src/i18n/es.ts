@@ -564,6 +564,7 @@ const es: Catalog = {
   "chat.suggest.edit": "Editar antes",
   "chat.suggest.send": "Enviar tal cual",
   "chat.suggest.failed": "Esta vez no hay sugerencia",
+  "chat.suggest.otherLanguage": "Esta respuesta puede estar en otro idioma.",
   "chat.seed.title": "Seed",
   "chat.seed.criteria": "Criterios de aceptación ({count})",
   "chat.seed.constraints": "Restricciones",

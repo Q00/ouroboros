@@ -583,6 +583,7 @@ const en = {
   "chat.suggest.edit": "Edit first",
   "chat.suggest.send": "Send this",
   "chat.suggest.failed": "No suggestion this time",
+  "chat.suggest.otherLanguage": "This answer may be in a different language.",
   "chat.seed.title": "Seed",
   "chat.seed.criteria": "Acceptance criteria ({count})",
   "chat.seed.constraints": "Constraints",

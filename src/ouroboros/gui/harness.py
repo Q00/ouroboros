@@ -41,6 +41,7 @@ import uuid
 import yaml
 
 from ouroboros.gui import auto_progress, model_refusal, workspace
+from ouroboros.gui.answer_language import LANGUAGE_NAMES, goal_language, in_language, plain_answer
 from ouroboros.gui.interview_assist import (
     AUTO_CONFIRMED_PREFIX,
     CONFIRMED_PREFIX,
@@ -1157,7 +1158,11 @@ class Harness:
                 evidence=[_span_text(span) for span in investigation.checked][:5],
             )
         else:
-            suggestion.update(text=await self._default_answer(session, question), source="model")
+            text, matched = await self._default_answer(session, question)
+            suggestion.update(text=text, source="model")
+            if not matched:
+                # Still shown: the page notes it may be in another language.
+                suggestion["language_mismatch"] = True
 
         def apply(s: dict[str, Any]) -> None:
             if s.get("last_question") == question:
@@ -1165,7 +1170,12 @@ class Harness:
 
         self._update(session_id, apply)
 
-    async def _default_answer(self, session: dict[str, Any], question: str) -> str:
+    async def _default_answer(self, session: dict[str, Any], question: str) -> tuple[str, bool]:
+        """A default answer in the goal's language, and whether the reply's script matches it.
+
+        A reply in another script is asked for once more; a second miss is
+        returned as it is, for the page to show with a note.
+        """
         from ouroboros.config.loader import get_llm_model_for_role
         from ouroboros.providers.base import CompletionConfig, Message, MessageRole
         from ouroboros.providers.factory import create_llm_adapter
@@ -1185,24 +1195,35 @@ class Harness:
                 transcript.append(f"Q: {message.get('text')}")
             elif message.get("kind") == "text" and message.get("role") == "user":
                 transcript.append(f"A: {message.get('text')}")
+        language = goal_language(str(session.get("goal") or ""))
+        name = LANGUAGE_NAMES[language]
         prompt = (
             f"Goal: {session.get('goal')}\n\nInterview so far:\n"
             + "\n".join(transcript[-12:])
             + f"\n\nOpen question: {question}\n\n"
             "Draft the answer a pragmatic requester would most likely give: one to three "
-            "sentences, concrete, the conventional default when unsure. Reply with the answer only."
+            "short sentences, concrete, the conventional default when unsure. "
+            f"Write the answer in {name} only. Reply with the answer only."
         )
-        result = await adapter.complete(
-            [Message(role=MessageRole.USER, content=prompt)],
-            CompletionConfig(model=str(model), max_tokens=400),
-        )
-        if result.is_err:
-            # The Interview stage's model, from Agents & models.
-            found = await asyncio.to_thread(model_refusal.refusal, backend, result.error, model)
-            if found is not None:
-                raise model_refusal.ModelRejected(*found)
-            raise RuntimeError(str(result.error))
-        return result.value.content.strip()
+        retry = f"{prompt}\n\nThe previous draft was not in {name}. Write it again in {name} only."
+        text = ""
+        for attempt in (prompt, retry):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content=attempt)],
+                CompletionConfig(model=str(model), max_tokens=400),
+            )
+            if result.is_err:
+                # The Interview stage's model, from Agents & models.
+                found = await asyncio.to_thread(model_refusal.refusal, backend, result.error, model)
+                if found is not None:
+                    raise model_refusal.ModelRejected(*found)
+                raise RuntimeError(str(result.error))
+            text = plain_answer(result.value.content)
+            if in_language(text, language):
+                return text, True
+        if not text:
+            raise RuntimeError("The agent returned an empty answer.")
+        return text, False
 
     # ask -----------------------------------------------------------------
 

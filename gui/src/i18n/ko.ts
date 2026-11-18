@@ -564,6 +564,7 @@ const ko: Catalog = {
   "chat.suggest.edit": "수정 후 보내기",
   "chat.suggest.send": "이대로 보내기",
   "chat.suggest.failed": "이번에는 제안하지 못했어요",
+  "chat.suggest.otherLanguage": "이 답변은 다른 언어로 작성됐을 수 있어요.",
   "chat.seed.title": "Seed",
   "chat.seed.criteria": "인수 기준({count})",
   "chat.seed.constraints": "제약 조건",

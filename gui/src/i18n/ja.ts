@@ -564,6 +564,7 @@ const ja: Catalog = {
   "chat.suggest.edit": "編集してから送る",
   "chat.suggest.send": "このまま送る",
   "chat.suggest.failed": "今回は提案できませんでした",
+  "chat.suggest.otherLanguage": "この回答は別の言語で書かれている可能性があります。",
   "chat.seed.title": "Seed",
   "chat.seed.criteria": "受け入れ基準（{count}）",
   "chat.seed.constraints": "制約",
