@@ -94,6 +94,15 @@ REQUESTER_KEY_SUFFIX = ".requester"
 # settles its section but reaches the worker only as ``Seed.repo_facts``.
 REPO_FACT_KEY_INFIX = ".repo_fact."
 
+# Key infix of an entry written for a question the investigator did not find:
+# ``<facet key>.investigated.<round>``, one per question, so two questions'
+# answers for one facet neither reuse nor contradict each other.
+INVESTIGATED_KEY_INFIX = ".investigated."
+# The interview round a per-round key names (``.repo_fact.<n>``, ``.investigated.<n>``).
+_ROUND_IN_KEY = re.compile(
+    rf"(?:{re.escape(REPO_FACT_KEY_INFIX)}|{re.escape(INVESTIGATED_KEY_INFIX)})(\d+)(?:\.|$)"
+)
+
 # Fixed value of the ledger entry ``auto/investigator.py`` writes for a question
 # about the current code that the code does not settle. It keeps the entry
 # active and states that fact without guessing; it decides nothing.
@@ -341,6 +350,12 @@ class LedgerEntry:
         return cls(**data)
 
 
+def _key_round(key: str) -> int:
+    """The interview round a per-round key names, or 0 for any other key."""
+    match = _ROUND_IN_KEY.search(key)
+    return int(match.group(1)) if match else 0
+
+
 class ConflictResolution(StrEnum):
     """Outcome of resolving a same-key ledger contradiction."""
 
@@ -577,7 +592,9 @@ class SeedDraftLedger:
         separately). ``WEAK`` / ``CONFLICTING`` / ``BLOCKED`` / ``MISSING``
         entries are omitted because they are superseded or unresolved, and so is
         an entry holding :data:`NOT_SETTLED_VALUE`, which records that the code
-        does not settle a question and decides nothing.
+        does not settle a question and decides nothing. The list is oldest
+        first: entries keyed by interview round come after the others, in round
+        order, so the most recent answer is last.
 
         The answer refiner consumes this snapshot to stay CONSISTENT with prior
         rounds instead of re-deciding the same facet differently every round —
@@ -597,7 +614,8 @@ class SeedDraftLedger:
                     and entry.value != NOT_SETTLED_VALUE
                 ):
                     decided[(name, entry.key)] = entry.value
-        return [(section, key, value) for (section, key), value in decided.items()]
+        ordered = sorted(decided.items(), key=lambda item: _key_round(item[0][1]))
+        return [(section, key, value) for (section, key), value in ordered]
 
     def open_gaps(self) -> list[str]:
         """Return required sections that are not Seed-ready."""

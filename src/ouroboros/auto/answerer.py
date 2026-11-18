@@ -8,6 +8,7 @@ from enum import StrEnum
 import re
 from typing import TYPE_CHECKING
 
+from ouroboros.auto.answer_text import answer_language
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 
 if TYPE_CHECKING:
@@ -117,35 +118,13 @@ class AutoAnswer:
         return f"[from-auto][{self.source.value}] {self.text}"
 
 
-# Scripts that name the user's language without a model, checked in order.
-_LANGUAGE_SCRIPTS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("ko", re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")),
-    ("ja", re.compile(r"[\u3040-\u30ff]")),
-    ("zh", re.compile(r"[\u4e00-\u9fff]")),
-)
-
-
-def answer_language(text: str) -> str:
-    """Return ``"ko"``, ``"ja"``, ``"zh"`` or ``"en"``: the language of ``text`` by script.
-
-    It picks the language of a fixed sentence auto writes without a model (the
-    non-goal default, the investigator's not-settled reply); it never routes a
-    question. A model-written answer follows the user's language through its
-    prompt instead. A Latin-script language other than English has no script
-    signal and gets English.
-    """
-    for language, pattern in _LANGUAGE_SCRIPTS:
-        if pattern.search(text):
-            return language
-    return "en"
-
-
 # The non-goal default: scope ends where the goal ends. ``{goal}`` is the goal.
 _NON_GOAL_TEMPLATES: Mapping[str, str] = {
     "en": "Anything the goal “{goal}” does not ask for is a non-goal unless explicitly requested.",
     "ko": "목표(“{goal}”)에 없는 작업은 명시적으로 요청하지 않는 한 모두 비목표입니다.",
     "ja": "目標「{goal}」にない作業は、明示的に求められない限りすべて対象外です。",
     "zh": "目标“{goal}”之外的工作，除非明确要求，均为非目标。",
+    "ru": "Всё, чего цель «{goal}» не требует, не входит в задачу, если об этом не попросят явно.",
 }
 # Longer goals are quoted up to this many characters, ending in an ellipsis.
 _GOAL_EXCERPT_CHARS = 200
@@ -386,11 +365,11 @@ class AutoAnswerer:
                 entry = replace(entry, question=asked)
             ledger.add_entry(section, entry)
 
-    def _non_goal_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:
+    def _non_goal_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:  # noqa: ARG002
         # Bounded by the goal itself, in the user's language. A fixed list of
         # exclusions would name things the goal never mentioned.
         goal = _goal_excerpt(ledger)
-        template = _NON_GOAL_TEMPLATES[answer_language(f"{question}\n{goal}")]
+        template = _NON_GOAL_TEMPLATES[answer_language(goal)]
         value = template.format(goal=goal)
         entry = LedgerEntry(
             key="non_goals.mvp_scope",

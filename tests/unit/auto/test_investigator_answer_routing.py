@@ -141,8 +141,7 @@ class _FakeInterviewLLM:
     """Deterministic stand-in for the interview LLM behind ``LLMAnswerRefiner``.
 
     It writes one concrete default per call. Like a model that follows its
-    instructions, it writes Korean for a Korean question only when the system
-    prompt carries the language rule.
+    instructions, it writes Korean only when the system prompt names Korean.
     """
 
     def __init__(self) -> None:
@@ -151,16 +150,13 @@ class _FakeInterviewLLM:
     async def complete(self, messages, config):  # noqa: ARG002
         system, user = messages[0].content, messages[1].content
         question = re.search(r"Interview question: (.*)", user).group(1)  # type: ignore[union-attr]
-        section = re.search(r"Seed section to specify: (.*)", user).group(1)  # type: ignore[union-attr]
+        section = re.search(r"Answer only this part of it: (.*)\.", user).group(1)  # type: ignore[union-attr]
         self.calls.append((system, question, section))
         n = len(self.calls)
-        if REFINER_LANGUAGE_RULE in system and _HANGUL.search(question):
-            text = f"[{section}] 서로 다른 값이 두 개 미만이면 None을 반환하고 docstring에 적는다 (#{n})."
+        if REFINER_LANGUAGE_RULE.format(language="Korean") in system:
+            text = f"[{n}] 서로 다른 값이 두 개 미만이면 None을 반환하고 docstring에 적는다."
         else:
-            text = (
-                f"[{section}] Return None when fewer than two distinct values exist; "
-                f"document it in the docstring (#{n})."
-            )
+            text = f"[{n}] Return None when fewer than two distinct values exist."
         return Result.ok(CompletionResponse(content=text, model="fake", usage=UsageInfo(1, 1, 2)))
 
 
@@ -495,6 +491,7 @@ def test_refiner_prompt_asks_for_the_users_language_and_no_repo_facts() -> None:
     system = LLMAnswerRefiner._SYSTEM
 
     assert REFINER_LANGUAGE_RULE in system
+    assert "{language}" in REFINER_LANGUAGE_RULE
     assert REFINER_NO_REPO_FACTS_RULE in system
 
 

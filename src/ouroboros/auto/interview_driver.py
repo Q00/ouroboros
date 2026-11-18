@@ -1543,7 +1543,7 @@ class AutoInterviewDriver:
         )
 
         refined_updates: list[tuple[str, LedgerEntry]] = []
-        transcript_parts: list[str] = []
+        transcript_parts: dict[str, None] = {}  # in order, each text once
         refined_count = 0
         for (section, entry), concrete in zip(answer.ledger_updates, results, strict=True):
             # Rebuild the transcript from the FINAL value of every section —
@@ -1553,11 +1553,11 @@ class AutoInterviewDriver:
             # a ledger entry that is absent from the acknowledged transcript.
             if concrete:
                 refined_updates.append((section, replace(entry, value=concrete)))
-                transcript_parts.append(concrete)
+                transcript_parts[concrete] = None
                 refined_count += 1
             else:
                 refined_updates.append((section, entry))
-                transcript_parts.append(entry.value)
+                transcript_parts[entry.value] = None
         if not refined_count:
             return answer
         log.info(

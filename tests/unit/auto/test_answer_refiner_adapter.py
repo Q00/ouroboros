@@ -71,10 +71,10 @@ async def test_committed_contracts_are_injected_into_prompt() -> None:
     await refiner("build a todo CLI", "what list format?", "outputs", "generic", committed)
 
     text = _user_text(adapter)
-    # The model must SEE every prior commitment so it can preserve them verbatim.
+    # The model must SEE every earlier decision so it stays consistent with it.
     assert 'todo add "X" prints "Added #1: X"' in text
     assert "invalid id exits 1" in text
-    assert "committed" in text.lower()
+    assert "earlier answers in this interview" in text.lower()
 
 
 @pytest.mark.asyncio
@@ -85,8 +85,8 @@ async def test_no_committed_block_when_none_committed() -> None:
     await refiner("goal", "question", "constraints", "generic")
 
     text = _user_text(adapter)
-    # Round 1 (nothing decided yet) must not fabricate a commitments section.
-    assert "already committed" not in text.lower()
+    # Round 1 (nothing decided yet) must not fabricate an earlier-answers block.
+    assert "earlier answers" not in text.lower()
 
 
 @pytest.mark.asyncio
