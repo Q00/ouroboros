@@ -470,6 +470,8 @@ export interface Suggestion {
   /** Started by Ouroboros for a question the server marked as answerable from code. */
   auto?: boolean;
   repo_checked?: boolean;
+  /** The drafted answer's script is not the goal's language, even after one retry. */
+  language_mismatch?: boolean;
 }
 
 /** One per-dimension floor of the server's completion gate. */

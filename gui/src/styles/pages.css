@@ -2164,6 +2164,12 @@
   overflow-wrap: anywhere;
 }
 
+.suggestion-note {
+  padding: 6px 13px 0;
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+}
+
 .suggestion-evidence {
   display: grid;
   gap: 2px;

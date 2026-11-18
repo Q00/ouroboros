@@ -1264,6 +1264,7 @@ function Thread({ id }: { id: string }) {
                     <Chip tone={suggestion.source === "repo" ? "ok" : "muted"}>{suggestion.source === "repo" ? t("chat.suggest.fromRepo") : t("chat.suggest.fromModel")}</Chip>
                   </div>
                   <p className="suggestion-text">{suggestion.text}</p>
+                  {suggestion.language_mismatch ? <p className="suggestion-note">{t("chat.suggest.otherLanguage")}</p> : null}
                   {suggestion.evidence && suggestion.evidence.length > 0 ? (
                     <ul className="suggestion-evidence">
                       {suggestion.evidence.map((item, index) => (

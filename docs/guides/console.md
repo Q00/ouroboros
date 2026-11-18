@@ -61,6 +61,12 @@ and Spanish (side rail → language).
   sends a correction. After three answers in a row that nobody typed, the next
   question goes to you. Questions about what to build (goals, acceptance
   criteria, preferences) always do.
+- **A drafted default is in the goal's language.** When the repository doesn't
+  settle a question, *Suggest an answer* asks the Interview model for one to
+  three short sentences in the language of the chat's goal, read from its
+  script (Hangul Korean, kana Japanese, Han Chinese, Cyrillic Russian, else
+  English). A reply in another script is drafted once more, and a second miss
+  is shown with a note that it may be in a different language.
 - **Only installed agents can be picked.** The agent picker greys out agents
   whose CLI is not installed, and the server refuses them before a chat starts,
   with the command that installs them (the Connect page runs it).
@@ -199,7 +205,11 @@ Commit the rebuilt `static/` directory with any change to `gui/`; CI rebuilds
 it and fails when the two differ.
 
 - Strings live in `gui/src/i18n/{en,ko,zh,ja,es}.ts`; `en.ts` defines the keys
-  and the other catalogs are type-checked against it.
+  and the other catalogs are type-checked against it. A word that changes with
+  a count is a plural block, `{count, plural, one {# file} other {# files}}`,
+  chosen by `Intl.PluralRules` (format in `gui/src/i18n/message.ts`); Korean,
+  Japanese and Chinese write one form with a plain `{count}`. `bun test` in
+  `gui/` checks every catalog string renders.
 - Design tokens (color, type, motion) are in `gui/src/styles/tokens.css`. The
   page uses system fonts only and ships no web fonts or vendor logos.
 - Licenses of the bundled packages are in
