@@ -395,7 +395,10 @@ class Harness:
             if name not in ("host", "codex_mcp", "claude_mcp")
         ]
         llm = [
-            choice(name, bool(installed.get(name)) or name == "litellm")
+            {
+                **choice(name, bool(installed.get(name)) or name == "litellm"),
+                "default_model": _empty_model_default(name),
+            }
             for name in llm_backend_choices()
             if name not in ("ourocode", "dsh", "megacode")
         ]
@@ -1720,6 +1723,25 @@ def _default_model_hint(backend: str | None, model: object) -> dict[str, Any]:
         "model_backend": capability.name,
         "model_default": configured_default_model(capability.name),
     }
+
+
+def _empty_model_default(backend: str) -> str | None:
+    """What an Ask chat on ``backend`` with an empty model field runs on, when known.
+
+    Display only, resolved as ``_ask`` resolves it: the Interview role's model
+    for that backend. The ``default`` sentinel is named by the CLI's own
+    configured model (``configured_default_model``), else ``None``.
+    """
+    from ouroboros.backends.model_catalog import DEFAULT_MODEL_SENTINEL, configured_default_model
+    from ouroboros.config.loader import get_llm_model_for_role
+
+    try:
+        model = get_llm_model_for_role("interview", backend=backend)
+    except ValueError:
+        return None
+    if model == DEFAULT_MODEL_SENTINEL:
+        return configured_default_model(backend)
+    return model or None
 
 
 def _auto_outcome(status: str, cancelled: bool, handoff: str | None) -> str:

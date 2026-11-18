@@ -167,3 +167,42 @@ def test_the_new_chat_form_gets_codex_own_models_and_names(codex_home: Path) -> 
         assert codex["model_labels"]["gpt-6.2-astra"] == "GPT-6.2-Astra"
     claude = next(item for item in defaults["llm"] if item["id"] == "claude")
     assert claude["model_labels"] == {}
+
+
+def _ask_choice(backend: str) -> dict:
+    from ouroboros.gui import harness
+
+    return next(item for item in harness.Harness().defaults()["llm"] if item["id"] == backend)
+
+
+def test_an_empty_ask_model_names_the_agent_default_it_runs_on(codex_home: Path) -> None:
+    shutil.copy(_CODEX_CACHE, codex_home / "models_cache.json")
+    assert _ask_choice("codex")["default_model"] is None  # Codex names no model of its own yet
+
+    (codex_home / "config.toml").write_text('model = "gpt-6-sol"\n', encoding="utf-8")
+    codex = _ask_choice("codex")
+
+    assert codex["default_model"] == "gpt-6-sol"
+    # The server's list keeps the sentinel first; the page leaves it out where
+    # an empty field or "Follow the agent" already means it (core/modelChoices.ts).
+    assert codex["models"][0] == "default"
+
+
+def test_an_empty_ask_model_names_a_pinned_interview_model(
+    codex_home: Path, isolated_home: Path
+) -> None:
+    """With a pinned Interview model an empty Ask field runs on that, not the CLI's own."""
+    (codex_home / "config.toml").write_text('model = "gpt-6-sol"\n', encoding="utf-8")
+    config = isolated_home / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "models:\n  pin: true\nclarification:\n  default_model: gpt-6.1-sol\n", encoding="utf-8"
+    )
+
+    assert _ask_choice("codex")["default_model"] == "gpt-6.1-sol"
+
+
+def test_an_unknown_backend_has_no_empty_model_default() -> None:
+    from ouroboros.gui import harness
+
+    assert harness._empty_model_default("nonsense") is None

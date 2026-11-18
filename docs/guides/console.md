@@ -133,9 +133,13 @@ and Spanish (side rail → language).
 - **Codex suggestions come from Codex.** The Codex model list in the Ask model
   field and on **Agents & models** is the list Codex's own picker shows. It is
   read from `models_cache.json` in the Codex home (`$CODEX_HOME`, else
-  `~/.codex`) and comes after *Agent's own default*. When that file is missing
-  or unreadable, the console uses its built-in list. Codex's list is what
-  Codex offers, not what every account can use, and both places say so.
+  `~/.codex`). When that file is missing or unreadable, the console uses its
+  built-in list. Codex's list is what Codex offers, not what every account can
+  use, and both places say so.
+- **The agent's own default is offered once.** On **Agents & models** it is
+  *Follow the agent*, with the model it currently resolves to. A saved
+  `default` also shows as that option. In the Ask model field it is the empty
+  field, and the hint names the model that runs when the console knows it.
 
 ## Background service and the shared MCP server
 
@@ -176,6 +180,7 @@ ships and `ouroboros gui` serves:
 cd gui
 bun install            # or npm install
 bun run build          # type-checks, then writes ../src/ouroboros/gui/static
+bun run test           # the page's pure rules (src/**/*.test.ts)
 OUROBOROS_GUI_TARGET=http://127.0.0.1:10300 bun run dev   # live-reload against a running console
 bun run notices        # regenerate public/THIRD_PARTY_NOTICES.txt after changing dependencies
 ```

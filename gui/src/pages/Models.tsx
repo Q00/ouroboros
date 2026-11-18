@@ -6,6 +6,7 @@ import { useT } from "../i18n";
 import { useAction } from "../core/action";
 import { get, post } from "../core/api";
 import { backendName, shortPath } from "../core/format";
+import { listedModels, needsOwnOption, stagePickerValue } from "../core/modelChoices";
 import { invalidate, useResource } from "../core/resource";
 import { toast } from "../core/toast";
 import type { RoutePreset, SettingsResult, SettingsView, StageView } from "../core/types";
@@ -23,7 +24,6 @@ import { SETTLE } from "../core/motion";
 const INHERIT = "__inherit__";
 const FOLLOW = "__follow__";
 const CUSTOM = "__custom__";
-const AGENT_DEFAULT = "default";
 
 interface StageForm {
   runtime: string;
@@ -111,14 +111,16 @@ function StageCard({ view, stage, index, form, onChange }: StageCardProps) {
     })),
   ];
 
-  const known = new Set(models);
+  // "Follow the agent" is the agent's own default, so the "default" sentinel is not listed again.
+  const listed = listedModels(models);
   const modelOptions: PickerOption[] = [
     { value: FOLLOW, label: t("models.followAgent"), hint: stage.default_hint ? t("models.followHint", { model: stage.default_hint }) : undefined },
-    ...models.map((model) => ({ value: model, label: model === AGENT_DEFAULT ? t("models.agentDefault") : model, hint: labels[model] })),
+    ...listed.map((model) => ({ value: model, label: model, hint: labels[model] })),
   ];
-  if (state.model && !known.has(state.model) && !state.custom) modelOptions.push({ value: state.model, label: state.model });
+  if (needsOwnOption(state.model, state.custom, models)) modelOptions.push({ value: state.model, label: state.model });
   modelOptions.push({ value: CUSTOM, label: t("models.custom") });
-  const pickerValue = state.custom ? CUSTOM : state.model || FOLLOW;
+  // A saved "default" shows as "Follow the agent", which is what it means.
+  const pickerValue = stagePickerValue(state.model, state.custom, FOLLOW, CUSTOM);
 
   return (
     <motion.section
@@ -163,7 +165,7 @@ function StageCard({ view, stage, index, form, onChange }: StageCardProps) {
                   id={`${ids}-custom`}
                   className="input input-mono"
                   value={state.model}
-                  placeholder={models.find((model) => model !== AGENT_DEFAULT) ?? "model-id"}
+                  placeholder={listed[0] ?? "model-id"}
                   spellCheck={false}
                   autoComplete="off"
                   onChange={(event) => onChange({ ...state, model: event.target.value, touched: true })}

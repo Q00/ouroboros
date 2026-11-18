@@ -522,6 +522,8 @@ export interface BackendChoice {
   models: string[];
   /** Display names the agent gives some of `models` (Codex's own list). */
   model_labels?: Record<string, string>;
+  /** Ask backends: what an empty model field runs on, when the console knows. */
+  default_model?: string | null;
 }
 
 export interface ChatDefaults {

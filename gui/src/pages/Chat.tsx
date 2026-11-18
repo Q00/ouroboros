@@ -34,6 +34,7 @@ import { useAction } from "../core/action";
 import { ApiFailure, del, get, post } from "../core/api";
 import { backendName, shortPath, timeAgo } from "../core/format";
 import { adoptRunningJobs } from "../core/jobs";
+import { askModelHint, listedModels } from "../core/modelChoices";
 import { invalidate, useResource } from "../core/resource";
 import { href, navigate } from "../core/router";
 import { useSnapshotStream } from "../core/stream";
@@ -248,10 +249,12 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
 
   const chosen = pool.find((item) => item.id === backend);
   const labels = chosen?.model_labels ?? {};
+  // An empty field is the default, so the "default" sentinel is not suggested.
   const suggestions = [
-    ...(chosen?.models ?? []).filter((item) => item !== "default"),
+    ...listedModels(chosen?.models ?? []),
     ...(backend === "litellm" ? (defaults?.providers ?? []).map((item) => item.model_format) : []),
   ];
+  const modelHint = askModelHint(backend, chosen?.default_model);
   const followed = mode === "ask" ? undefined : defaults?.default_runtime;
 
   function submit(event: FormEvent) {
@@ -362,7 +365,7 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
             htmlFor={`${ids}-model`}
             hint={
               <>
-                {backend === "litellm" ? t("chat.new.model.litellm") : t("chat.new.model.hint")}
+                {modelHint.key === "chat.new.model.hintCurrent" ? t(modelHint.key, { model: modelHint.model }) : t(modelHint.key)}
                 {suggestions.length > 0 ? ` ${t("models.availability")}` : null}
               </>
             }
