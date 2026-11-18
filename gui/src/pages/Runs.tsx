@@ -134,7 +134,7 @@ function CardTile({ card }: { card: BoardCard }) {
         {card.provider ? <span>{backendName(card.provider)}</span> : null}
         {card.model ? <span>{card.model}</span> : null}
         {card.tool ? <span>{t("runs.tool", { tool: card.tool })}</span> : null}
-        {card.tokens ? <span>{t("runs.tokens", { count: compactNumber(card.tokens, locale) })}</span> : null}
+        {card.tokens ? <span>{t("runs.tokens", { count: card.tokens, tokens: compactNumber(card.tokens, locale) })}</span> : null}
       </p>
     </motion.li>
   );
@@ -180,7 +180,7 @@ function BoardView({ runId }: { runId: string }) {
               <span className="board-count">{t("runs.count", { done: counts[2], total })}</span>
               {board.meta.phase ? <Chip>{phaseLabel(t, board.meta.phase)}</Chip> : null}
               {board.meta.provider ? <Chip tone="info">{backendName(board.meta.provider)}</Chip> : null}
-              {board.meta.total_tokens ? <span className="board-tokens">{t("runs.tokens", { count: compactNumber(board.meta.total_tokens, locale) })}</span> : null}
+              {board.meta.total_tokens ? <span className="board-tokens">{t("runs.tokens", { count: board.meta.total_tokens, tokens: compactNumber(board.meta.total_tokens, locale) })}</span> : null}
             </div>
             <Progress done={counts[2]} total={total} failed={counts[3]} label={t("runs.progress")} />
             <AnimatePresence mode="wait">

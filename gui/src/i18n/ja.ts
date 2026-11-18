@@ -457,7 +457,7 @@ const ja: Catalog = {
   "runs.live": "ライブ",
   "runs.connecting": "接続中…",
   "runs.count": "{total} 件中 {done} 件完了",
-  "runs.tokens": "{count} トークン",
+  "runs.tokens": "{tokens} トークン",
   "runs.tool": "{tool} を使用中",
   "runs.columnEmpty": "項目なし",
   "run.status.running": "実行中",

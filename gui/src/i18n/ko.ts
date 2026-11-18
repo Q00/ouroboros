@@ -457,7 +457,7 @@ const ko: Catalog = {
   "runs.live": "실시간",
   "runs.connecting": "연결하는 중…",
   "runs.count": "{total}개 중 {done}개 완료",
-  "runs.tokens": "{count} 토큰",
+  "runs.tokens": "{tokens} 토큰",
   "runs.tool": "{tool} 사용 중",
   "runs.columnEmpty": "항목 없음",
   "run.status.running": "실행 중",

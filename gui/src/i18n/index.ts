@@ -5,12 +5,13 @@ import en from "./en";
 import es from "./es";
 import ja from "./ja";
 import ko from "./ko";
+import { formatMessage, type Vars } from "./message";
 import zh from "./zh";
 
+export type { Vars } from "./message";
 export type Key = keyof typeof en;
 export type Catalog = Record<Key, string>;
 export type Lang = "en" | "ko" | "zh" | "ja" | "es";
-export type Vars = Record<string, string | number>;
 
 const CATALOGS: Record<Lang, Catalog> = { en, ko, zh, ja, es };
 
@@ -50,17 +51,13 @@ export function setLang(next: Lang): void {
   lang.set(next);
 }
 
-function fill(template: string, vars?: Vars): string {
-  if (!vars) return template;
-  return template.replace(/\{(\w+)\}/g, (whole, name: string) =>
-    name in vars ? String(vars[name]) : whole,
-  );
-}
-
 export interface Translator {
   lang: Lang;
   locale: string;
-  /** A catalog string. */
+  /**
+   * A catalog string. Plural blocks pick their word from a number in `vars`
+   * by the language's plural rules (see ./message.ts).
+   */
   t: (key: Key, vars?: Vars) => string;
   /**
    * A string for an id the server sent (a status code, a tool id). Falls back
@@ -69,19 +66,25 @@ export interface Translator {
   tx: (key: string, fallback: string, vars?: Vars) => string;
 }
 
+/** The translator for `current`, outside React (the page uses `useT`). */
+export function translator(current: Lang): Translator {
+  const catalog = CATALOGS[current] as Record<string, string>;
+  const locale = LANGUAGES.find((item) => item.id === current)?.locale ?? "en";
+  const english = en as Record<string, string>;
+  // Text from outside this language's catalog is English, so it takes English plural rules.
+  const lookup = (key: string, fallback: string, vars?: Vars): string =>
+    Object.hasOwn(catalog, key)
+      ? formatMessage(catalog[key], vars, locale)
+      : formatMessage(Object.hasOwn(english, key) ? english[key] : fallback, vars, "en");
+  return {
+    lang: current,
+    locale,
+    t: (key, vars) => lookup(key, key, vars),
+    tx: lookup,
+  };
+}
+
 export function useT(): Translator {
   const current = useStore(lang);
-  return useMemo(() => {
-    const catalog = CATALOGS[current];
-    const locale = LANGUAGES.find((item) => item.id === current)?.locale ?? "en";
-    return {
-      lang: current,
-      locale,
-      t: (key, vars) => fill(catalog[key] ?? en[key] ?? key, vars),
-      tx: (key, fallback, vars) => {
-        const found = (catalog as Record<string, string>)[key] ?? (en as Record<string, string>)[key];
-        return fill(found ?? fallback, vars);
-      },
-    };
-  }, [current]);
+  return useMemo(() => translator(current), [current]);
 }

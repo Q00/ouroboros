@@ -457,7 +457,7 @@ const zh: Catalog = {
   "runs.live": "实时",
   "runs.connecting": "正在连接…",
   "runs.count": "已完成 {done} / {total}",
-  "runs.tokens": "{count} tokens",
+  "runs.tokens": "{tokens} tokens",
   "runs.tool": "正在使用 {tool}",
   "runs.columnEmpty": "暂无内容",
   "run.status.running": "运行中",

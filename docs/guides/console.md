@@ -199,7 +199,11 @@ Commit the rebuilt `static/` directory with any change to `gui/`; CI rebuilds
 it and fails when the two differ.
 
 - Strings live in `gui/src/i18n/{en,ko,zh,ja,es}.ts`; `en.ts` defines the keys
-  and the other catalogs are type-checked against it.
+  and the other catalogs are type-checked against it. A word that changes with
+  a count is a plural block, `{count, plural, one {# file} other {# files}}`,
+  chosen by `Intl.PluralRules` (format in `gui/src/i18n/message.ts`); Korean,
+  Japanese and Chinese write one form with a plain `{count}`. `bun test` in
+  `gui/` checks every catalog string renders.
 - Design tokens (color, type, motion) are in `gui/src/styles/tokens.css`. The
   page uses system fonts only and ships no web fonts or vendor logos.
 - Licenses of the bundled packages are in
