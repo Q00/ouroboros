@@ -634,22 +634,59 @@ def test_git_output_is_bounded(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "failure",
+    ("failure", "stage"),
     [
-        FileNotFoundError("git"),
-        subprocess.TimeoutExpired(["git", "--version"], timeout=5),
+        (FileNotFoundError(2, "git"), "git_process"),
+        (subprocess.TimeoutExpired(["git", "--version"], timeout=5), "git_wait"),
     ],
     ids=["missing", "timeout"],
 )
 def test_git_operational_failure_cannot_become_a_fallback_identity(
     tmp_path: Path,
     failure: BaseException,
+    stage: str,
 ) -> None:
     with (
         patch("ouroboros.core.project_identity.subprocess.run", side_effect=failure),
-        pytest.raises(ProjectIdentityUnavailableError, match="unavailable"),
+        pytest.raises(ProjectIdentityUnavailableError, match="unavailable") as raised,
     ):
         resolve_project_identity(tmp_path)
+
+    diagnostics = raised.value.git_query
+    assert diagnostics is not None
+    assert diagnostics["command"] == ["git", "--version"]
+    assert diagnostics["stage"] == stage
+    assert diagnostics["exception_type"] == type(failure).__name__
+    assert diagnostics["errno"] == getattr(failure, "errno", None)
+    assert diagnostics["timeout_seconds"] == 5.0
+    assert raised.value.__cause__ is failure
+
+
+def test_git_output_open_failure_records_command_without_starting_git(tmp_path: Path) -> None:
+    failure = PermissionError(13, "tmp output denied", str(tmp_path / "private-output"))
+    with (
+        patch.object(project_identity.tempfile, "TemporaryFile", side_effect=failure),
+        patch.object(project_identity.subprocess, "run") as run,
+        pytest.raises(ProjectIdentityUnavailableError, match="unavailable") as raised,
+    ):
+        _run_git(tmp_path, f"--git-dir={tmp_path / '.git'}", "rev-parse", "--show-toplevel")
+
+    run.assert_not_called()
+    diagnostics = raised.value.git_query
+    assert diagnostics is not None
+    assert diagnostics["command"] == [
+        "git",
+        "-C",
+        "<path>",
+        "--git-dir=<path>",
+        "rev-parse",
+        "--show-toplevel",
+    ]
+    assert diagnostics["stage"] == "temporary_output_open"
+    assert diagnostics["exception_type"] == "PermissionError"
+    assert diagnostics["errno"] == 13
+    assert str(tmp_path) not in str(diagnostics)
+    assert raised.value.__cause__ is failure
 
 
 @pytest.mark.parametrize(
@@ -886,9 +923,15 @@ def test_repository_query_nonzero_after_git_probe_is_unavailable(tmp_path: Path)
 
     with (
         patch("ouroboros.core.project_identity.subprocess.run", side_effect=fake_run),
-        pytest.raises(ProjectIdentityUnavailableError, match="topology"),
+        pytest.raises(ProjectIdentityUnavailableError, match="topology") as raised,
     ):
         resolve_project_identity(repo)
+
+    diagnostics = raised.value.git_query
+    assert diagnostics is not None
+    assert diagnostics["stage"] == "git_exit"
+    assert diagnostics["return_code"] == 128
+    assert diagnostics["exception_type"] is None
 
 
 def test_linked_identity_does_not_drift_when_git_disappears_from_path(
