@@ -99,7 +99,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource, answer_language
+from ouroboros.auto.answer_text import LANGUAGE_NAMES, answer_language, answer_problems
+from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource
 from ouroboros.auto.evidence_check import EvidenceSpan, check_span
 from ouroboros.auto.investigation_workspace import (
     create_isolated_copy,
@@ -107,6 +108,7 @@ from ouroboros.auto.investigation_workspace import (
     workspace_state,
 )
 from ouroboros.auto.ledger import (
+    INVESTIGATED_KEY_INFIX,
     NOT_SETTLED_VALUE,
     REPO_FACT_KEY_INFIX,
     LedgerEntry,
@@ -162,35 +164,42 @@ _LOG_TEXT_LIMIT = 200
 # The entry is kept as its open question only (``ledger_seed.ledger_open_questions``),
 # which no execution prompt renders.
 NOT_SETTLED_REPLY = "The repository code does not settle this question."
-# Fixed reply text in the language of the goal and question (``answer_language``):
-# the not-settled sentence for a ``current_behavior`` question, and the headers
-# above checked spans.
+# Fixed reply text in the language of the goal (``answer_language``): the
+# not-settled sentence for a ``current_behavior`` question, the headers above
+# checked spans, and the sentence that stands in for a found answer the
+# investigator wrote in another language.
 _REPLY_TEXT: dict[str, dict[str, str]] = {
     "en": {
         "not_settled": NOT_SETTLED_REPLY,
         "code_shows": "What the code shows:",
         "evidence": "Evidence from the repository:",
+        "found": "The repository settles this; the cited lines show how.",
     },
     "ko": {
         "not_settled": "저장소 코드로는 이 질문이 확정되지 않습니다.",
         "code_shows": "코드에서 확인한 내용:",
         "evidence": "저장소 근거:",
+        "found": "저장소 코드로 확정됩니다. 인용한 줄에서 확인할 수 있습니다.",
     },
     "ja": {
         "not_settled": "リポジトリのコードではこの質問は確定しません。",
         "code_shows": "コードから分かること:",
         "evidence": "リポジトリの根拠:",
+        "found": "リポジトリのコードで確定します。引用した行で確認できます。",
     },
     "zh": {
         "not_settled": "仓库代码无法确定这个问题。",
         "code_shows": "代码显示：",
         "evidence": "仓库中的证据：",
+        "found": "仓库代码可以确定这一点，引用的代码行说明了原因。",
+    },
+    "ru": {
+        "not_settled": "Код репозитория не отвечает на этот вопрос.",
+        "code_shows": "Что показывает код:",
+        "evidence": "Подтверждение из репозитория:",
+        "found": "Код репозитория отвечает на этот вопрос; это видно в процитированных строках.",
     },
 }
-# Key infix of an entry written for a question the investigator did not find:
-# ``<facet key>.investigated.<round>``, one per question, so two questions'
-# answers for one facet neither reuse nor contradict each other.
-INVESTIGATED_KEY_INFIX = ".investigated."
 
 INVESTIGATOR_SYSTEM_PROMPT = (
     "You answer one interview question about a software task by reading the "
@@ -212,8 +221,8 @@ INVESTIGATOR_SYSTEM_PROMPT = (
     '"status": "found" | "not_found", "answer": string, "evidence": '
     '[{"path": string, "start_line": integer, "end_line": integer, "quote": string}]}\n\n'
     'Use "found" only for a current_behavior question the code itself settles. '
-    "Then write the answer in one to four sentences, in the language of the "
-    "question, describing what the code "
+    "Then write the answer in one to four sentences, in the language the "
+    "prompt names, describing what the code "
     "does now, and cite every fact it rests on: the path relative to the "
     "repository root, the 1-based first and last line, and a quote copied "
     "exactly from those lines.\n"
@@ -378,11 +387,13 @@ def _unalias(span: EvidenceSpan | None, alias_root: Path) -> EvidenceSpan | None
 
 
 def build_prompt(goal: str, question: str, prior: list[tuple[str, str]]) -> str:
+    """The investigator's prompt; the answer language is the goal's, named outright."""
     parts = ["Goal:", goal.strip(), "", "Interview question:", question.strip()]
     if prior:
         parts += ["", "Answers already found in this repository earlier in this interview:"]
         parts += [f"- Q: {q}\n  A: {a}" for q, a in prior[-_PRIOR_FINDINGS_IN_PROMPT:]]
-    parts += ["", "Reply with the JSON object only."]
+    language = LANGUAGE_NAMES[answer_language(goal)]
+    parts += ["", f"Write the answer in {language}.", "Reply with the JSON object only."]
     return "\n".join(parts)
 
 
@@ -640,7 +651,8 @@ def found_answer(
     declares provenance ``repo_fact`` so Seed extraction withholds it. Each key
     is ``<facet>.repo_fact.<round>``, so two found answers for one facet in
     different rounds are separate facts instead of a same-key tie. The evidence
-    header is in ``language`` (``answer_language`` of the goal and question).
+    header is in ``language`` (``answer_language`` of the goal); an answer the
+    investigator wrote in another language is replaced by a sentence in it.
     """
     spans = [f"{span.label}: {' '.join(span.quote.split())}" for span in found.checked]
     updates = [
@@ -659,8 +671,15 @@ def found_answer(
         )
         for section, entry in draft.ledger_updates
     ]
-    header = _reply_text(language)["evidence"]
-    text = "\n".join([found.answer, "", header, *_evidence_lines(found.checked)])
+    texts = _reply_text(language)
+    # A found answer in another language than the goal's is not shown; the
+    # checked lines still are, under a sentence in the goal's language.
+    shown = (
+        texts["found"]
+        if answer_problems(found.answer, language, script_only=True)
+        else found.answer
+    )
+    text = "\n".join([shown, "", texts["evidence"], *_evidence_lines(found.checked)])
     return AutoAnswer(
         text, AutoAnswerSource.REPO_FACT, 0.9, updates, declared_provenance="repo_fact"
     )
@@ -844,7 +863,7 @@ async def settle(
     if result is None:
         answer = await driver._refine_answer(answer, question, state, ledger)
         return await ask_requester(driver, answer, question, turn, state, round_number)
-    language = answer_language(f"{question}\n{state.goal}")
+    language = answer_language(state.goal)
     path = answer_path(result)
     if path == "repo_fact":
         answer = found_answer(answer, result, question, round_number, language=language)

@@ -57,24 +57,28 @@ _CHECK_CLAUSES: dict[str, dict[str, str]] = {
         "ko": "성공하면 종료 코드 0으로, 실패하면 0이 아닌 종료 코드로 끝난다",
         "ja": "成功時は終了コード 0、失敗時は 0 以外の終了コードで終わる",
         "zh": "成功时以退出码 0 结束，失败时以非零退出码结束",
+        "ru": "при успехе команда завершается с кодом 0, при ошибке с ненулевым кодом",
     },
     "test_pass": {
         "en": "the test suite runs and all tests pass",
         "ko": "테스트를 실행하면 모두 통과한다",
         "ja": "テストスイートを実行するとすべて合格する",
         "zh": "运行测试套件时所有测试都通过",
+        "ru": "набор тестов запускается, и все тесты проходят",
     },
     "lint_clean": {
         "en": "the linter reports zero errors",
         "ko": "린터가 오류를 하나도 보고하지 않는다",
         "ja": "リンターのエラーが 0 件である",
         "zh": "代码检查工具报告零个错误",
+        "ru": "линтер не сообщает ни об одной ошибке",
     },
     "type_check_clean": {
         "en": "the type checker reports zero errors",
         "ko": "타입 검사기가 오류를 하나도 보고하지 않는다",
         "ja": "型チェッカーのエラーが 0 件である",
         "zh": "类型检查器报告零个错误",
+        "ru": "проверка типов не сообщает ни об одной ошибке",
     },
     "observable_behavior": {
         "en": (
@@ -84,13 +88,14 @@ _CHECK_CLAUSES: dict[str, dict[str, str]] = {
         "ko": "명령 출력, 작성된 파일이나 산출물, API 응답, 테스트 결과로 확인한다",
         "ja": "コマンド出力、書き出されたファイルや成果物、API 応答、テスト結果で確認する",
         "zh": "通过命令输出、写入的文件或产物、API 响应或测试结果来检查",
+        "ru": "проверяется по выводу команды, записанному файлу, ответу API или результату теста",
     },
 }
 
 
 def _with_check(criterion: str, code: str) -> str:
     """``criterion`` verbatim, then how it is checked, in its own language."""
-    from ouroboros.auto.answerer import answer_language
+    from ouroboros.auto.answer_text import answer_language
 
     text = criterion.strip()
     clause = _CHECK_CLAUSES[code][answer_language(text)]
