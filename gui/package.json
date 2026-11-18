@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "test": "bun test src",
     "notices": "node scripts/notices.mjs"
   },
   "dependencies": {

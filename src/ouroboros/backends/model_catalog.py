@@ -24,7 +24,9 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import stat
 import subprocess
 from typing import Literal
 
@@ -500,10 +502,102 @@ def configured_default_model(backend: str) -> str | None:
     return None
 
 
+# Codex keeps the model list its picker shows in ``<CODEX_HOME>/models_cache.json``.
+_CODEX_MODELS_CACHE = "models_cache.json"
+_MAX_MODELS_CACHE_BYTES = 4 * 1024 * 1024
+_MAX_MODELS_CACHE_ENTRIES = 1000
+_MAX_LISTED_MODELS = 100
+_MAX_DISPLAY_NAME_CHARS = 120
+# The ids the Codex adapter accepts for ``--model``, at most 128 characters.
+_LISTED_MODEL_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:@-]{0,127}$")
+
+
+@dataclass(frozen=True, slots=True)
+class ListedModel:
+    """One model a CLI offers in its own model picker."""
+
+    slug: str
+    display_name: str | None = None
+
+
+# (path, mtime_ns, size) of the cache file last read, and what it listed: the
+# console asks for suggestions on every page refresh, the file rarely changes.
+_codex_listed_memo: tuple[tuple[str, int, int], tuple[ListedModel, ...] | None] | None = None
+
+
+def codex_listed_models(codex_home: str | Path | None = None) -> tuple[ListedModel, ...] | None:
+    """The models Codex offers in its own picker, read from its model cache.
+
+    Codex CLI saves the model list it fetches to ``models_cache.json`` in the
+    Codex home (``resolve_codex_home``): an object whose ``models`` array holds
+    one record per model with ``slug``, ``display_name`` and ``visibility``.
+    The records whose ``visibility`` is ``"list"`` are what its picker shows;
+    they are returned in file order, without duplicates, at most 100.
+
+    The list says what Codex offers, not what a given account may use.
+    Returns ``None``, so callers keep the static catalog, when the file is
+    missing, not a regular file, larger than 4 MiB, not UTF-8 JSON of that
+    shape, or lists no usable model. A record whose ``slug`` is not a model id
+    the Codex adapter accepts is skipped. Never raises, and reads the file
+    again only when its size or modification time changes.
+    """
+    global _codex_listed_memo
+    try:
+        path = resolve_codex_home(codex_home) / _CODEX_MODELS_CACHE
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_MODELS_CACHE_BYTES:
+            return None
+        key = (str(path), info.st_mtime_ns, info.st_size)
+        memo = _codex_listed_memo
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_MODELS_CACHE_BYTES + 1)
+        if len(raw) > _MAX_MODELS_CACHE_BYTES:
+            return None
+        listed = _parse_codex_models_cache(json.loads(raw.decode("utf-8")))
+        _codex_listed_memo = (key, listed)
+        return listed
+    except Exception:  # noqa: BLE001 - a suggestion list must never break the caller
+        return None
+
+
+def _parse_codex_models_cache(data: object) -> tuple[ListedModel, ...] | None:
+    if not isinstance(data, dict):
+        return None
+    entries = data.get("models")
+    if not isinstance(entries, list):
+        return None
+    listed: list[ListedModel] = []
+    seen: set[str] = set()
+    for entry in entries[:_MAX_MODELS_CACHE_ENTRIES]:
+        if not isinstance(entry, dict) or entry.get("visibility") != "list":
+            continue
+        slug = entry.get("slug")
+        if (
+            not isinstance(slug, str)
+            or slug == DEFAULT_MODEL_SENTINEL
+            or slug in seen
+            or not _LISTED_MODEL_SLUG.match(slug)
+        ):
+            continue
+        name = entry.get("display_name")
+        display = name.strip() if isinstance(name, str) else ""
+        if len(display) > _MAX_DISPLAY_NAME_CHARS or not display.isprintable():
+            display = ""
+        seen.add(slug)
+        listed.append(ListedModel(slug=slug, display_name=display or None))
+        if len(listed) >= _MAX_LISTED_MODELS:
+            break
+    return tuple(listed) or None
+
+
 __all__ = [
     "DEFAULT_MODEL_SENTINEL",
     "BackendModelCatalog",
+    "ListedModel",
     "ModelSelection",
+    "codex_listed_models",
     "configured_default_model",
     "detect_backend_cli",
     "get_model_catalog",

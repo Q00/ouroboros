@@ -166,6 +166,8 @@ export interface StageView {
   model_env: string[];
   completion_backend: string;
   models: string[];
+  /** Display names the agent gives some of `models` (Codex's own list). */
+  model_labels?: Record<string, string>;
   default_hint: string | null;
 }
 
@@ -331,6 +333,20 @@ export interface RunProgress {
   activity: string | null;
 }
 
+/** A model the agent said it cannot use (src/ouroboros/gui/model_refusal.py). */
+export interface ModelRejection {
+  /** Canonical backend name. */
+  backend: string;
+  /** `null` when neither the agent nor the request named one. */
+  model: string | null;
+  /** The provider's own one-line reason. */
+  reason: string;
+  /** A reason the page says in the reader's language. */
+  reason_code: "chatgpt_account" | null;
+  /** "chat": the chat named the model; "settings": it came from Agents & models. */
+  source: "chat" | "settings";
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -377,6 +393,11 @@ export interface ChatMessage {
   handoff_status?: string | null;
   folder?: string;
   in_repo?: boolean;
+  /** An error the page explains on its own: `model_rejected` carries `rejection`. */
+  code?: "model_rejected";
+  rejection?: ModelRejection;
+  /** The provider's raw error behind a rejection, shown only on request. */
+  detail?: string;
 }
 
 /** One round of the interview Auto runs with itself, paired by round number. */
@@ -433,6 +454,8 @@ export interface Suggestion {
   source?: "repo" | "model";
   evidence?: string[];
   error?: string;
+  /** Set when the error is the agent refusing the Interview stage's model. */
+  rejection?: ModelRejection;
   /** Started by Ouroboros for a question the server marked as answerable from code. */
   auto?: boolean;
   repo_checked?: boolean;
@@ -497,6 +520,10 @@ export interface BackendChoice {
   id: string;
   installed: boolean;
   models: string[];
+  /** Display names the agent gives some of `models` (Codex's own list). */
+  model_labels?: Record<string, string>;
+  /** Ask backends: what an empty model field runs on, when the console knows. */
+  default_model?: string | null;
 }
 
 export interface ChatDefaults {

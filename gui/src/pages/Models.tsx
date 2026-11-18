@@ -6,6 +6,7 @@ import { useT } from "../i18n";
 import { useAction } from "../core/action";
 import { get, post } from "../core/api";
 import { backendName, shortPath } from "../core/format";
+import { listedModels, needsOwnOption, stagePickerValue } from "../core/modelChoices";
 import { invalidate, useResource } from "../core/resource";
 import { toast } from "../core/toast";
 import type { RoutePreset, SettingsResult, SettingsView, StageView } from "../core/types";
@@ -23,7 +24,6 @@ import { SETTLE } from "../core/motion";
 const INHERIT = "__inherit__";
 const FOLLOW = "__follow__";
 const CUSTOM = "__custom__";
-const AGENT_DEFAULT = "default";
 
 interface StageForm {
   runtime: string;
@@ -95,10 +95,11 @@ function StageCard({ view, stage, index, form, onChange }: StageCardProps) {
   const supportsLlm = view.runtimes.find((item) => item.id === runtime)?.supports_llm;
   // With unchanged routing the server's own answer stands; otherwise mirror its rule.
   const backend = !routingChanged ? stage.completion_backend : supportsLlm || stage.id === "execute" ? runtime : view.llm_backend.effective;
-  const remote = useResource<{ models: string[] }>(`/api/settings/models?backend=${encodeURIComponent(backend)}`, {
+  const remote = useResource<{ models: string[]; model_labels?: Record<string, string> }>(`/api/settings/models?backend=${encodeURIComponent(backend)}`, {
     enabled: backend !== stage.completion_backend,
   });
   const models = backend === stage.completion_backend ? stage.models : (remote.data?.models ?? []);
+  const labels = (backend === stage.completion_backend ? stage.model_labels : remote.data?.model_labels) ?? {};
   const loadingModels = backend !== stage.completion_backend && remote.loading;
 
   const runtimeOptions: PickerOption[] = [
@@ -110,14 +111,16 @@ function StageCard({ view, stage, index, form, onChange }: StageCardProps) {
     })),
   ];
 
-  const known = new Set(models);
+  // "Follow the agent" is the agent's own default, so the "default" sentinel is not listed again.
+  const listed = listedModels(models);
   const modelOptions: PickerOption[] = [
     { value: FOLLOW, label: t("models.followAgent"), hint: stage.default_hint ? t("models.followHint", { model: stage.default_hint }) : undefined },
-    ...models.map((model) => ({ value: model, label: model === AGENT_DEFAULT ? t("models.agentDefault") : model })),
+    ...listed.map((model) => ({ value: model, label: model, hint: labels[model] })),
   ];
-  if (state.model && !known.has(state.model) && !state.custom) modelOptions.push({ value: state.model, label: state.model });
+  if (needsOwnOption(state.model, state.custom, models)) modelOptions.push({ value: state.model, label: state.model });
   modelOptions.push({ value: CUSTOM, label: t("models.custom") });
-  const pickerValue = state.custom ? CUSTOM : state.model || FOLLOW;
+  // A saved "default" shows as "Follow the agent", which is what it means.
+  const pickerValue = stagePickerValue(state.model, state.custom, FOLLOW, CUSTOM);
 
   return (
     <motion.section
@@ -162,7 +165,7 @@ function StageCard({ view, stage, index, form, onChange }: StageCardProps) {
                   id={`${ids}-custom`}
                   className="input input-mono"
                   value={state.model}
-                  placeholder={models.find((model) => model !== AGENT_DEFAULT) ?? "model-id"}
+                  placeholder={listed[0] ?? "model-id"}
                   spellCheck={false}
                   autoComplete="off"
                   onChange={(event) => onChange({ ...state, model: event.target.value, touched: true })}
@@ -399,6 +402,7 @@ export function ModelsPage(_props: { rest: string }) {
           <SectionTitle>
             <span id="models-stages">{t("models.stages")}</span>
           </SectionTitle>
+          <p className="section-note">{t("models.availability")}</p>
           <div className="card stages">
             {view.stages.map((stage, index) => (
               <StageCard key={stage.id} view={view} stage={stage} index={index} form={form} onChange={(next) => setForm({ ...form, stages: { ...form.stages, [stage.id]: next } })} />

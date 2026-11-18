@@ -1711,6 +1711,72 @@
   width: 100%;
 }
 
+/* A turn the agent refused because of its model: the sentence, one way on, the raw error folded. */
+.rejected {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--fail-soft);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.rejected-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.rejected-head > svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--fail);
+}
+
+.rejected-head p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.rejected-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding-left: 26px;
+}
+
+.rejected-actions:empty {
+  display: none;
+}
+
+.rejected-detail summary {
+  cursor: pointer;
+  color: var(--text-mute);
+  font-size: var(--text-xs);
+}
+
+.rejected-detail[open] {
+  flex-basis: 100%;
+}
+
+.rejected-detail pre {
+  max-height: 220px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .bubble {
   max-width: min(600px, 88%);
   padding: 9px 13px;

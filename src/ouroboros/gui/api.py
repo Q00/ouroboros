@@ -357,7 +357,8 @@ def get_settings_models(state: ConsoleState, *, query: dict[str, str], body: Any
     backend = settings.canonical(query.get("backend", ""))
     if not backend:
         raise ApiError(400, "Pass ?backend=<name>", "missing_backend")
-    return {"backend": backend, "models": settings.fetch_models(backend)}
+    models, labels = settings.fetch_model_suggestions(backend)
+    return {"backend": backend, "models": models, "model_labels": labels}
 
 
 # ── runs ──────────────────────────────────────────────────────────────
