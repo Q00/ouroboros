@@ -112,6 +112,31 @@ and Spanish (side rail → language).
   look: the board for a failed criterion, the detailed log for anything
   else. A failed job's exit code is part of that line.
 
+## Models an agent refuses
+
+- **The chat says so in one sentence.** When an agent says it cannot use the
+  model it was given, the chat names the agent, the model and the agent's own
+  reason, instead of showing the raw error. For example, Codex signed in with
+  a ChatGPT account refuses `gpt-6.2-astra`. The raw error stays folded under
+  *Details*. Only explicit refusals count: the `model_not_found` code from
+  Codex and OpenAI, Claude's "issue with the selected model", the Anthropic and
+  Gemini 404s for a model, and the phrases listed in
+  `src/ouroboros/providers/model_rejection.py`. Every other failure is shown
+  as before.
+- **One way on.** In an Ask chat whose model you typed, *Retry with the
+  agent's default model* sends the same question again with the model left
+  empty. The thread notes the change, and later messages in that chat use the
+  default too. The console never changes a model on its own. When the model
+  came from **Agents & models**, the chat links to that page instead. That is
+  the case for an Interview turn, the spec, *Suggest an answer*, and an Ask
+  chat with no model.
+- **Codex suggestions come from Codex.** The Codex model list in the Ask model
+  field and on **Agents & models** is the list Codex's own picker shows. It is
+  read from `models_cache.json` in the Codex home (`$CODEX_HOME`, else
+  `~/.codex`) and comes after *Agent's own default*. When that file is missing
+  or unreadable, the console uses its built-in list. Codex's list is what
+  Codex offers, not what every account can use, and both places say so.
+
 ## Background service and the shared MCP server
 
 Every MCP host normally starts its own `ouroboros mcp serve` per session. The

@@ -1,0 +1,74 @@
+{
+  "fetched_at": "2026-11-18T23:40:12.481Z",
+  "etag": "W/\"models-7f3c\"",
+  "client_version": "0.155.1",
+  "models": [
+    {
+      "slug": "gpt-6.2-sol",
+      "display_name": "GPT-6.2-Sol",
+      "description": "Frontier model for complex work.",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}],
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 1
+    },
+    {
+      "slug": "gpt-6.2-astra",
+      "display_name": "GPT-6.2-Astra",
+      "description": "Fast frontier model.",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 2
+    },
+    {
+      "slug": "gpt-6.1-terra",
+      "display_name": "GPT-6.1 Terra",
+      "visibility": "list",
+      "priority": 3
+    },
+    {
+      "slug": "gpt-6.1-sol",
+      "display_name": "GPT-6.1-Sol",
+      "visibility": "list",
+      "priority": 4
+    },
+    {
+      "slug": "gpt-6-astra",
+      "display_name": "GPT-6-Astra",
+      "visibility": "list",
+      "priority": 5
+    },
+    {
+      "slug": "codex-auto-review",
+      "display_name": "Codex Auto Review",
+      "description": "Used by Codex itself; not offered in the picker.",
+      "visibility": "hide",
+      "priority": 6
+    },
+    {
+      "slug": "gpt-6-sol",
+      "display_name": "GPT-6-Sol",
+      "visibility": "list",
+      "priority": 7
+    },
+    {
+      "slug": "gpt-6-luna",
+      "display_name": "GPT-6-Luna",
+      "visibility": "list",
+      "priority": 8
+    },
+    {
+      "slug": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "visibility": "none",
+      "priority": 9
+    },
+    {
+      "slug": "gpt-5.6-sol",
+      "display_name": "GPT-5.6-Sol",
+      "visibility": "list",
+      "priority": 10
+    }
+  ]
+}

@@ -95,10 +95,11 @@ function StageCard({ view, stage, index, form, onChange }: StageCardProps) {
   const supportsLlm = view.runtimes.find((item) => item.id === runtime)?.supports_llm;
   // With unchanged routing the server's own answer stands; otherwise mirror its rule.
   const backend = !routingChanged ? stage.completion_backend : supportsLlm || stage.id === "execute" ? runtime : view.llm_backend.effective;
-  const remote = useResource<{ models: string[] }>(`/api/settings/models?backend=${encodeURIComponent(backend)}`, {
+  const remote = useResource<{ models: string[]; model_labels?: Record<string, string> }>(`/api/settings/models?backend=${encodeURIComponent(backend)}`, {
     enabled: backend !== stage.completion_backend,
   });
   const models = backend === stage.completion_backend ? stage.models : (remote.data?.models ?? []);
+  const labels = (backend === stage.completion_backend ? stage.model_labels : remote.data?.model_labels) ?? {};
   const loadingModels = backend !== stage.completion_backend && remote.loading;
 
   const runtimeOptions: PickerOption[] = [
@@ -113,7 +114,7 @@ function StageCard({ view, stage, index, form, onChange }: StageCardProps) {
   const known = new Set(models);
   const modelOptions: PickerOption[] = [
     { value: FOLLOW, label: t("models.followAgent"), hint: stage.default_hint ? t("models.followHint", { model: stage.default_hint }) : undefined },
-    ...models.map((model) => ({ value: model, label: model === AGENT_DEFAULT ? t("models.agentDefault") : model })),
+    ...models.map((model) => ({ value: model, label: model === AGENT_DEFAULT ? t("models.agentDefault") : model, hint: labels[model] })),
   ];
   if (state.model && !known.has(state.model) && !state.custom) modelOptions.push({ value: state.model, label: state.model });
   modelOptions.push({ value: CUSTOM, label: t("models.custom") });
@@ -399,6 +400,7 @@ export function ModelsPage(_props: { rest: string }) {
           <SectionTitle>
             <span id="models-stages">{t("models.stages")}</span>
           </SectionTitle>
+          <p className="section-note">{t("models.availability")}</p>
           <div className="card stages">
             {view.stages.map((stage, index) => (
               <StageCard key={stage.id} view={view} stage={stage} index={index} form={form} onChange={(next) => setForm({ ...form, stages: { ...form.stages, [stage.id]: next } })} />

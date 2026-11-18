@@ -15,7 +15,9 @@ import {
   Pencil,
   Play,
   Plus,
+  RotateCcw,
   Send,
+  SlidersHorizontal,
   Sparkles,
   Sprout,
   Square,
@@ -35,7 +37,7 @@ import { adoptRunningJobs } from "../core/jobs";
 import { invalidate, useResource } from "../core/resource";
 import { href, navigate } from "../core/router";
 import { useSnapshotStream } from "../core/stream";
-import type { AutoView, BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatProject, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, FolderProbe, Readiness, RunTile } from "../core/types";
+import type { AutoView, BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatProject, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, FolderProbe, ModelRejection, Readiness, RunTile } from "../core/types";
 import type { Tone } from "../ui/bits";
 import { Chip, CopyButton, Empty, Field, LoadError, LogView, Notice, Skeleton } from "../ui/bits";
 import { Button, IconButton } from "../ui/Button";
@@ -82,6 +84,59 @@ function modelText(t: Translator["t"], model: string, hint?: { backend?: string 
   if (model !== "default") return model;
   if (hint?.configured) return t("chat.model.cliDefault", { agent: backendName(hint.backend), model: hint.configured });
   return t("chat.model.agentDefault");
+}
+
+/** "Codex didn't accept the model gpt-6.2-astra: …", in the reader's language. */
+function rejectionText(t: Translator["t"], tx: Translator["tx"], rejection: ModelRejection): string {
+  const reason = rejection.reason_code ? tx(`chat.rejected.reason.${rejection.reason_code}`, rejection.reason) : rejection.reason;
+  const agent = backendName(rejection.backend) || t("chat.rejected.agent");
+  return rejection.model ? t("chat.rejected", { agent, model: rejection.model, reason }) : t("chat.rejected.noModel", { agent, reason });
+}
+
+/** Opens Agents & models, where a stage's model is chosen. */
+function ModelsLink() {
+  const { t } = useT();
+  return (
+    <a className="btn btn-secondary btn-sm" href={href("models")}>
+      <SlidersHorizontal size={14} aria-hidden />
+      <span className="btn-label">{t("chat.rejected.models")}</span>
+    </a>
+  );
+}
+
+/**
+ * A turn the agent refused because of its model. One way on: send the turn
+ * again on the agent's default model when the chat chose the model (an
+ * explicit click; nothing changes the model on its own), or open Agents &
+ * models when the model came from there. The provider's raw error stays
+ * folded under Details.
+ */
+function RejectedModel({ message, onRetry, retrying }: { message: ChatMessage; onRetry?: () => void; retrying?: boolean }) {
+  const { t, tx } = useT();
+  const rejection = message.rejection as ModelRejection;
+  return (
+    <div className="rejected" role="alert">
+      <div className="rejected-head">
+        <CircleAlert size={16} aria-hidden />
+        <p>{rejectionText(t, tx, rejection)}</p>
+      </div>
+      <div className="rejected-actions">
+        {onRetry ? (
+          <Button size="sm" variant="primary" icon={<RotateCcw size={14} aria-hidden />} pending={retrying} onClick={onRetry}>
+            {t("chat.rejected.retry")}
+          </Button>
+        ) : rejection.source === "settings" ? (
+          <ModelsLink />
+        ) : null}
+        {message.detail ? (
+          <details className="rejected-detail">
+            <summary>{t("chat.rejected.details")}</summary>
+            <pre>{message.detail}</pre>
+          </details>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 // ── New conversation ─────────────────────────────────────────────────
@@ -192,6 +247,7 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
   );
 
   const chosen = pool.find((item) => item.id === backend);
+  const labels = chosen?.model_labels ?? {};
   const suggestions = [
     ...(chosen?.models ?? []).filter((item) => item !== "default"),
     ...(backend === "litellm" ? (defaults?.providers ?? []).map((item) => item.model_format) : []),
@@ -301,11 +357,20 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
           />
         </Field>
         {mode === "ask" ? (
-          <Field label={t("models.model")} htmlFor={`${ids}-model`} hint={backend === "litellm" ? t("chat.new.model.litellm") : t("chat.new.model.hint")}>
+          <Field
+            label={t("models.model")}
+            htmlFor={`${ids}-model`}
+            hint={
+              <>
+                {backend === "litellm" ? t("chat.new.model.litellm") : t("chat.new.model.hint")}
+                {suggestions.length > 0 ? ` ${t("models.availability")}` : null}
+              </>
+            }
+          >
             <input id={`${ids}-model`} className="input input-mono" list={`${ids}-models`} value={model} spellCheck={false} autoComplete="off" placeholder={t("chat.new.model.placeholder")} onChange={(event) => setModel(event.target.value)} />
             <datalist id={`${ids}-models`}>
               {suggestions.map((item) => (
-                <option key={item} value={item} />
+                <option key={item} value={item} label={labels[item]} />
               ))}
             </datalist>
           </Field>
@@ -593,7 +658,7 @@ function AnswerProvenance({ message, onCorrect }: { message: ChatMessage; onCorr
   );
 }
 
-function MessageView({ message, running, questionNumber, onCorrect, auto }: { message: ChatMessage; running: boolean; questionNumber: number; onCorrect?: (message: ChatMessage) => void; auto?: AutoView | null }) {
+function MessageView({ message, running, questionNumber, onCorrect, auto, onRetry, retrying }: { message: ChatMessage; running: boolean; questionNumber: number; onCorrect?: (message: ChatMessage) => void; auto?: AutoView | null; onRetry?: () => void; retrying?: boolean }) {
   const { t, tx } = useT();
   let body: ReactNode;
   let shape = "left";
@@ -611,11 +676,14 @@ function MessageView({ message, running, questionNumber, onCorrect, auto }: { me
       body = <p className="bubble-note">{keyed(tx, "chat.note", message)}</p>;
       break;
     case "error":
-      body = (
-        <Notice tone="fail" icon={<CircleAlert size={16} aria-hidden />}>
-          {keyed(tx, "chat.note", message)}
-        </Notice>
-      );
+      body =
+        message.code === "model_rejected" && message.rejection ? (
+          <RejectedModel message={message} onRetry={onRetry} retrying={retrying} />
+        ) : (
+          <Notice tone="fail" icon={<CircleAlert size={16} aria-hidden />}>
+            {keyed(tx, "chat.note", message)}
+          </Notice>
+        );
       break;
     case "seed":
       body = <SeedCard message={message} review={auto && message.source === "auto" ? <AutoReview view={auto} live={running} /> : undefined} />;
@@ -908,7 +976,7 @@ function Thread({ id }: { id: string }) {
 
   // Set when a hand-off was refused because the folder has no git repository or no commit.
   const [gitOffer, setGitOffer] = useState<"not_repo" | "no_commits" | null>(null);
-  type Action = "seed" | "run" | "suggest" | "accept" | "dismiss" | "stop";
+  type Action = "seed" | "run" | "suggest" | "accept" | "dismiss" | "stop" | "retry_default";
   const [act, acting] = useAction(
     async (action: Action, extra: Record<string, unknown> = {}) => {
       try {
@@ -985,6 +1053,9 @@ function Thread({ id }: { id: string }) {
   const autoLog = auto ? session.messages.find((message) => message.kind === "log") : undefined;
   const autoNow = auto ? autoActivity(session, auto) : null;
   const autoEnd = auto ? autoEnding(session, auto, t) : null;
+  // Sending again on the agent's default model, for an Ask turn refused for the model the chat named.
+  const lastMessage = session.messages[session.messages.length - 1];
+  const retryable = ask && status === "failed" && !!session.model && lastMessage?.code === "model_rejected" && lastMessage.rejection?.source === "chat";
 
   function submit(event?: FormEvent) {
     event?.preventDefault();
@@ -1054,6 +1125,8 @@ function Thread({ id }: { id: string }) {
                 running={status === "running"}
                 questionNumber={questionNumber}
                 auto={auto}
+                onRetry={retryable && message === lastMessage ? () => void run("retry_default") : undefined}
+                retrying={busyAction("retry_default")}
                 onCorrect={canType ? (target) => {
                   setCorrecting(target);
                   inputRef.current?.focus();
@@ -1098,6 +1171,10 @@ function Thread({ id }: { id: string }) {
                 <p className="suggestion-pending" role="status">
                   <Spinner size={14} /> {suggestion.auto ? t("chat.suggest.autoPending") : t("chat.suggest.pending")}
                 </p>
+              ) : suggestion.rejection ? (
+                <Notice tone="warn" title={t("chat.suggest.failed")} action={suggestion.rejection.source === "settings" ? <ModelsLink /> : undefined}>
+                  {rejectionText(t, tx, suggestion.rejection)}
+                </Notice>
               ) : suggestion.error ? (
                 <Notice tone="warn" title={t("chat.suggest.failed")}>
                   {suggestion.error}

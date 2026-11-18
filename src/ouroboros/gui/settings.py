@@ -20,6 +20,7 @@ from ouroboros.backends import (
 )
 from ouroboros.backends.model_catalog import (
     DEFAULT_MODEL_SENTINEL,
+    codex_listed_models,
     configured_default_model,
     installed_backends,
     model_choices,
@@ -432,6 +433,7 @@ class SettingsModel:
             model_field = STAGE_MODEL_FIELDS.get(stage)
             completion = canonical(self.effective_completion_backend(stage))
             saved_runtime = get_value(self.raw, stage_runtime_field(stage).key)
+            models, labels = model_suggestions(completion)
             stages.append(
                 {
                     "id": stage.value,
@@ -444,7 +446,8 @@ class SettingsModel:
                     "model_saved": get_value(self.raw, model_field.key) if model_field else None,
                     "model_env": list(active_env_overrides(model_field)) if model_field else [],
                     "completion_backend": completion,
-                    "models": static_models(completion),
+                    "models": models,
+                    "model_labels": labels,
                     "default_hint": _default_hint(completion),
                 }
             )
@@ -480,11 +483,33 @@ class SettingsModel:
         }
 
 
-def static_models(backend: str) -> list[str]:
+def model_suggestions(backend: str) -> tuple[list[str], dict[str, str]]:
+    """The model ids a picker suggests for ``backend``, and their display names.
+
+    Codex's ids come from Codex itself (``codex_listed_models``), after the
+    ``"default"`` sentinel, so the list is the one Codex offers: models it
+    added appear, models it dropped do not. Every other backend, and Codex
+    when its list cannot be read, gets the static catalog and no names.
+    Suggestions only: what a chat or a stage runs is decided elsewhere.
+    """
+    capability = get_backend_capability(backend) if backend else None
+    if capability is not None and capability.name == "codex":
+        listed = codex_listed_models()
+        if listed:
+            labels = {
+                item.slug: item.display_name
+                for item in listed
+                if item.display_name and item.display_name != item.slug
+            }
+            return [DEFAULT_MODEL_SENTINEL, *(item.slug for item in listed)], labels
     try:
-        return list(model_choices(backend))
+        return list(model_choices(backend)), {}
     except ValueError:
-        return []
+        return [], {}
+
+
+def static_models(backend: str) -> list[str]:
+    return model_suggestions(backend)[0]
 
 
 def _default_hint(backend: str) -> str | None:
@@ -495,8 +520,13 @@ def _default_hint(backend: str) -> str | None:
 
 
 def fetch_models(backend: str) -> list[str]:
-    """Static catalog merged with what the backend's CLI lists (may be slow)."""
-    models = static_models(backend)
+    """Suggested models merged with what the backend's CLI lists (may be slow)."""
+    return fetch_model_suggestions(backend)[0]
+
+
+def fetch_model_suggestions(backend: str) -> tuple[list[str], dict[str, str]]:
+    """``fetch_models`` and the display names of the models it lists."""
+    models, labels = model_suggestions(backend)
     try:
         fetched = refresh_models(backend)
     except Exception:
@@ -505,7 +535,7 @@ def fetch_models(backend: str) -> list[str]:
         for model in recommended_cli_models(backend, fetched):
             if model not in models:
                 models.append(model)
-    return models
+    return models, labels
 
 
 def save(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
@@ -560,7 +590,9 @@ __all__ = [
     "SettingsModel",
     "StagedForm",
     "canonical",
+    "fetch_model_suggestions",
     "fetch_models",
+    "model_suggestions",
     "save",
     "undo",
 ]
