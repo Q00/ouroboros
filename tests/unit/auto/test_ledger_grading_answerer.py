@@ -1495,17 +1495,22 @@ def test_ledger_later_answer_can_clear_same_key_blocker() -> None:
 
 
 def test_auto_answerer_non_goals_respect_explicit_goal_scope() -> None:
-    cases = (
-        ("Deploy this service to production", "production deployment"),
-        ("Add authentication to the app", "authentication"),
-        ("Enable SSO for enterprise users", "authentication"),
-        ("Add OAuth support to the CLI", "authentication"),
-        ("Implement authorization roles", "authentication"),
+    """The non-goal default excludes only what the goal does not ask for; it
+    never names a fixed exclusion such as authentication or deployment."""
+    goals = (
+        "Deploy this service to production",
+        "Add authentication to the app",
+        "Enable SSO for enterprise users",
+        "Add OAuth support to the CLI",
+        "Implement authorization roles",
     )
 
-    for goal, forbidden_non_goal in cases:
+    for goal in goals:
         answer = AutoAnswerer().answer("What are the non-goals?", SeedDraftLedger.from_goal(goal))
-        assert forbidden_non_goal not in answer.text.lower()
+        assert answer.text == (
+            f"Anything the goal \u201c{goal}\u201d does not ask for is a non-goal "
+            "unless explicitly requested."
+        )
 
 
 def test_ledger_assumptions_use_latest_resolved_facts_for_risk() -> None:
@@ -1542,7 +1547,8 @@ def test_auto_answerer_non_goals_use_latest_resolved_goal() -> None:
 
     answer = AutoAnswerer().answer("What are the non-goals?", ledger)
 
-    assert "authentication" not in answer.text.lower()
+    assert "\u201cAdd authentication to the app\u201d" in answer.text
+    assert "Build a CLI" not in answer.text
 
 
 def test_grade_seed_allows_safe_product_delete_assumptions() -> None:

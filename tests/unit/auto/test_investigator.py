@@ -3,8 +3,10 @@
 The interviewer is unchanged. When auto would answer a question with its own
 guess, a read-only agent session reads the workspace first. Its answer binds
 only when every cited span passes the structural evidence check
-(``ouroboros.auto.evidence_check``); otherwise the question stays open and no
-guessed text reaches the interviewer, the requester, or the worker.
+(``ouroboros.auto.evidence_check``); otherwise the question stays open, the
+model's reading of the code reaches nobody, and the worker sees only the
+question. A product decision the code cannot settle gets the answerer's own
+conservative default (``test_investigator_answer_routing.py``).
 
 The agent runtime is a fake injected through ``RepoInvestigator.runtime_factory``,
 so these tests exercise the real driver, ledger, and requester code paths
@@ -46,7 +48,6 @@ from ouroboros.auto.investigator import (
     MAX_CALLS_ENV,
     NOT_SETTLED_REPLY,
     NOT_SETTLED_VALUE,
-    OPEN_FOR_IMPLEMENTER_REPLY,
     RepoInvestigator,
     build_repo_investigator,
     enforces_read_only,
@@ -128,9 +129,12 @@ def _found_reply() -> str:
     )
 
 
-def _not_found_reply() -> str:
+def _not_found_reply(kind: str = "current_behavior") -> str:
+    """A question about the current code that the code does not settle; with
+    ``kind="intended_behavior"``, a product decision the code cannot settle."""
     return json.dumps(
         {
+            "kind": kind,
             "status": "not_found",
             "answer": GUESS,
             "evidence": [
@@ -416,10 +420,15 @@ async def test_not_found_question_goes_to_requester_without_guessed_draft(
     assert state.requester_log[0]["outcome"] == "answered"
 
 
+@pytest.mark.parametrize("reply", [_found_reply, _not_found_reply])
 @pytest.mark.asyncio
-async def test_investigated_answers_skip_the_refiner(workspace: Path) -> None:
+async def test_answers_about_the_current_code_skip_the_refiner(
+    workspace: Path, reply: Callable[[], str]
+) -> None:
+    """A found fact, or a current-behavior question the code does not settle:
+    no model rewrites a reply about the code into guessed text."""
     refiner = AsyncMock(return_value=GUESS)
-    investigator, _calls, _ = _investigator(lambda _p: _not_found_reply())
+    investigator, _calls, _ = _investigator(lambda _p: reply())
 
     _state, _ledger, sent, _ = await _run(workspace, investigator=investigator, refiner=refiner)
 
@@ -512,25 +521,29 @@ async def test_with_requester_the_cap_does_not_close_the_interview(workspace: Pa
     assert len(calls) == 2
     assert state.interview_closure_mode != "ledger_only"
     assert not [kind for kind, _ in events if kind == "auto.interview.closed_with_open_questions"]
-    assert len(requester.questions) == 5  # every round, past the cap too
-    assert len([text for text in sent if "[safe-default-synthesis]" not in text]) >= 5
+    answers = [text for text in sent if "[safe-default-synthesis]" not in text]
+    assert len(answers) >= 5
+    # Every round answered with a guess went to the requester, past the cap too.
+    guesses = ("[from-auto][assumption]", "[from-auto][conservative_default]")
+    guess_rounds = [n for n, text in enumerate(answers, start=1) if text.startswith(guesses)]
+    assert [question.round for question in requester.questions] == guess_rounds
+    assert {3, 4} <= set(guess_rounds)
 
 
 @pytest.mark.asyncio
-async def test_no_requester_not_found_reply_leaves_the_question_to_the_implementer(
-    workspace: Path,
-) -> None:
+async def test_not_settled_reply_never_defers_to_the_implementer(workspace: Path) -> None:
+    """With or without a requester, the reply says what the code does and does
+    not settle; it does not hand the question to the implementer (#3034)."""
+    expected = f"{NOT_SETTLED_REPLY}\n\nWhat the code shows:\n- src/cli.py:1-3: raise SystemExit(2)"
     investigator, _calls, _ = _investigator(lambda _p: _not_found_reply())
     _s, _l, sent_alone, _ = await _run(workspace, investigator=investigator)
-    assert sent_alone[0].startswith(
-        f"[from-auto][assumption] {NOT_SETTLED_REPLY} {OPEN_FOR_IMPLEMENTER_REPLY}"
-    )
+    assert sent_alone[0] == f"[from-auto][assumption] {expected}"
 
     investigator2, _c, _ = _investigator(lambda _p: _not_found_reply())
     requester = _CountingRequester(None)
     await _run(workspace, investigator=investigator2, requester=requester)
-    assert requester.questions[0].draft_answer.startswith(NOT_SETTLED_REPLY)
-    assert OPEN_FOR_IMPLEMENTER_REPLY not in requester.questions[0].draft_answer
+    assert requester.questions[0].draft_answer == expected
+    assert "implementer" not in sent_alone[0] + requester.questions[0].draft_answer
 
 
 @pytest.mark.asyncio
@@ -595,21 +608,23 @@ async def test_unavailable_runtime_keeps_the_deterministic_answerer(workspace: P
     assert ledger_on.to_dict()["sections"] == ledger_off.to_dict()["sections"]
 
 
+@pytest.mark.parametrize("kind", ["current_behavior", "intended_behavior"])
 @pytest.mark.parametrize("done_after", [3, None])
 @pytest.mark.asyncio
 async def test_all_not_found_interview_converges_like_the_old_answerer(
-    workspace: Path, done_after: int | None
+    workspace: Path, done_after: int | None, kind: str
 ) -> None:
     """Every answer not found: the interview ends the same way it ends without
     the investigator (backend closure, or the round cap), never blocked, never on
-    the deadline path, and without unverified-provenance grading findings."""
+    the deadline path, and without unverified-provenance grading findings. A
+    product decision gets the very answer the answerer gives without one."""
     questions = (
         "Who uses this CLI and what are its inputs and outputs?",
         "Which runtime and project patterns should be used?",
         "What constraints and failure modes should bound this change?",
         "Which command output verifies the acceptance criteria?",
     )
-    investigator, calls, _ = _investigator(lambda _p: _not_found_reply())
+    investigator, calls, _ = _investigator(lambda _p: _not_found_reply(kind))
 
     state_on, ledger_on, sent_on, result_on = await _run(
         workspace,
@@ -631,6 +646,10 @@ async def test_all_not_found_interview_converges_like_the_old_answerer(
     assert result_on.rounds <= 4
     assert len(sent_on) == len(sent_off)
     assert _unverified_provenance_findings(ledger_on) == []
+    if kind == "intended_behavior":
+        # The answerer's own answer, followed by what the checked code shows.
+        assert all(on.startswith(off) for on, off in zip(sent_on, sent_off, strict=True))
+        assert not any(NOT_SETTLED_REPLY in text for text in sent_on)
 
 
 # -- found answers reach the worker only as checked repository facts --------
@@ -838,9 +857,13 @@ async def test_hang_guard_turns_a_stuck_call_into_not_found(workspace: Path) -> 
     )
 
     _state, ledger, sent, _ = await _run(workspace, investigator=investigator)
+    _s_off, _l_off, sent_off, _ = await _run(workspace)
 
     assert not _entries(ledger, ".repo_fact.")
-    assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
+    # No verdict: the code was not read to the end, so the answer is the
+    # answerer's own default, never "the code does not settle this".
+    assert sent == sent_off
+    assert NOT_SETTLED_REPLY not in sent[0]
 
 
 # -- isolation: read-only mode where verified, a throwaway copy elsewhere -------
@@ -1002,7 +1025,9 @@ async def test_real_workspace_change_discards_the_answer(workspace: Path) -> Non
     )
     _state, ledger, sent, _ = await _run(workspace, investigator=investigator2)
     assert not _entries(ledger, ".repo_fact.")
-    assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
+    assert FOUND_ANSWER not in sent[0]
+    assert NOT_SETTLED_REPLY not in sent[0]
+    assert sent[0].startswith("[from-auto][conservative_default] ")
 
 
 @pytest.mark.asyncio
@@ -1356,17 +1381,21 @@ async def test_intended_behavior_answer_is_kept_as_an_open_question(
     workspace: Path,
 ) -> None:
     """Study shape (django-13925): "should W042 remain?" answered from current
-    code. It must not become a repository fact; the question stays open and the
-    interviewer sees only what the code shows."""
+    code. It must not become a repository fact; the question stays open. The
+    interviewer gets the answerer's conservative default plus what the code
+    shows, never the model's reading of the current code as the answer."""
     investigator, _calls, _ = _investigator(lambda _p: _reply_with_kind("intended_behavior"))
 
     _state, ledger, sent, _ = await _run(workspace, investigator=investigator)
+    _s_off, _l_off, sent_off, _ = await _run(workspace)
 
     assert not _entries(ledger, ".repo_fact.")
-    assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
-    assert "src/cli.py:7-8" in sent[0]
+    assert sent[0].startswith(sent_off[0])  # the answerer's own default
+    assert NOT_SETTLED_REPLY not in sent[0]
+    assert "What the code shows:\n- src/cli.py:7-8" in sent[0]
     assert FOUND_ANSWER not in sent[0]
     assert ledger_open_questions(ledger) == (QUESTION,)
+    assert all(not entry.binds_seed for entry in _entries(ledger, ".investigated."))
 
 
 def test_prompt_tells_the_investigator_the_code_may_be_the_defect() -> None:

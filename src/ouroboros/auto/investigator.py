@@ -25,16 +25,31 @@ Binding is decided without a model (``auto/evidence_check.py``):
   ``Seed.repo_facts``, never as a constraint, criterion or ontology field, and
   its transcript is declared provenance ``repo_fact`` so Seed extraction
   withholds it.
-- anything else is not found. The interviewer is told what the checked spans
-  show and that the code does not settle the question. The ledger entry is a
-  non-binding assumption that carries the question, so the worker sees it only
-  as an open question. The model's answer text is dropped.
+- anything else is not found, and the model's answer text is dropped. Which
+  answer the question gets then depends on the declared kind (``answer_path``):
+
+  - a ``current_behavior`` question (the reply was ``not_found`` or its
+    evidence failed the check): the interviewer is told, in one sentence in
+    the user's language, that the code does not settle it, and what the
+    checked spans show. No model text about the code reaches the interviewer.
+  - any other question, that is a product decision (``intended_behavior``,
+    which the code under change cannot settle) or one the investigation
+    reached no verdict on (timeout, failed call, invalid reply, call cap):
+    the answerer's own conservative default (``default_answer``), refined by
+    the answer refiner (``AutoInterviewDriver.answer_refiner``) into a
+    concrete, goal-specific default in the user's language, the same model
+    call the answerer uses without an investigator. It is a guess made on the
+    requester's behalf, never a deferral to the implementer.
+
+  Either way the ledger entries are non-binding (``DEFAULTED``) and carry the
+  question, so the worker sees the question only as an open question and the
+  spec stays the user's.
 
 Order per round: the investigator first; the requester (``auto/requester.py``)
 only for a question the code does not settle. A found answer is not sent to
-the requester. The answer refiner (``AutoInterviewDriver.answer_refiner``) is
-skipped for every investigated answer, because it would rewrite a not-found
-reply into guessed text.
+the requester. The answer refiner is skipped for a found answer and for a
+not-settled ``current_behavior`` answer, because it would rewrite a reply about
+the code into guessed text.
 
 Runtime: ``create_agent_runtime`` with the auto interview stage's runtime
 backend, no model pin (the runtime resolves model and reasoning effort from
@@ -56,10 +71,9 @@ Limits: at most ``max_calls`` calls per interview run (default 12,
 a requester, a question past the cap is not found without a call and goes to
 the requester. Without one, the interview closes once the last call is spent
 (``close_known``) instead of asking questions that can only end not found.
-Without a requester, a not-settled question is closed for the interview and
-the Seed (its ledger entry is ``DEFAULTED``), reaches the worker as an
-``Open question:`` line, and the reply tells the interviewer it stays open for
-the implementer. There is no time budget:
+Without a requester, a question the code does not settle is closed for the
+interview and the Seed (its ledger entry is ``DEFAULTED``) and is kept in
+``Seed.open_questions``. There is no time budget:
 the interview waits for each investigation, and the interview phase clock and
 the pipeline deadline stop while it runs (``auto/phase_clock.py``). The only
 time limit is a hang guard per call for a runtime that never returns (default
@@ -85,14 +99,20 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource
+from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource, answer_language
 from ouroboros.auto.evidence_check import EvidenceSpan, check_span
 from ouroboros.auto.investigation_workspace import (
     create_isolated_copy,
     remove_isolated_copy,
     workspace_state,
 )
-from ouroboros.auto.ledger import REPO_FACT_KEY_INFIX, LedgerEntry, LedgerSource, LedgerStatus
+from ouroboros.auto.ledger import (
+    NOT_SETTLED_VALUE,
+    REPO_FACT_KEY_INFIX,
+    LedgerEntry,
+    LedgerSource,
+    LedgerStatus,
+)
 from ouroboros.auto.phase_clock import phase_clock_paused
 from ouroboros.auto.requester import ROUTED_SOURCES, ask_requester
 from ouroboros.providers.throttle import (
@@ -138,18 +158,39 @@ MAX_REPLY_CHARS = 100_000
 _PRIOR_FINDINGS_IN_PROMPT = 6
 _LOG_TEXT_LIMIT = 200
 
-# Fixed ledger value of a not-found entry. The entry is kept as its open
-# question only (``ledger_seed.ledger_open_questions``), which no execution
-# prompt renders; the value keeps the entry active and states the fact without
-# guessing.
-NOT_SETTLED_VALUE = "The repository code does not settle this interview question."
+# A not-settled entry's ledger value is ``NOT_SETTLED_VALUE`` (``auto/ledger.py``).
+# The entry is kept as its open question only (``ledger_seed.ledger_open_questions``),
+# which no execution prompt renders.
 NOT_SETTLED_REPLY = "The repository code does not settle this question."
-# Added to the not-found reply when no requester is wired: nobody else can
-# answer, so the question stays open for the implementer, who reads the code.
-OPEN_FOR_IMPLEMENTER_REPLY = (
-    "It stays an open question for the implementer, who decides it from the code "
-    "when making the change."
-)
+# Fixed reply text in the language of the goal and question (``answer_language``):
+# the not-settled sentence for a ``current_behavior`` question, and the headers
+# above checked spans.
+_REPLY_TEXT: dict[str, dict[str, str]] = {
+    "en": {
+        "not_settled": NOT_SETTLED_REPLY,
+        "code_shows": "What the code shows:",
+        "evidence": "Evidence from the repository:",
+    },
+    "ko": {
+        "not_settled": "저장소 코드로는 이 질문이 확정되지 않습니다.",
+        "code_shows": "코드에서 확인한 내용:",
+        "evidence": "저장소 근거:",
+    },
+    "ja": {
+        "not_settled": "リポジトリのコードではこの質問は確定しません。",
+        "code_shows": "コードから分かること:",
+        "evidence": "リポジトリの根拠:",
+    },
+    "zh": {
+        "not_settled": "仓库代码无法确定这个问题。",
+        "code_shows": "代码显示：",
+        "evidence": "仓库中的证据：",
+    },
+}
+# Key infix of an entry written for a question the investigator did not find:
+# ``<facet key>.investigated.<round>``, one per question, so two questions'
+# answers for one facet neither reuse nor contradict each other.
+INVESTIGATED_KEY_INFIX = ".investigated."
 
 INVESTIGATOR_SYSTEM_PROMPT = (
     "You answer one interview question about a software task by reading the "
@@ -171,7 +212,8 @@ INVESTIGATOR_SYSTEM_PROMPT = (
     '"status": "found" | "not_found", "answer": string, "evidence": '
     '[{"path": string, "start_line": integer, "end_line": integer, "quote": string}]}\n\n'
     'Use "found" only for a current_behavior question the code itself settles. '
-    "Then write the answer in one to four sentences describing what the code "
+    "Then write the answer in one to four sentences, in the language of the "
+    "question, describing what the code "
     "does now, and cite every fact it rests on: the path relative to the "
     "repository root, the 1-based first and last line, and a quote copied "
     "exactly from those lines.\n"
@@ -563,8 +605,32 @@ def _evidence_lines(spans: tuple[EvidenceSpan, ...]) -> list[str]:
     return [f"- {span.label}: {' '.join(span.quote.split())}" for span in spans]
 
 
+def _reply_text(language: str) -> dict[str, str]:
+    return _REPLY_TEXT.get(language, _REPLY_TEXT["en"])
+
+
+def answer_path(result: Investigation) -> str:
+    """Which answer an investigated question gets.
+
+    ``repo_fact``: found, every span checked (``found_answer``).
+    ``not_settled``: a ``current_behavior`` question the code does not settle
+    (``not_found_answer``). ``conservative_default``: anything else, that is a
+    product decision or no verdict (``default_answer``, then the refiner).
+    """
+    if result.found:
+        return "repo_fact"
+    if result.kind == "current_behavior":
+        return "not_settled"
+    return "conservative_default"
+
+
 def found_answer(
-    draft: AutoAnswer, found: Investigation, question: str, round_number: int
+    draft: AutoAnswer,
+    found: Investigation,
+    question: str,
+    round_number: int,
+    *,
+    language: str = "en",
 ) -> AutoAnswer:
     """The answer read from the repository, as a confirmed checked repo fact.
 
@@ -573,7 +639,8 @@ def found_answer(
     ``Seed.repo_facts`` (``ledger_seed.ledger_repo_facts``), and the transcript
     declares provenance ``repo_fact`` so Seed extraction withholds it. Each key
     is ``<facet>.repo_fact.<round>``, so two found answers for one facet in
-    different rounds are separate facts instead of a same-key tie.
+    different rounds are separate facts instead of a same-key tie. The evidence
+    header is in ``language`` (``answer_language`` of the goal and question).
     """
     spans = [f"{span.label}: {' '.join(span.quote.split())}" for span in found.checked]
     updates = [
@@ -592,9 +659,8 @@ def found_answer(
         )
         for section, entry in draft.ledger_updates
     ]
-    text = "\n".join(
-        [found.answer, "", "Evidence from the repository:", *_evidence_lines(found.checked)]
-    )
+    header = _reply_text(language)["evidence"]
+    text = "\n".join([found.answer, "", header, *_evidence_lines(found.checked)])
     return AutoAnswer(
         text, AutoAnswerSource.REPO_FACT, 0.9, updates, declared_provenance="repo_fact"
     )
@@ -606,24 +672,23 @@ def not_found_answer(
     question: str,
     round_number: int,
     *,
-    open_for_implementer: bool = False,
+    language: str = "en",
 ) -> AutoAnswer:
-    """What the checked code shows, and that it does not settle the question.
+    """For a ``current_behavior`` question: the code does not settle it, and what it shows.
 
-    No model answer text is kept. Each entry is a non-binding assumption
+    No model answer text is kept. The reply is one sentence in ``language``
+    plus the checked spans. Each entry is a non-binding assumption
     (``DEFAULTED``) that carries the question, keyed ``.investigated.<round>``.
     ``DEFAULTED`` counts as resolved for the ledger, so the section is closed
     for interview readiness and Seed completeness, and the question is kept in
     ``Seed.open_questions``, which no execution prompt renders.
-    ``open_for_implementer`` (no requester) also tells the interviewer that the
-    question stays open for the implementer.
     """
     labels = [span.label for span in result.checked]
     updates = [
         (
             section,
             LedgerEntry(
-                key=f"{entry.key}.investigated.{round_number}",
+                key=f"{entry.key}{INVESTIGATED_KEY_INFIX}{round_number}",
                 value=NOT_SETTLED_VALUE,
                 source=LedgerSource.ASSUMPTION,
                 confidence=0.5,
@@ -635,14 +700,52 @@ def not_found_answer(
         )
         for section, entry in draft.ledger_updates
     ]
-    lines = (
-        [f"{NOT_SETTLED_REPLY} {OPEN_FOR_IMPLEMENTER_REPLY}"]
-        if open_for_implementer
-        else [NOT_SETTLED_REPLY]
-    )
-    if result.checked:
-        lines += ["", "What the code shows:", *_evidence_lines(result.checked)]
-    return AutoAnswer("\n".join(lines), AutoAnswerSource.ASSUMPTION, 0.5, updates)
+    text = _with_code_shown(_reply_text(language)["not_settled"], result, language)
+    return AutoAnswer(text, AutoAnswerSource.ASSUMPTION, 0.5, updates)
+
+
+def default_answer(
+    draft: AutoAnswer, result: Investigation, question: str, round_number: int
+) -> AutoAnswer:
+    """For a question the code cannot settle: the answerer's own conservative default.
+
+    ``draft`` is the deterministic answerer's answer for the question; its
+    sources, sections and text are kept, so the answer is exactly what auto
+    gives without an investigator, before refinement. Each key gets
+    ``.investigated.<round>`` so this question's default is refined on its own
+    instead of reusing another question's default for the same facet, and a
+    differing value for one facet across questions is not a same-key tie. Each
+    entry is ``DEFAULTED`` (a non-binding assumption), carries the question,
+    and lists the checked spans as evidence. The investigator's answer text is
+    not used. ``settle`` refines the result.
+    """
+    labels = [span.label for span in result.checked]
+    updates = [
+        (
+            section,
+            replace(
+                entry,
+                key=f"{entry.key}{INVESTIGATED_KEY_INFIX}{round_number}",
+                status=LedgerStatus.DEFAULTED,
+                rationale=(
+                    "The repository does not settle this question; a conservative "
+                    "default assumed on the requester's behalf, not confirmed."
+                ),
+                evidence=[*entry.evidence, *labels],
+                question=question,
+            ),
+        )
+        for section, entry in draft.ledger_updates
+    ]
+    return replace(draft, ledger_updates=updates)
+
+
+def _with_code_shown(text: str, result: Investigation, language: str) -> str:
+    """``text``, then what the checked spans show, under a header in ``language``."""
+    if not result.checked:
+        return text
+    header = _reply_text(language)["code_shows"]
+    return "\n".join([text, "", header, *_evidence_lines(result.checked)])
 
 
 def _clip(text: str, limit: int = _LOG_TEXT_LIMIT) -> str:
@@ -657,7 +760,8 @@ async def _investigate(
     turn: InterviewTurn,
     state: AutoPipelineState,
     round_number: int,
-) -> AutoAnswer | None:
+) -> Investigation | None:
+    """Investigate the round's question; ``None`` when the investigator does not apply."""
     investigator = driver.investigator
     if (
         investigator is None
@@ -691,6 +795,7 @@ async def _investigate(
         "elapsed_seconds": round(result.elapsed_seconds, 3),
         "isolation": result.isolation,
         "kind": result.kind,
+        "answer_path": answer_path(result),
         "throttle_waited_seconds": round(result.throttle_waited_seconds, 3),
         "runtime_backend": investigator.runtime_backend,
         "model": investigator.resolved_model,
@@ -712,11 +817,7 @@ async def _investigate(
             aggregate_type="auto_session",
             **data,
         )
-    if result.found:
-        return found_answer(draft, result, question, round_number)
-    return not_found_answer(
-        draft, result, question, round_number, open_for_implementer=driver.requester is None
-    )
+    return result
 
 
 async def settle(
@@ -728,19 +829,31 @@ async def settle(
     ledger: SeedDraftLedger,
     round_number: int,
 ) -> AutoAnswer:
-    """Settle one round's draft: investigate, else refine; then ask the requester.
+    """Settle one round's draft: investigate, then answer by ``answer_path``; then ask the requester.
 
     Without an investigator (or with no runtime) this is the earlier sequence
-    unchanged: ``_refine_answer`` then ``ask_requester``. An investigated
-    answer skips the refiner. A found answer has source ``repo_fact`` and so
-    is never routed to the requester; a not-found answer has source
-    ``assumption`` and is routed with the factual reply as its draft.
+    unchanged: ``_refine_answer`` then ``ask_requester``. A found answer has
+    source ``repo_fact``, skips the refiner and is never routed to the
+    requester. A not-settled ``current_behavior`` answer has source
+    ``assumption``, skips the refiner, and is routed with the factual reply as
+    its draft. Any other question gets the draft's conservative default
+    (``default_answer``), refined like an answer that was never investigated,
+    and is routed with that default as its draft.
     """
-    investigated = await _investigate(driver, answer, question, turn, state, round_number)
-    if investigated is None:
+    result = await _investigate(driver, answer, question, turn, state, round_number)
+    if result is None:
         answer = await driver._refine_answer(answer, question, state, ledger)
+        return await ask_requester(driver, answer, question, turn, state, round_number)
+    language = answer_language(f"{question}\n{state.goal}")
+    path = answer_path(result)
+    if path == "repo_fact":
+        answer = found_answer(answer, result, question, round_number, language=language)
+    elif path == "not_settled":
+        answer = not_found_answer(answer, result, question, round_number, language=language)
     else:
-        answer = investigated
+        default = default_answer(answer, result, question, round_number)
+        refined = await driver._refine_answer(default, question, state, ledger)
+        answer = replace(refined, text=_with_code_shown(refined.text, result, language))
     return await ask_requester(driver, answer, question, turn, state, round_number)
 
 
@@ -914,6 +1027,7 @@ __all__ = [
     "CALL_TIMEOUT_ENV",
     "DEFAULT_CALL_TIMEOUT_SECONDS",
     "DEFAULT_MAX_CALLS",
+    "INVESTIGATED_KEY_INFIX",
     "INVESTIGATOR_PERMISSION_MODE",
     "INVESTIGATOR_TOOLS",
     "MAX_CALLS_ENV",
@@ -922,8 +1036,10 @@ __all__ = [
     "READ_ONLY_ENFORCING_BACKENDS",
     "Investigation",
     "RepoInvestigator",
+    "answer_path",
     "build_repo_investigator",
     "close_known",
+    "default_answer",
     "enforces_read_only",
     "found_answer",
     "judge_reply",

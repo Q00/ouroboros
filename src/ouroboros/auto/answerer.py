@@ -117,6 +117,48 @@ class AutoAnswer:
         return f"[from-auto][{self.source.value}] {self.text}"
 
 
+# Scripts that name the user's language without a model, checked in order.
+_LANGUAGE_SCRIPTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ko", re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")),
+    ("ja", re.compile(r"[\u3040-\u30ff]")),
+    ("zh", re.compile(r"[\u4e00-\u9fff]")),
+)
+
+
+def answer_language(text: str) -> str:
+    """Return ``"ko"``, ``"ja"``, ``"zh"`` or ``"en"``: the language of ``text`` by script.
+
+    It picks the language of a fixed sentence auto writes without a model (the
+    non-goal default, the investigator's not-settled reply); it never routes a
+    question. A model-written answer follows the user's language through its
+    prompt instead. A Latin-script language other than English has no script
+    signal and gets English.
+    """
+    for language, pattern in _LANGUAGE_SCRIPTS:
+        if pattern.search(text):
+            return language
+    return "en"
+
+
+# The non-goal default: scope ends where the goal ends. ``{goal}`` is the goal.
+_NON_GOAL_TEMPLATES: Mapping[str, str] = {
+    "en": "Anything the goal “{goal}” does not ask for is a non-goal unless explicitly requested.",
+    "ko": "목표(“{goal}”)에 없는 작업은 명시적으로 요청하지 않는 한 모두 비목표입니다.",
+    "ja": "目標「{goal}」にない作業は、明示的に求められない限りすべて対象外です。",
+    "zh": "目标“{goal}”之外的工作，除非明确要求，均为非目标。",
+}
+# Longer goals are quoted up to this many characters, ending in an ellipsis.
+_GOAL_EXCERPT_CHARS = 200
+
+
+def _goal_excerpt(ledger: SeedDraftLedger) -> str:
+    """The latest resolved goal on one line, cut at :data:`_GOAL_EXCERPT_CHARS`."""
+    goal = " ".join(_latest_resolved_goal(ledger).split())
+    if len(goal) > _GOAL_EXCERPT_CHARS:
+        goal = f"{goal[: _GOAL_EXCERPT_CHARS - 1]}\u2026"
+    return goal
+
+
 class AutoAnswerer:
     """Policy engine for bounded auto interview answers.
 
@@ -210,7 +252,7 @@ class AutoAnswerer:
         )
         if QuestionIntent.VERIFICATION in intents and not demote_for_user_verify:
             return _maybe_apply_user_preference(
-                self._verification_answer(question),
+                self._verification_answer(question, ledger),
                 _INTENT_TO_SECTIONS[QuestionIntent.VERIFICATION],
                 context,
             )
@@ -287,7 +329,7 @@ class AutoAnswerer:
         if section in {"acceptance_criteria", "verification_plan"}:
             gap_question = "Which command output verifies the acceptance criteria?"
             return _maybe_apply_user_preference(
-                self._verification_answer(gap_question),
+                self._verification_answer(gap_question, ledger),
                 (section,),
                 context,
             )
@@ -344,42 +386,36 @@ class AutoAnswerer:
                 entry = replace(entry, question=asked)
             ledger.add_entry(section, entry)
 
-    def _non_goal_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:  # noqa: ARG002
-        goal_text = _latest_resolved_goal(ledger).lower()
-        excluded = ["cloud sync", "paid services"]
-        identity_terms = (
-            r"auth|authentication|authorization|authorize|login|sign[- ]?in|signup|"
-            r"password|sso|single sign[- ]?on|oauth|oidc|saml|identity|"
-            r"role[- ]?based|roles?|permissions?|access control"
-        )
-        if not re.search(rf"\b({identity_terms})\b", goal_text):
-            excluded.append("authentication")
-        if not re.search(r"\b(production|prod|deploy|deployment|release|publish)\b", goal_text):
-            excluded.append("production deployment")
-        value = (
-            f"For auto MVP scope, {', '.join(excluded)} are non-goals unless explicitly requested."
-        )
+    def _non_goal_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:
+        # Bounded by the goal itself, in the user's language. A fixed list of
+        # exclusions would name things the goal never mentioned.
+        goal = _goal_excerpt(ledger)
+        template = _NON_GOAL_TEMPLATES[answer_language(f"{question}\n{goal}")]
+        value = template.format(goal=goal)
         entry = LedgerEntry(
             key="non_goals.mvp_scope",
             value=value,
             source=LedgerSource.NON_GOAL,
             confidence=0.86,
             status=LedgerStatus.DEFAULTED,
-            rationale="Conservative auto policy bounds MVP scope.",
+            rationale="Conservative auto policy bounds scope to the goal.",
         )
         return AutoAnswer(
             value, AutoAnswerSource.NON_GOAL, 0.86, [("non_goals", entry)], non_goals=[value]
         )
 
-    def _verification_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
+    def _verification_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:
         # -- DUAL-PATH HOOK 3: verifiable-predicate repair --------------------
         # When a profile is active, iterate its ``verifiable_predicates`` in
         # order and use the first one whose ``matches`` returns True against the
         # question text.  The predicate's ``repair_template`` replaces the
         # hardcoded "exit code 0 and stdout" AC text so domain-specific
         # verification language appears in the Seed instead of the coding
-        # default.  When no predicate matches (or no profile is active), the
-        # original hardcoded coding-domain text is used verbatim — safety hatch.
+        # default.  The template is applied to the user's goal, not to the
+        # question: an acceptance criterion states what is checked, and a
+        # question repeated back is no answer.  When no predicate matches (or
+        # no profile is active), the original hardcoded coding-domain text is
+        # used verbatim — safety hatch.
         fallback_ac_value = "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion."
         fallback_value = "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable."
         if self.active_profile is not None:
@@ -389,7 +425,7 @@ class AutoAnswerer:
                 return self._profile_callback_blocker(question, "find_verifiable_predicate", exc)
             if matched is not None:
                 try:
-                    ac_value = matched.repair_template(question)
+                    ac_value = matched.repair_template(_goal_excerpt(ledger) or question)
                 except Exception as exc:
                     return self._profile_callback_blocker(
                         question, f"{matched.code}.repair_template", exc

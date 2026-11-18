@@ -94,6 +94,11 @@ REQUESTER_KEY_SUFFIX = ".requester"
 # settles its section but reaches the worker only as ``Seed.repo_facts``.
 REPO_FACT_KEY_INFIX = ".repo_fact."
 
+# Fixed value of the ledger entry ``auto/investigator.py`` writes for a question
+# about the current code that the code does not settle. It keeps the entry
+# active and states that fact without guessing; it decides nothing.
+NOT_SETTLED_VALUE = "The repository code does not settle this interview question."
+
 # Key of the ledger entry holding the user's request verbatim, written once by
 # ``SeedDraftLedger.from_goal``. It is the goal the worker sees (``Seed.sourced_scope``).
 USER_GOAL_KEY = "goal.primary"
@@ -570,7 +575,9 @@ class SeedDraftLedger:
         ``INFERRED``), one per ``(section, key)`` keeping the latest active
         value, with the goal echo excluded (the goal is surfaced to the refiner
         separately). ``WEAK`` / ``CONFLICTING`` / ``BLOCKED`` / ``MISSING``
-        entries are omitted because they are superseded or unresolved.
+        entries are omitted because they are superseded or unresolved, and so is
+        an entry holding :data:`NOT_SETTLED_VALUE`, which records that the code
+        does not settle a question and decides nothing.
 
         The answer refiner consumes this snapshot to stay CONSISTENT with prior
         rounds instead of re-deciding the same facet differently every round —
@@ -584,7 +591,11 @@ class SeedDraftLedger:
             if name in exclude_sections:
                 continue
             for entry in section.entries:
-                if entry.status in active and entry.value.strip():
+                if (
+                    entry.status in active
+                    and entry.value.strip()
+                    and entry.value != NOT_SETTLED_VALUE
+                ):
                     decided[(name, entry.key)] = entry.value
         return [(section, key, value) for (section, key), value in decided.items()]
 

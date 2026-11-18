@@ -1238,6 +1238,20 @@ def _artifact_text(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+# The refined answer is the user's answer to the interviewer, so it is written in
+# the language the interviewer asked in (which follows the user's).
+REFINER_LANGUAGE_RULE = (
+    "Write the answer in the language the interview question is written in, "
+    "which is the user's language."
+)
+# The refiner reads no files. A product decision it writes is a non-binding
+# assumption; a claim about the current code would be a fabricated repo fact.
+REFINER_NO_REPO_FACTS_RULE = (
+    "You have not read the repository: never state what the existing code does "
+    "or contains; state the most conservative reasonable decision instead."
+)
+
+
 class LLMAnswerRefiner:
     """Turn a generic deterministic auto-answer into a concrete, AI-written one.
 
@@ -1263,7 +1277,8 @@ class LLMAnswerRefiner:
         "When contracts already committed earlier in this interview are listed, "
         "keep their exact strings VERBATIM — never reformat, rename, or re-decide "
         "them — and specify only the detail this question still leaves undecided, "
-        "fully consistent with those commitments."
+        "fully consistent with those commitments. "
+        f"{REFINER_LANGUAGE_RULE} {REFINER_NO_REPO_FACTS_RULE}"
     )
 
     def __init__(self, llm_adapter: LLMAdapter, *, model: str | None = None) -> None:
