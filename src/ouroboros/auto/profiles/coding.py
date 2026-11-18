@@ -47,6 +47,56 @@ def _is_observable_criterion(criterion: str) -> bool:
     return _is_observable(criterion)
 
 
+# How each predicate's criterion is checked, in the criterion's language. A
+# repaired criterion keeps the requester's text first and verbatim and gains
+# one clause; a generic English prefix would bury it and change its language.
+CHECK_SEPARATOR = " \u2014 "
+_CHECK_CLAUSES: dict[str, dict[str, str]] = {
+    "exit_code": {
+        "en": "the command exits 0 on success and non-zero on failure",
+        "ko": "성공하면 종료 코드 0으로, 실패하면 0이 아닌 종료 코드로 끝난다",
+        "ja": "成功時は終了コード 0、失敗時は 0 以外の終了コードで終わる",
+        "zh": "成功时以退出码 0 结束，失败时以非零退出码结束",
+    },
+    "test_pass": {
+        "en": "the test suite runs and all tests pass",
+        "ko": "테스트를 실행하면 모두 통과한다",
+        "ja": "テストスイートを実行するとすべて合格する",
+        "zh": "运行测试套件时所有测试都通过",
+    },
+    "lint_clean": {
+        "en": "the linter reports zero errors",
+        "ko": "린터가 오류를 하나도 보고하지 않는다",
+        "ja": "リンターのエラーが 0 件である",
+        "zh": "代码检查工具报告零个错误",
+    },
+    "type_check_clean": {
+        "en": "the type checker reports zero errors",
+        "ko": "타입 검사기가 오류를 하나도 보고하지 않는다",
+        "ja": "型チェッカーのエラーが 0 件である",
+        "zh": "类型检查器报告零个错误",
+    },
+    "observable_behavior": {
+        "en": (
+            "checked by its command output, a written file or artifact, "
+            "an API response, or a test result"
+        ),
+        "ko": "명령 출력, 작성된 파일이나 산출물, API 응답, 테스트 결과로 확인한다",
+        "ja": "コマンド出力、書き出されたファイルや成果物、API 応答、テスト結果で確認する",
+        "zh": "通过命令输出、写入的文件或产物、API 响应或测试结果来检查",
+    },
+}
+
+
+def _with_check(criterion: str, code: str) -> str:
+    """``criterion`` verbatim, then how it is checked, in its own language."""
+    from ouroboros.auto.answerer import answer_language
+
+    text = criterion.strip()
+    clause = _CHECK_CLAUSES[code][answer_language(text)]
+    return f"{text}{CHECK_SEPARATOR}{clause}" if text else clause
+
+
 def _matches_observable_pattern(criterion: str, *patterns: str) -> bool:
     """Return True only for criteria accepted by the existing grading contract."""
     if not _is_observable_criterion(criterion):
@@ -70,7 +120,7 @@ class _ExitCodePredicate:
         )
 
     def repair_template(self, criterion: str) -> str:
-        return f"Command exits 0 on success and non-zero on failure: {criterion}"
+        return _with_check(criterion, self.code)
 
 
 class _TestPassPredicate:
@@ -89,7 +139,7 @@ class _TestPassPredicate:
         )
 
     def repair_template(self, criterion: str) -> str:
-        return f"Run test suite and all tests pass: {criterion}"
+        return _with_check(criterion, self.code)
 
 
 class _LintCleanPredicate:
@@ -109,7 +159,7 @@ class _LintCleanPredicate:
         )
 
     def repair_template(self, criterion: str) -> str:
-        return f"Linter reports zero errors: {criterion}"
+        return _with_check(criterion, self.code)
 
 
 class _TypeCheckCleanPredicate:
@@ -128,7 +178,7 @@ class _TypeCheckCleanPredicate:
         )
 
     def repair_template(self, criterion: str) -> str:
-        return f"Type checker reports zero errors: {criterion}"
+        return _with_check(criterion, self.code)
 
 
 class _ObservableBehaviorPredicate:
@@ -140,7 +190,7 @@ class _ObservableBehaviorPredicate:
         return _is_observable_criterion(criterion)
 
     def repair_template(self, criterion: str) -> str:
-        return f"Mention command output, file/artifact, API response, or test result: {criterion}"
+        return _with_check(criterion, self.code)
 
 
 # ---------------------------------------------------------------------------
