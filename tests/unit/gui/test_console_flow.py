@@ -322,7 +322,43 @@ def test_a_finished_auto_job_ends_with_its_result(
         "in_repo": True,
         "files": ["palindrome.py"],
         "file_count": 1,
+        "internal_files": [],
+        "internal_count": 0,
     }
+
+
+_NOISY_AUTO_SCRIPT = """
+from pathlib import Path
+Path("md2csv.py").write_text("x\\n")
+Path(".ouroboros").mkdir()
+Path(".ouroboros/state.json").write_text("{{}}")
+Path("__pycache__").mkdir()
+Path("__pycache__/md2csv.cpython-312.pyc").write_bytes(b"")
+print("  Execution ID: exec_20e9d3785fd6")
+print("Run handoff status: completed")
+"""
+
+
+def test_an_auto_result_lists_ouroboros_state_and_bytecode_apart_and_counts_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        harness,
+        "ouroboros_command",
+        lambda *_args: [sys.executable, "-c", _NOISY_AUTO_SCRIPT.format()],
+    )
+    folder = _repo(tmp_path / "proj")
+    state = _state()
+    chat = state.harness.create({"goal": "md2csv", "mode": "auto", "cwd": str(folder)})
+
+    session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
+
+    result = session["messages"][-1]
+    assert (result["files"], result["file_count"]) == (["md2csv.py"], 1)
+    assert (result["internal_files"], result["internal_count"]) == (
+        [".ouroboros/", "__pycache__/"],
+        2,
+    )
 
 
 @pytest.mark.parametrize(
@@ -679,6 +715,201 @@ def test_refusals_reach_the_page_with_their_code(tmp_path: Path) -> None:
 
 
 # ── 6. the model a sentinel backend reports ───────────────────────────
+
+
+def _recording_auto(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """The fake ``ouroboros auto``, recording the arguments each job was started with."""
+    launched: list[tuple[str, ...]] = []
+    script = _AUTO_SCRIPT.format(handoff="completed", code=0)
+
+    def command(*args: str) -> list[str]:
+        launched.append(args)
+        return [sys.executable, "-c", script]
+
+    monkeypatch.setattr(harness, "ouroboros_command", command)
+    return launched
+
+
+def _config(home: Path, text: str) -> None:
+    path = home / ".ouroboros" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(f'model = "{model}"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+
+def _runtime_arg(args: tuple[str, ...]) -> str | None:
+    return args[args.index("--runtime") + 1] if "--runtime" in args else None
+
+
+def test_an_explicit_codex_chat_names_codex_and_its_own_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.backends import model_catalog
+
+    _codex_home(tmp_path, monkeypatch, "gpt-6.2-astra")
+    monkeypatch.setattr(model_catalog, "detect_backend_cli", lambda _name: "/bin/codex")
+    launched = _recording_auto(monkeypatch)
+    state = _state()
+    chat = state.harness.create(
+        {"goal": "palindrome", "mode": "auto", "backend": "codex", "cwd": str(tmp_path)}
+    )
+
+    session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
+
+    assert [_runtime_arg(args) for args in launched] == ["codex"]
+    assert session["auto_model"] == {
+        "model": "default",
+        "backend": "codex",
+        "configured": "gpt-6.2-astra",
+    }
+
+
+def test_a_default_claude_chat_without_the_sdk_names_the_cli_it_runs_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """``--runtime claude-cli`` drives every stage, so a configured Codex Execute stage is not it."""
+    import importlib.util
+
+    from ouroboros.config import loader
+
+    _config(
+        isolated_home,
+        "orchestrator:\n  runtime_backend: claude\n"
+        "  runtime_profile:\n    stages:\n      execute: codex\n",
+    )
+    _codex_home(tmp_path, monkeypatch, "gpt-6.2-astra")
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *rest: None if name == "claude_agent_sdk" else real_find_spec(name, *rest),
+    )
+    asked: list[str | None] = []
+    real_model = loader.resolve_execution_model
+
+    def execution_model(backend: str | None) -> str | None:
+        asked.append(backend)
+        return real_model(backend)
+
+    monkeypatch.setattr(loader, "resolve_execution_model", execution_model)
+    launched = _recording_auto(monkeypatch)
+    state = _state()
+    chat = state.harness.create({"goal": "palindrome", "mode": "auto", "cwd": str(tmp_path)})
+
+    session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
+
+    assert [_runtime_arg(args) for args in launched] == ["claude-cli"]
+    # The model is the one the Execute handler gives the Claude Code CLI worker,
+    # not Codex's configured default.
+    assert asked == ["claude_mcp"]
+    assert session["auto_model"] == {
+        "model": real_model("claude_mcp") or "default",
+        "backend": "claude-cli",
+        "configured": None,
+    }
+
+
+def test_without_an_override_the_configured_execute_stage_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    _config(
+        isolated_home,
+        "orchestrator:\n  runtime_backend: codex\n"
+        "  runtime_profile:\n    stages:\n      execute: opencode\n",
+    )
+    launched = _recording_auto(monkeypatch)
+    state = _state()
+    chat = state.harness.create({"goal": "palindrome", "mode": "auto", "cwd": str(tmp_path)})
+
+    session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
+
+    assert [_runtime_arg(args) for args in launched] == [None]
+    assert session["auto_model"]["backend"] == "opencode"
+
+
+def test_a_pinned_execute_model_is_looked_up_for_the_runtime_that_runs(
+    monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    from ouroboros.config import loader
+
+    _config(
+        isolated_home,
+        "orchestrator:\n  runtime_backend: codex\n"
+        "  runtime_profile:\n    stages:\n      execute: opencode\n",
+    )
+    pins = {"codex": "gpt-6-sol", "opencode": "glm-5"}
+    monkeypatch.setattr(loader, "resolve_execution_model", lambda backend: pins.get(backend))
+
+    # An explicit runtime drives Execute too; no override follows the profile.
+    assert harness._auto_model("codex") == {
+        "model": "gpt-6-sol",
+        "backend": "codex",
+        "configured": None,
+    }
+    assert harness._auto_model(None) == {
+        "model": "glm-5",
+        "backend": "opencode",
+        "configured": None,
+    }
+
+
+def test_an_unreadable_config_gives_no_auto_model_rather_than_a_guess(
+    isolated_home: Path,
+) -> None:
+    _config(isolated_home, "- not a mapping\n")
+    assert harness._auto_model(None) is None
+    assert harness._auto_model("not-an-agent") is None
+
+
+@pytest.mark.parametrize(
+    ("goal", "title"),
+    [
+        ("Build a palindrome checker", "Build a palindrome checker"),
+        ("\n  First line  \nsecond line", "First line"),
+        (
+            "Build a Python CLI that converts Markdown tables to CSV (file or stdin in, "
+            "CSV to stdout), with pytest tests.",
+            "Build a Python CLI that converts Markdown tables to CSV (file or stdin in, CSV…",
+        ),
+        ("x" * 100, "x" * 79 + "…"),
+        ("a" * 70 + " " + "b" * 40, "a" * 70 + "…"),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_a_chat_title_is_cut_at_a_word_and_says_so(goal: object, title: str) -> None:
+    assert harness.chat_title(goal) == title
+    assert len(harness.chat_title(goal)) <= 80
+
+
+def test_the_chat_list_titles_old_chats_from_their_goal(tmp_path: Path) -> None:
+    h = harness.Harness()
+    goal = (
+        "Build a Python CLI that converts Markdown tables to CSV (file or stdin in, CSV to stdout)"
+    )
+    h._sessions["old"] = {
+        "id": "old",
+        "title": goal[:80],  # saved before titles were cut at a word
+        "goal": goal,
+        "cwd": str(tmp_path),
+        "mode": "auto",
+        "status": "done",
+        "version": 0,
+        "messages": [],
+    }
+    h._sessions["bare"] = {"id": "bare", "title": "", "mode": "ask", "messages": []}
+
+    rows = {row["id"]: row["title"] for row in h.list_sessions()}
+
+    assert rows["old"] == harness.chat_title(goal)
+    assert rows["old"].endswith("…")
+    assert rows["bare"] == "Untitled"
 
 
 def test_a_default_model_names_the_agent_and_its_configured_model(

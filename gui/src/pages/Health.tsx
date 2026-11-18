@@ -1,11 +1,11 @@
-import { CircleAlert, CircleCheck, Download, PackageCheck, RotateCw, TriangleAlert } from "lucide-react";
+import { CircleAlert, CircleCheck, CircleDashed, Download, PackageCheck, RotateCw, TriangleAlert } from "lucide-react";
 import { motion } from "motion/react";
 import { useState } from "react";
 
 import { useT } from "../i18n";
 import { explain, useAction } from "../core/action";
 import { ApiFailure, post } from "../core/api";
-import { shortPath } from "../core/format";
+import { useShortPath } from "../core/paths";
 import { openJobs, trackJob } from "../core/jobs";
 import { invalidate, useResource } from "../core/resource";
 import { restartConsole } from "../core/server";
@@ -27,14 +27,18 @@ function humanize(name: string): string {
 }
 
 function Surface({ surface }: { surface: DoctorSurface }) {
-  const { tx } = useT();
-  const Icon = SURFACE_ICON[surface.status];
+  const shortPath = useShortPath();
+  const { t, tx } = useT();
+  // An integration nobody set up is not a problem: muted, and said to be optional.
+  const Icon = surface.optional ? CircleDashed : SURFACE_ICON[surface.status];
+  const tone = surface.optional ? "mute" : SURFACE_TONE[surface.status];
   return (
-    <motion.li className="surface" variants={{ hidden: { opacity: 0, x: -8 }, show: { opacity: 1, x: 0 } }}>
-      <Icon size={17} aria-hidden className={`tone-${SURFACE_TONE[surface.status]}`} />
+    <motion.li className="surface" data-optional={surface.optional || undefined} variants={{ hidden: { opacity: 0, x: -8 }, show: { opacity: 1, x: 0 } }}>
+      <Icon size={17} aria-hidden className={`tone-${tone}`} />
       <div className="surface-text">
         <strong>{tx(`doctor.${surface.name}`, humanize(surface.name))}</strong>
         <span>{surface.message}</span>
+        {surface.optional ? <span className="surface-fix">{t("health.optionalNote")}</span> : null}
         {surface.remediation ? <span className="surface-fix">{surface.remediation}</span> : null}
         {surface.path ? (
           <span className="path" title={surface.path}>
@@ -42,12 +46,13 @@ function Surface({ surface }: { surface: DoctorSurface }) {
           </span>
         ) : null}
       </div>
-      <Chip tone={SURFACE_TONE[surface.status]}>{tx(`doctor.status.${surface.status}`, surface.status)}</Chip>
+      {surface.optional ? <Chip>{t("doctor.status.optional")}</Chip> : <Chip tone={SURFACE_TONE[surface.status]}>{tx(`doctor.status.${surface.status}`, surface.status)}</Chip>}
     </motion.li>
   );
 }
 
 export function HealthPage(_props: { rest: string }) {
+  const shortPath = useShortPath();
   const { t, tx } = useT();
   const doctor = useResource<Doctor>("/api/doctor", { interval: 20_000 });
   const components = useResource<ComponentsView>("/api/components", { interval: 8000 });
@@ -89,8 +94,9 @@ export function HealthPage(_props: { rest: string }) {
   }
 
   const surfaces = doctor.data?.surfaces ?? [];
-  const tally = { pass: 0, warn: 0, fail: 0 };
-  for (const surface of surfaces) tally[surface.status] += 1;
+  // Counted as the overview counts them: an unset optional integration is not a warning.
+  const tally = { pass: 0, warn: 0, fail: 0, optional: 0 };
+  for (const surface of surfaces) tally[surface.optional ? "optional" : surface.status] += 1;
   const subject = dialog.subject;
 
   return (
@@ -197,6 +203,7 @@ export function HealthPage(_props: { rest: string }) {
                   <Chip tone="ok">{t("health.tally.pass", { count: tally.pass })}</Chip>
                   {tally.warn ? <Chip tone="warn">{t("health.tally.warn", { count: tally.warn })}</Chip> : null}
                   {tally.fail ? <Chip tone="fail">{t("health.tally.fail", { count: tally.fail })}</Chip> : null}
+                  {tally.optional ? <Chip>{t("health.tally.optional", { count: tally.optional })}</Chip> : null}
                 </span>
               ) : null
             }

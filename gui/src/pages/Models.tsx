@@ -5,7 +5,8 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useT } from "../i18n";
 import { useAction } from "../core/action";
 import { get, post } from "../core/api";
-import { backendName, shortPath } from "../core/format";
+import { backendName } from "../core/format";
+import { useShortPath } from "../core/paths";
 import { listedModels, needsOwnOption, stagePickerValue } from "../core/modelChoices";
 import { invalidate, useResource } from "../core/resource";
 import { toast } from "../core/toast";
@@ -203,6 +204,7 @@ function PresetButton({ preset, view, active, onApply }: { preset: RoutePreset; 
 }
 
 export function ModelsPage(_props: { rest: string }) {
+  const shortPath = useShortPath();
   const { t, tx } = useT();
   const settings = useResource<SettingsView>("/api/settings");
   const view = settings.data;

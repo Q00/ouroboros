@@ -255,8 +255,36 @@ def test_folder_changes_lists_every_path_git_status_reports(tmp_path: Path) -> N
     (folder / "__pycache__" / "p.cpython-312.pyc").write_bytes(b"")
 
     changes = workspace.folder_changes(str(folder))
-    # Nothing is hidden: bytecode is a change git reports, and it is counted.
-    assert changes == workspace.FolderChanges(("__pycache__/", "palindrome.py"), 2)
+    # Nothing is hidden: bytecode is a change git reports, and it is counted,
+    # in its own group so the project's count is the project's.
+    assert changes == workspace.FolderChanges(("palindrome.py",), 1, ("__pycache__/",), 1)
+
+
+def test_ouroboros_state_and_bytecode_are_grouped_apart_and_still_counted(
+    tmp_path: Path,
+) -> None:
+    folder = _folder(tmp_path)
+    _git(folder, "init", "-q")
+    (folder / "tests").mkdir()
+    (folder / "tests" / "test_md2csv.py").write_text("x")
+    _git(folder, "add", "tests")
+    _commit(folder, "t")
+    (folder / "md2csv.py").write_text("x")
+    (folder / "tests" / "test_md2csv.py").write_text("y")
+    (folder / ".ouroboros").mkdir()
+    (folder / ".ouroboros" / "state.json").write_text("{}")
+    (folder / "tests" / "__pycache__").mkdir()
+    (folder / "tests" / "__pycache__" / "t.cpython-312.pyc").write_bytes(b"")
+
+    changes = workspace.folder_changes(str(folder))
+
+    assert changes == workspace.FolderChanges(
+        ("tests/test_md2csv.py", "md2csv.py"), 2, (".ouroboros/", "tests/__pycache__/"), 2
+    )
+    # Every path git reports is in exactly one group.
+    assert changes.count + changes.internal_count == len(
+        workspace.status_paths(_git(folder, "status", "--porcelain"))
+    )
 
 
 def test_a_bytecode_path_is_shown_and_counted(
@@ -273,7 +301,49 @@ def test_a_bytecode_path_is_shown_and_counted(
 
     monkeypatch.setattr(workspace, "_git", status)
     changes = workspace.folder_changes(str(folder))
-    assert changes == workspace.FolderChanges(("__pycache__/custom.pyc",), 1)
+    assert changes == workspace.FolderChanges((), 0, ("__pycache__/custom.pyc",), 1)
+
+
+@pytest.mark.parametrize(
+    ("path", "internal"),
+    [
+        (".ouroboros/", True),
+        (".ouroboros/seeds/seed.yaml", True),
+        ("app/.ouroboros/", True),
+        ("__pycache__/", True),
+        ("src/pkg/__pycache__/m.cpython-312.pyc", True),
+        ("stray.pyc", True),
+        ("old.pyo", True),
+        ('"__pycache__/caf\\303\\251.pyc"', True),
+        ("src/m.py -> __pycache__/m.pyc", True),
+        ("__pycache__/m.pyc -> src/m.py", False),
+        ("md2csv.py", False),
+        ("tests/", False),
+        (".ouroboros.md", False),
+        ("docs/pycache.md", False),
+        ("ouroboros/", False),
+        ("", False),
+    ],
+)
+def test_internal_paths_are_ouroboros_state_and_python_bytecode_only(
+    path: str, internal: bool
+) -> None:
+    assert workspace.is_internal_path(path) is internal
+
+
+def test_split_changes_keeps_git_order_and_bounds_each_group() -> None:
+    project = [f"f{index:03}.py" for index in range(workspace.MAX_FILES + 3)]
+    internal = [f"pkg{index}/__pycache__/" for index in range(workspace.MAX_FILES + 2)]
+    mixed = [item for pair in zip(project, internal, strict=False) for item in pair] + project[
+        len(internal) :
+    ]
+
+    changes = workspace.split_changes(mixed)
+
+    assert changes.files == tuple(project[: workspace.MAX_FILES])
+    assert changes.count == len(project)
+    assert changes.internal == tuple(internal[: workspace.MAX_FILES])
+    assert changes.internal_count == len(internal)
 
 
 def test_status_paths_keeps_every_line_in_git_order() -> None:

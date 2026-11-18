@@ -5,7 +5,8 @@ import { useState } from "react";
 import { useT } from "../i18n";
 import { explain, useAction } from "../core/action";
 import { post } from "../core/api";
-import { shortPath, timeAgo } from "../core/format";
+import { timeAgo } from "../core/format";
+import { useShortPath } from "../core/paths";
 import { invalidate, useResource } from "../core/resource";
 import { expectHandoff } from "../core/server";
 import { toast } from "../core/toast";
@@ -35,6 +36,7 @@ function phaseOf(view: DaemonView, wanted: boolean | null): Phase {
 }
 
 export function McpPage(_props: { rest: string }) {
+  const shortPath = useShortPath();
   const { t, tx, locale } = useT();
   const daemon = useResource<DaemonView>("/api/daemon", { interval: 3000 });
   const view = daemon.data;

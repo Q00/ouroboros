@@ -1,8 +1,38 @@
-export function shortPath(path: string | null | undefined, home?: string): string {
+/** What a path is shown against: the home folder, and [resolved root, name it is reached by]. */
+export interface PathContext {
+  home?: string;
+  aliases?: [string, string][];
+}
+
+/** `path` is `root` or inside it, on a path-segment boundary. */
+function within(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
+/** The name `path` is reached by: a resolved root (macOS `/private/tmp`) as its link (`/tmp`). */
+function unalias(path: string, aliases: [string, string][]): string {
+  for (const [real, shown] of aliases) {
+    if (real && real !== "/" && within(path, real)) return shown + path.slice(real.length);
+  }
+  return path;
+}
+
+/**
+ * A path as the page shows it: under the home folder as `~/…`, a symlinked
+ * root by its link, and a long one with its middle elided. The full path
+ * belongs in a `title` or copy button next to it. Without a known home, only
+ * `/Users/<name>` and `/home/<name>` read as `~`.
+ */
+export function shortPath(path: string | null | undefined, context: PathContext = {}): string {
   if (!path) return "";
-  let shown = path;
-  if (home && shown.startsWith(home)) shown = `~${shown.slice(home.length)}`;
-  shown = shown.replace(/^\/(Users|home)\/[^/]+/, "~");
+  const aliases = context.aliases ?? [];
+  let shown = unalias(path, aliases);
+  const home = context.home ? unalias(context.home.replace(/(.)\/+$/, "$1"), aliases) : "";
+  if (home && home !== "/") {
+    if (within(shown, home)) shown = `~${shown.slice(home.length)}`;
+  } else if (!context.home) {
+    shown = shown.replace(/^\/(Users|home)\/[^/]+(?=\/|$)/, "~");
+  }
   if (shown.length <= 56) return shown;
   const parts = shown.split("/");
   if (parts.length <= 4) return shown;
@@ -64,6 +94,8 @@ const BACKEND_NAMES: Record<string, string> = {
   claude: "Claude Code",
   claude_code: "Claude Code",
   claude_mcp: "Claude Code (MCP host)",
+  // The Claude Code CLI worker, as `ouroboros auto --runtime` spells it.
+  "claude-cli": "Claude Code CLI",
   codex: "Codex CLI",
   codex_mcp: "Codex (MCP host)",
   opencode: "OpenCode",

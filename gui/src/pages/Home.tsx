@@ -3,13 +3,14 @@ import { motion } from "motion/react";
 import { useState } from "react";
 
 import { useT } from "../i18n";
-import { backendName, shortPath } from "../core/format";
+import { backendName } from "../core/format";
+import { useShortPath } from "../core/paths";
 import { useResource } from "../core/resource";
 import type { PageId } from "../core/router";
 import { href } from "../core/router";
 import type { Overview, SettingsView, StageView } from "../core/types";
 import { PageHead } from "../shell/PageHead";
-import { Chip, Command, Dot, Empty, Kpis, LoadError, SectionTitle, Skeleton } from "../ui/bits";
+import { Chip, Command, Dot, Empty, Kpis, LoadError, Notice, SectionTitle, Skeleton } from "../ui/bits";
 import { Button } from "../ui/Button";
 import { Segmented } from "../ui/Segmented";
 import { RunRow } from "./Runs";
@@ -212,10 +213,19 @@ function SetupBrief({ overview }: { overview: Overview }) {
   );
 }
 
+/**
+ * Connecting a tool (MCP, plugin) is optional: the console runs work without it.
+ * A half-wired integration is a warning, and so is having no agent CLI at all.
+ */
+function connectTone(overview: Overview): "ok" | "warn" | "muted" {
+  if (overview.clients.attention || overview.clients.installed === 0) return "warn";
+  return overview.clients.connected ? "ok" : "muted";
+}
+
 function Readiness({ overview }: { overview: Overview }) {
   const { t } = useT();
   const rows: { page: PageId; label: string; value: string; tone: "ok" | "warn" | "fail" | "muted" }[] = [
-    { page: "connect", label: t("nav.connect"), value: t("home.stat.tools.detail", { installed: overview.clients.installed, total: overview.clients.total }), tone: overview.clients.connected ? "ok" : overview.clients.installed ? "warn" : "muted" },
+    { page: "connect", label: t("nav.connect"), value: t("home.stat.tools.detail", { installed: overview.clients.installed, total: overview.clients.total }), tone: connectTone(overview) },
     { page: "models", label: t("nav.models"), value: t("home.stat.agent.detail", { backend: backendName(overview.llm_backend) }), tone: "ok" },
     { page: "providers", label: t("nav.providers"), value: `${overview.providers.configured} / ${overview.providers.total}`, tone: overview.providers.configured ? "ok" : "muted" },
     { page: "health", label: t("nav.health"), value: t("home.stat.health.detail", { pass: overview.doctor.pass }), tone: overview.doctor.fail ? "fail" : overview.doctor.warn ? "warn" : "ok" },
@@ -244,12 +254,14 @@ function Readiness({ overview }: { overview: Overview }) {
 type Tab = "overview" | "setup";
 
 export function HomePage(_props: { rest: string }) {
+  const shortPath = useShortPath();
   const { t } = useT();
   const overview = useResource<Overview>("/api/overview", { interval: 12_000 });
   const settings = useResource<SettingsView>("/api/settings");
   const [tab, setTab] = useState<Tab>("overview");
   const data = overview.data;
-  const state = !data ? "ok" : data.doctor.fail ? "fail" : data.doctor.warn || data.clients.attention || data.clients.connected === 0 ? "warn" : "ok";
+  // Not connecting a tool is a choice, not something to fix (#3046); no agent CLI at all is.
+  const state = !data ? "ok" : data.doctor.fail ? "fail" : data.doctor.warn || data.clients.attention || data.clients.installed === 0 ? "warn" : "ok";
 
   return (
     <>
@@ -311,7 +323,11 @@ export function HomePage(_props: { rest: string }) {
                   <SectionTitle aside={<a className="more-link" href={href("runs")}>{t("home.runs.all")}</a>}>
                     <span id="recent-title">{t("home.runs.title")}</span>
                   </SectionTitle>
-                  {data.runs.length === 0 ? (
+                  {data.runs_error ? (
+                    <Notice tone="warn" title={t("runs.unreadable")}>
+                      {t("runs.unreadableBody", { error: data.runs_error })}
+                    </Notice>
+                  ) : data.runs.length === 0 ? (
                     <Empty icon={<Sprout size={18} aria-hidden />} title={t("home.runs.empty")} body={t("home.runs.emptyBody")} />
                   ) : (
                     <ul className="run-list">

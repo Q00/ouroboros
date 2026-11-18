@@ -993,7 +993,15 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
             payload = _decode_payload(row["payload"])
             if not isinstance(payload, dict):
                 continue
-            link_id = row["link_id"]
+            # Progress rows were selected through their aggregate's progress head,
+            # so they belong to that aggregate's run, as in EventTail. Their payload
+            # ``session_id`` may be the agent's own session (a Codex thread id), not
+            # an Ouroboros session; it still may not name another selected run.
+            link_id = (
+                row["aggregate_id"]
+                if row["event_type"] in _PICKER_PROGRESS_EVENT_TYPES
+                else row["link_id"]
+            )
             matched_executions = (
                 executions_by_id.get(link_id, set()) if isinstance(link_id, str) else set()
             )

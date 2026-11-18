@@ -122,13 +122,18 @@ def _db_path() -> str:
     return str(default_db_path())
 
 
-def _recent_runs(limit: int = 10) -> list[dict[str, Any]]:
+def _recent_runs(limit: int = 10) -> tuple[list[dict[str, Any]], str | None]:
+    """Recent runs, and why they could not be read (``None`` when they could).
+
+    The reader refuses, rather than guesses, when the EventStore's run index
+    cannot be trusted; the page then says so instead of "no runs yet".
+    """
     from ouroboros.dashboard_web.reader import PickerIndexContractError, list_recent_executions
 
     try:
-        return list_recent_executions(_db_path(), limit=limit)
-    except PickerIndexContractError:
-        return []
+        return list_recent_executions(_db_path(), limit=limit), None
+    except PickerIndexContractError as exc:
+        return [], str(exc)
 
 
 def _recent_interviews(limit: int = 10) -> list[dict[str, Any]]:
@@ -140,10 +145,73 @@ def _recent_interviews(limit: int = 10) -> list[dict[str, Any]]:
         return []
 
 
+# Install surfaces of one client-tool integration, as `ouroboros doctor install`
+# names them. Each is optional: the console runs work without any of them.
+_OPTIONAL_INTEGRATIONS: tuple[frozenset[str], ...] = (
+    frozenset({"codex_personal_plugin", "codex_personal_plugin_launcher"}),
+    frozenset({"claude_plugin_marketplace", "claude_plugin_launcher"}),
+    frozenset({"zcode_bridge_plugin", "zcode_bridge_launcher"}),
+)
+
+
+def _absent(surface: dict[str, Any]) -> bool:
+    """A warning only because the surface's file or folder does not exist at all."""
+    path = surface.get("path")
+    return surface.get("status") == "warn" and isinstance(path, str) and not os.path.lexists(path)
+
+
 def _doctor_surfaces() -> list[dict[str, Any]]:
+    """Install surfaces as the doctor reports them, each with ``optional`` set.
+
+    ``optional`` is true for the surfaces of an integration that is not set up
+    at all: every one of its surfaces is a warning about a path that does not
+    exist. Such a surface is not a problem to fix, so the console counts it
+    apart from the warnings. One that exists but is stale, broken or half set
+    up stays a warning, and the doctor's own status is never changed.
+    """
     from ouroboros.cli.commands.doctor import collect_install_surfaces
 
-    return [asdict(surface) for surface in collect_install_surfaces()]
+    surfaces = [asdict(surface) for surface in collect_install_surfaces()]
+    by_name = {surface["name"]: surface for surface in surfaces}
+    unset = {
+        name
+        for group in _OPTIONAL_INTEGRATIONS
+        if group <= by_name.keys() and all(_absent(by_name[name]) for name in group)
+        for name in group
+    }
+    for surface in surfaces:
+        surface["optional"] = surface["name"] in unset
+    return surfaces
+
+
+def _doctor_counts(surfaces: list[dict[str, Any]]) -> dict[str, int]:
+    """Pass, warn and fail as the doctor reports them, with unset optional integrations apart."""
+    counts = {"pass": 0, "warn": 0, "fail": 0, "optional": 0}
+    for surface in surfaces:
+        counts["optional" if surface.get("optional") else surface["status"]] += 1
+    return counts
+
+
+def _display_paths() -> dict[str, Any]:
+    """What the page needs to show paths short: the home folder, and symlinked roots.
+
+    ``path_aliases`` maps a resolved root to the name it is reached by, longest
+    first. On macOS ``/tmp`` and ``/var`` are links into ``/private``, so a
+    folder the console resolved reads as ``/tmp/…``, and a home reached through
+    a link reads as ``~``. Only links that exist on this machine are listed.
+    """
+    aliases: dict[str, str] = {}
+    home = Path.home()
+    roots = [root for root in (Path("/tmp"), Path("/var"), Path("/etc")) if root.is_symlink()]
+    for link in (*roots, home):
+        try:
+            real = link.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue  # a dangling link or a missing home: nothing to map
+        if real != link:
+            aliases[str(real)] = str(link)
+    ordered = sorted(aliases.items(), key=lambda item: len(item[0]), reverse=True)
+    return {"home": str(home), "path_aliases": [list(item) for item in ordered]}
 
 
 # ── overview ──────────────────────────────────────────────────────────
@@ -156,6 +224,7 @@ def get_overview(state: ConsoleState, *, query: dict[str, str], body: Any) -> di
     surfaces = _doctor_surfaces()
     model = settings.SettingsModel()
     view_default = model.effective_default_runtime()
+    runs, runs_error = _recent_runs(limit=6)
     return {
         "version": version,
         "latest_version": latest,
@@ -172,13 +241,12 @@ def get_overview(state: ConsoleState, *, query: dict[str, str], body: Any) -> di
             "connected": sum(1 for c in cards if c["integration"]["state"] == "connected"),
             "attention": sum(1 for c in cards if c["integration"]["state"] == "partial"),
         },
-        "doctor": {
-            status: sum(1 for s in surfaces if s["status"] == status)
-            for status in ("pass", "warn", "fail")
-        },
+        "doctor": _doctor_counts(surfaces),
         "providers": providers.summary(),
-        "runs": _recent_runs(limit=6),
+        "runs": runs,
+        "runs_error": runs_error,
         "running_jobs": [j for j in state.jobs.list() if j["status"] == "running"],
+        **_display_paths(),
     }
 
 
@@ -365,7 +433,8 @@ def get_settings_models(state: ConsoleState, *, query: dict[str, str], body: Any
 
 
 def get_runs(state: ConsoleState, *, query: dict[str, str], body: Any) -> dict[str, Any]:
-    return {"runs": _recent_runs(limit=30), "interviews": _recent_interviews(limit=20)}
+    runs, runs_error = _recent_runs(limit=30)
+    return {"runs": runs, "runs_error": runs_error, "interviews": _recent_interviews(limit=20)}
 
 
 def _board(run_id: str) -> dict[str, Any]:

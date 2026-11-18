@@ -16,6 +16,7 @@ import type { Tone } from "../ui/bits";
 import { LogView } from "../ui/bits";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Mark";
+import { runPreparing } from "./Runs";
 
 // ── Steps ────────────────────────────────────────────────────────────
 
@@ -120,6 +121,8 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
         return state === "current" ? t("auto.caption.reviewing") : null;
       case "run":
         if (run?.progress && run.progress.total) return t("auto.caption.criteriaDone", { done: run.progress.done, total: run.progress.total });
+        // The run exists but is still planning its tasks, often for minutes.
+        if (state === "current" && runPreparing(run)) return t("auto.caption.preparing");
         return state === "current" ? t("auto.caption.starting") : null;
       case "verify":
         if (state === "warn") return t("auto.caption.unverified");
@@ -128,19 +131,29 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
       case "result": {
         // Not verified is said once, on the verify step.
         if (!outcome || outcome === "unverified") return null;
-        const files = result?.in_repo ? (result.file_count ?? 0) : 0;
-        return outcome === "completed" && files > 0 ? t("auto.caption.files", { count: files }) : t(RESULT_KEY[outcome]);
+        if (outcome !== "completed") return t(RESULT_KEY[outcome]);
+        const { files, internal } = changedCounts(result);
+        if (files > 0 && internal > 0) return t("auto.caption.filesInternal", { count: files, internal });
+        return files > 0 ? t("auto.caption.files", { count: files }) : t(RESULT_KEY[outcome]);
       }
     }
   });
+  const changed = changedCounts(result);
+  const resultTitle = outcome === "completed" && changed.files > 0 && changed.internal > 0 ? t("auto.caption.filesInternal.title", { count: changed.files, internal: changed.internal }) : undefined;
 
   const live0 = states[0] === "current" && view.max_rounds;
   return STEP_IDS.map((id, index) => ({
     id,
     state: states[index],
     caption: captions[index],
-    title: index === 0 && live0 ? t("auto.interview.ceiling", { max: view.max_rounds ?? 0 }) : (captions[index] ?? undefined),
+    title: index === 0 && live0 ? t("auto.interview.ceiling", { max: view.max_rounds ?? 0 }) : index === 5 && resultTitle ? resultTitle : (captions[index] ?? undefined),
   }));
+}
+
+/** Project files and Ouroboros state/bytecode an Auto result counted; none outside a repository. */
+function changedCounts(result: ChatMessage | undefined): { files: number; internal: number } {
+  if (!result?.in_repo) return { files: 0, internal: 0 };
+  return { files: result.file_count ?? 0, internal: result.internal_count ?? 0 };
 }
 
 /** The step a failed or stopped Auto chat ended on, for the footer that explains it. */

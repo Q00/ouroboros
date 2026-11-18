@@ -173,15 +173,54 @@ def prepare_git(cwd: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class FolderChanges:
-    """Paths ``git status`` reports as changed: the first ``MAX_FILES``, and how many in all."""
+    """Paths ``git status`` reports as changed, in two groups that together cover every path.
+
+    ``files`` and ``count`` are the project's own paths. ``internal`` and
+    ``internal_count`` are Ouroboros' state and Python bytecode
+    (:func:`is_internal_path`), listed apart but never dropped. Each list holds
+    at most ``MAX_FILES`` paths; each count covers every path of its group.
+    """
 
     files: tuple[str, ...]
     count: int
+    internal: tuple[str, ...] = ()
+    internal_count: int = 0
 
 
 def status_paths(porcelain: str) -> list[str]:
     """Every path in ``git status --porcelain`` output, as git reports it, in its order."""
     return [line[3:] for line in porcelain.splitlines() if line[3:]]
+
+
+# Folders Ouroboros itself writes in a project, and Python's bytecode cache.
+_INTERNAL_DIRS = frozenset({".ouroboros", "__pycache__"})
+_BYTECODE_SUFFIXES = (".pyc", ".pyo")
+
+
+def is_internal_path(path: str) -> bool:
+    """Whether a ``git status`` path is Ouroboros state or Python bytecode, not project work.
+
+    ``path`` is as :func:`status_paths` returns it: a rename (``old -> new``) is
+    judged by where it now is, and git's quoting of unusual names is removed
+    first. Any path component named ``.ouroboros`` or ``__pycache__`` counts,
+    since porcelain paths are relative to the repository root, not the folder.
+    """
+    current = path.rsplit(" -> ", 1)[-1].strip()
+    if len(current) >= 2 and current.startswith('"') and current.endswith('"'):
+        current = current[1:-1]
+    parts = [part for part in current.split("/") if part]
+    if not parts:
+        return False
+    return any(part in _INTERNAL_DIRS for part in parts) or parts[-1].endswith(_BYTECODE_SUFFIXES)
+
+
+def split_changes(paths: list[str]) -> FolderChanges:
+    """Group ``paths`` into project work and Ouroboros state/bytecode, keeping git's order."""
+    project = [path for path in paths if not is_internal_path(path)]
+    internal = [path for path in paths if is_internal_path(path)]
+    return FolderChanges(
+        tuple(project[:MAX_FILES]), len(project), tuple(internal[:MAX_FILES]), len(internal)
+    )
 
 
 def folder_changes(cwd: str) -> FolderChanges | None:
@@ -194,8 +233,7 @@ def folder_changes(cwd: str) -> FolderChanges | None:
         return None
     if status.returncode != 0:
         return None
-    files = status_paths(status.stdout)
-    return FolderChanges(tuple(files[:MAX_FILES]), len(files))
+    return split_changes(status_paths(status.stdout))
 
 
 __all__ = [
@@ -207,7 +245,9 @@ __all__ = [
     "GitState",
     "folder_changes",
     "git_state",
+    "is_internal_path",
     "prepare_git",
+    "split_changes",
     "status_paths",
     "workspace_problem",
 ]

@@ -1025,6 +1025,12 @@
   align-items: center;
 }
 
+/* An optional integration nobody set up reads as quiet, not as a problem. */
+.surface[data-optional] .surface-text strong {
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
 .component-icon {
   display: grid;
   place-items: center;
@@ -2043,6 +2049,49 @@
 
 .file-list code {
   overflow-wrap: anywhere;
+}
+
+/* An Auto result's Ouroboros state and bytecode: one muted line that opens. */
+.file-group {
+  display: grid;
+}
+
+.file-group-toggle {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 6px;
+  margin: -2px 0 -2px -6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-mute);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color var(--fast) ease,
+    color var(--fast) ease;
+}
+
+.file-group-toggle:hover {
+  background: var(--hover);
+  color: var(--text-soft);
+}
+
+.file-group-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.file-group .auto-collapse > .section-note {
+  margin: 8px 0 6px;
+}
+
+.file-list-muted {
+  color: var(--text-mute);
 }
 
 .thinking {
