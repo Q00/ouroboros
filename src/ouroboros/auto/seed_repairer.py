@@ -11,7 +11,7 @@ import threading
 from typing import Any
 from uuid import uuid4
 
-from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
+from ouroboros.auto.grading import _HANGUL_RE, VAGUE_TERMS, SeedGrade, _is_observable
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.ledger_seed import CONFIRMED_SCOPE_CONSTRAINT
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
@@ -160,7 +160,7 @@ class SeedRepairer:
                     if index not in repaired_acceptance_indices:
                         criterion = acceptance[index]
                         replacement = _observable_preserving_replacement(
-                            ac_text(criterion), index=index
+                            ac_text(criterion), index=index, goal=goal
                         )
                         acceptance[index] = _repair_criterion_description(criterion, replacement)
                         repaired_acceptance_indices.add(index)
@@ -359,19 +359,129 @@ def _dedupe_identical_criteria(
     return deduped
 
 
-def _observable_preserving_replacement(criterion: str, *, index: int) -> str:
-    """Make a criterion observable without erasing the original feature subject."""
-    normalized = criterion.strip().rstrip(".")
-    for term in VAGUE_TERMS:
-        normalized = re.sub(rf"\b{re.escape(term)}\b", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\b(should be|is|are|be)\b", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\s+(and|or)\s*$", "", normalized.strip(), flags=re.IGNORECASE)
-    normalized = re.sub(r"\s{2,}", " ", normalized).strip().strip("-:;,. ").strip()
-    subject = normalized or f"acceptance criterion {index + 1}"
-    return (
-        "A command/API check returns stable observable output or artifacts "
-        f"proving the original requirement for {subject}."
+# A repaired criterion keeps the requester's own sentence, verbatim and first,
+# and gains one clause naming how it is observed, in the criterion's language.
+# Each clause states evidence the grade gate accepts as observable (a passing
+# test, an API response, a written file, printed command output), so the
+# repaired criterion passes the check that flagged it and the loop converges.
+OBSERVABLE_CHECK_SEPARATOR = " — "
+_OBSERVABLE_CHECK_CLAUSES: dict[str, dict[str, str]] = {
+    "en": {
+        "test": "verified when the test suite passes",
+        "api": "verified when an API request returns the expected response",
+        "file": "verified when the expected file is written",
+        "command": "verified when running the command prints the expected output",
+    },
+    "ko": {
+        "test": "테스트를 실행해 통과하는지 확인한다",
+        "api": "API 요청이 기대한 응답을 반환하는지 확인한다",
+        "file": "기대한 파일이 생성되는지 확인한다",
+        "command": "명령을 실행하면 기대한 출력이 나오는지 확인한다",
+    },
+}
+
+
+def _english_words(alternatives: str) -> str:
+    # ``\b`` counts Hangul as a word character and finds no boundary in
+    # "CLI가", so English words are bounded by ASCII word characters only.
+    return rf"(?<![a-z0-9_])(?:{alternatives})(?![a-z0-9_])"
+
+
+_FILE_NOUN_RE = re.compile(
+    _english_words(r"files?|director(?:y|ies)|folders?")
+    + "|"
+    + _english_words(r"[\w-]+\.(?:csv|json|txt|md|ya?ml|html|xml|log|toml|ini|png|pdf)")
+    + "|파일|디렉터리|폴더",
+    re.IGNORECASE,
+)
+_FILE_WRITE_RE = re.compile(
+    _english_words(
+        r"writes?|written|saves?|saved|creates?|created|generates?|generated"
+        r"|exports?|exported|produces?|produced"
     )
+    + "|생성|저장|작성",
+    re.IGNORECASE,
+)
+_EVIDENCE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "test": re.compile(_english_words(r"tests?|pytest|unittest") + "|테스트", re.IGNORECASE),
+    "api": re.compile(
+        _english_words(r"apis?|endpoints?|https?|graphql") + "|엔드포인트", re.IGNORECASE
+    ),
+    "command": re.compile(
+        _english_words(r"cli|commands?|stdout|stderr|prints?|terminal|scripts?|shell")
+        + "|명령|출력|터미널",
+        re.IGNORECASE,
+    ),
+}
+# The criterion names its own evidence first; a test criterion is proved by the
+# test run even when it also mentions the CLI. The goal only breaks a tie for a
+# criterion that names none, and there the product surface (API, CLI, file
+# output) outranks a "with tests" rider.
+_CRITERION_EVIDENCE_ORDER = ("test", "api", "file", "command")
+_GOAL_EVIDENCE_ORDER = ("api", "command", "file", "test")
+# What removing a vague word leaves dangling at the end of a criterion
+# ("The CLI should be easy and user-friendly" -> "The CLI should be and").
+_DANGLING_TAIL_RE = re.compile(
+    r"[\s,;:-]*\b(?:and|or|should be|must be|should|must|is|are|be|very|more)\s*$",
+    re.IGNORECASE,
+)
+
+
+def strip_observable_check_clause(criterion: str) -> str:
+    """Return ``criterion`` without the observation clause this repairer appends."""
+    text = criterion.strip()
+    body = text.rstrip(" .")
+    for clauses in _OBSERVABLE_CHECK_CLAUSES.values():
+        for clause in clauses.values():
+            suffix = OBSERVABLE_CHECK_SEPARATOR + clause
+            if body.endswith(suffix):
+                return body[: -len(suffix)].rstrip()
+    return text
+
+
+def _observable_preserving_replacement(criterion: str, *, index: int, goal: str) -> str:
+    """Make a criterion observable without rewording or wrapping it.
+
+    Vague words are the only text removed, because the grade gate rejects them
+    wherever they appear. The rest of the sentence keeps its wording and casing.
+    When that sentence is still not observable, one clause in its own language
+    says what evidence proves it, chosen from what the criterion (else the goal)
+    is about.
+    """
+    subject = _without_vague_terms(criterion) or f"Acceptance criterion {index + 1}"
+    if _is_observable(subject):
+        return subject
+    language = "ko" if _HANGUL_RE.search(criterion) else "en"
+    evidence = (
+        _evidence_kind(subject, _CRITERION_EVIDENCE_ORDER)
+        or _evidence_kind(goal, _GOAL_EVIDENCE_ORDER)
+        or "command"
+    )
+    clause = _OBSERVABLE_CHECK_CLAUSES[language][evidence]
+    return f"{subject.rstrip(' .')}{OBSERVABLE_CHECK_SEPARATOR}{clause}"
+
+
+def _without_vague_terms(criterion: str) -> str:
+    text = criterion.strip()
+    cleaned = text
+    for term in VAGUE_TERMS:
+        cleaned = re.sub(rf"\b{re.escape(term)}\b", "", cleaned, flags=re.IGNORECASE)
+    if cleaned == text:
+        return text
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip().rstrip(".").strip()
+    while (tidied := _DANGLING_TAIL_RE.sub("", cleaned).strip()) != cleaned:
+        cleaned = tidied
+    return cleaned.strip("-:;,. ")
+
+
+def _evidence_kind(text: str, order: tuple[str, ...]) -> str | None:
+    for kind in order:
+        if kind == "file":
+            if _FILE_NOUN_RE.search(text) and _FILE_WRITE_RE.search(text):
+                return kind
+        elif _EVIDENCE_PATTERNS[kind].search(text):
+            return kind
+    return None
 
 
 def _target_index(target: str) -> int | None:
