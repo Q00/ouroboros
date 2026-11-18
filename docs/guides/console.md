@@ -98,9 +98,11 @@ and Spanish (side rail → language).
     execution id. Until the run has planned its tasks, which can take
     minutes, the card says it is preparing them.
 
-  The side pane names the agent and the Execute model the run uses, as
-  configured when the chat started (for example *Codex CLI default
-  (gpt-6.2-astra)*).
+  The header and side pane name the agent and Execute model the job runs
+  on, resolved as `ouroboros auto` resolves them when the chat starts: the
+  job's `--runtime` drives every stage (a Claude chat without the Agent SDK
+  runs on the Claude Code CLI), and only without one does the configured
+  Execute stage apply. For example *Codex CLI default (gpt-6.2-astra)*.
 
   The raw output stays under *Show detailed log*, with the structlog lines
   hidden until asked for. The view is saved with the chat, and is bounded (the

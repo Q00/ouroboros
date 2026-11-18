@@ -1268,17 +1268,15 @@ class Harness:
         progress = auto_progress.progress_file(chats_dir(), session_id)
         progress.parent.mkdir(parents=True, exist_ok=True)
         progress.unlink(missing_ok=True)
+        # One value for the job's ``--runtime`` and for the agent and model the chat names.
+        runtime = effective_runtime(session.get("backend"), public=True)
         job = self._jobs.start(
             kind="auto",
             title=session.get("title", "auto"),
             argv=ouroboros_command(
                 "auto",
                 session["goal"],
-                *(
-                    ["--runtime", runtime]
-                    if (runtime := effective_runtime(session.get("backend"), public=True))
-                    else []
-                ),
+                *(["--runtime", runtime] if runtime else []),
                 "--progress-jsonl",
                 str(progress),
             ),
@@ -1286,7 +1284,7 @@ class Harness:
             cwd=session["cwd"],
             watch=_AUTO_WATCH,
         )
-        model = _auto_model(session.get("backend"))
+        model = _auto_model(runtime)
 
         def apply(s: dict[str, Any]) -> None:
             s["auto_job_id"] = job.id
@@ -1754,38 +1752,55 @@ def _default_model_hint(backend: str | None, model: object) -> dict[str, Any]:
     }
 
 
-def _auto_model(backend: str | None) -> dict[str, Any] | None:
-    """The agent and Execute model an Auto chat's run uses, as configured when it starts.
+def _auto_model(runtime: str | None) -> dict[str, Any] | None:
+    """The agent and Execute model the ``ouroboros auto`` job will run on. Display only.
 
-    Display only. ``backend`` is the chat's agent, else the Execute stage's
-    agent from settings. ``model`` is the configured Execute model, or the
-    ``default`` sentinel when the agent runs on its own default; ``configured``
-    then names that default when the CLI's config says it
-    (``configured_default_model``). ``None`` when the agent or its model
-    cannot be resolved: the page then shows no Model row rather than a guess.
+    ``runtime`` is exactly the value the job gets as ``--runtime`` (``None``
+    when it gets none). It is resolved the way ``ouroboros auto`` resolves it:
+    the CLI's spelling (``public_runtime_backend``), then auto's stage routing
+    (``resolve_auto_stage_runtime_plan``), where an explicit runtime drives
+    every stage and only no override follows ``runtime_profile``. The model is
+    the one the Execute handler passes that runtime (``resolve_execution_model``),
+    or the ``default`` sentinel when the runtime uses its own default;
+    ``configured`` then names that default when the CLI's config says it.
+    ``backend`` is the public name of the Execute runtime (``claude-cli`` for
+    the Claude Code CLI worker). ``None`` when the config cannot be read or
+    names an unknown runtime: the page then shows no row rather than a guess.
     """
+    from ouroboros.auto.runtime_routing import resolve_auto_stage_runtime_plan
     from ouroboros.backends import get_backend_capability
     from ouroboros.backends.model_catalog import DEFAULT_MODEL_SENTINEL, configured_default_model
     from ouroboros.config.loader import resolve_execution_model
-    from ouroboros.config_tui.persistence import ConfigWriteError
     from ouroboros.core.errors import OuroborosError
-    from ouroboros.gui.settings import SettingsModel
+    from ouroboros.orchestrator import resolve_agent_runtime_backend
+    from ouroboros.package_profiles import (
+        CLAUDE_CLI_PROFILE,
+        CLAUDE_CLI_RUNTIME_BACKEND,
+        public_runtime_backend,
+    )
 
     try:
-        agent = backend or SettingsModel().effective_stage_backend(settings_stage("execute"))
-        capability = get_backend_capability(agent)
+        override = public_runtime_backend(runtime)
+        plan = resolve_auto_stage_runtime_plan(
+            runtime_override=override,
+            fallback_runtime_backend=resolve_agent_runtime_backend(override),
+            fallback_opencode_mode=None,
+        )
+        execute = plan.execute.runtime_backend
+        capability = get_backend_capability(execute)
         if capability is None:
             return None
-        model = resolve_execution_model(capability.name)
-    except (OSError, ValueError, yaml.YAMLError, ConfigWriteError, OuroborosError):
-        return None  # an unreadable config: no row rather than a failed chat
+        model = resolve_execution_model(execute)
+    except (OSError, ValueError, yaml.YAMLError, OuroborosError):
+        return None  # an unreadable config or an unknown runtime: no row rather than a guess
+    backend = CLAUDE_CLI_PROFILE if execute == CLAUDE_CLI_RUNTIME_BACKEND else capability.name
     if model is None:
         return {
             "model": DEFAULT_MODEL_SENTINEL,
-            "backend": capability.name,
+            "backend": backend,
             "configured": configured_default_model(capability.name),
         }
-    return {"model": model, "backend": capability.name, "configured": None}
+    return {"model": model, "backend": backend, "configured": None}
 
 
 def _empty_model_default(backend: str) -> str | None:

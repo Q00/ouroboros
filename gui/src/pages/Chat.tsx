@@ -89,6 +89,15 @@ function modelText(t: Translator["t"], model: string, hint?: { backend?: string 
   return t("chat.model.agentDefault");
 }
 
+/**
+ * The agent a chat runs on. An Auto chat names the one its job was launched
+ * on (recorded from the job's `--runtime` and auto's stage routing), which
+ * can differ from the agent picked; other chats name the agent picked.
+ */
+function chatAgent(session: ChatSession): string | null {
+  return (session.mode === "auto" ? session.auto_model?.backend : null) || session.backend || null;
+}
+
 /** "Codex didn't accept the model gpt-6.2-astra: …", in the reader's language. */
 function rejectionText(t: Translator["t"], tx: Translator["tx"], rejection: ModelRejection): string {
   const reason = rejection.reason_code ? tx(`chat.rejected.reason.${rejection.reason_code}`, rejection.reason) : rejection.reason;
@@ -862,7 +871,7 @@ function ContextPane({ session }: { session: ChatSession }) {
   const autoModel = session.mode === "auto" ? session.auto_model : null;
   const model = session.model || reply?.model || autoModel?.model;
   const hint = autoModel && !session.model ? { backend: autoModel.backend, configured: autoModel.configured } : { backend: reply?.model_backend, configured: reply?.model_default };
-  const agent = session.backend || autoModel?.backend;
+  const agent = chatAgent(session);
   return (
     <aside className="chat-pane-side" aria-label={t("chat.pane.title")}>
       {session.mode === "interview" ? (
@@ -1150,7 +1159,7 @@ function Thread({ id }: { id: string }) {
           <p>
             <Chip>{t(`chat.mode.${mode}`)}</Chip>
             {session.project ? <Chip>{t(`chat.new.project.${session.project}`)}</Chip> : null}
-            {session.backend ? <Chip tone="info">{backendName(session.backend)}</Chip> : null}
+            {chatAgent(session) ? <Chip tone="info">{backendName(chatAgent(session))}</Chip> : null}
             {session.model ? <Chip>{modelText(t, session.model)}</Chip> : null}
             {!ask ? (
               <span className="path" title={session.cwd}>

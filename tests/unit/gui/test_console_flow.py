@@ -717,17 +717,44 @@ def test_refusals_reach_the_page_with_their_code(tmp_path: Path) -> None:
 # ── 6. the model a sentinel backend reports ───────────────────────────
 
 
-def test_an_auto_chat_records_the_agent_and_model_its_run_uses(
+def _recording_auto(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """The fake ``ouroboros auto``, recording the arguments each job was started with."""
+    launched: list[tuple[str, ...]] = []
+    script = _AUTO_SCRIPT.format(handoff="completed", code=0)
+
+    def command(*args: str) -> list[str]:
+        launched.append(args)
+        return [sys.executable, "-c", script]
+
+    monkeypatch.setattr(harness, "ouroboros_command", command)
+    return launched
+
+
+def _config(home: Path, text: str) -> None:
+    path = home / ".ouroboros" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(f'model = "{model}"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+
+def _runtime_arg(args: tuple[str, ...]) -> str | None:
+    return args[args.index("--runtime") + 1] if "--runtime" in args else None
+
+
+def test_an_explicit_codex_chat_names_codex_and_its_own_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from ouroboros.backends import model_catalog
 
-    codex_home = tmp_path / "codex"
-    codex_home.mkdir()
-    (codex_home / "config.toml").write_text('model = "gpt-6.2-astra"\n', encoding="utf-8")
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    _codex_home(tmp_path, monkeypatch, "gpt-6.2-astra")
     monkeypatch.setattr(model_catalog, "detect_backend_cli", lambda _name: "/bin/codex")
-    _fake_auto(monkeypatch)
+    launched = _recording_auto(monkeypatch)
     state = _state()
     chat = state.harness.create(
         {"goal": "palindrome", "mode": "auto", "backend": "codex", "cwd": str(tmp_path)}
@@ -735,6 +762,7 @@ def test_an_auto_chat_records_the_agent_and_model_its_run_uses(
 
     session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
 
+    assert [_runtime_arg(args) for args in launched] == ["codex"]
     assert session["auto_model"] == {
         "model": "default",
         "backend": "codex",
@@ -742,33 +770,99 @@ def test_an_auto_chat_records_the_agent_and_model_its_run_uses(
     }
 
 
-def test_an_auto_model_names_a_configured_execute_model_as_is(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_default_claude_chat_without_the_sdk_names_the_cli_it_runs_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """``--runtime claude-cli`` drives every stage, so a configured Codex Execute stage is not it."""
+    import importlib.util
+
+    from ouroboros.config import loader
+
+    _config(
+        isolated_home,
+        "orchestrator:\n  runtime_backend: claude\n"
+        "  runtime_profile:\n    stages:\n      execute: codex\n",
+    )
+    _codex_home(tmp_path, monkeypatch, "gpt-6.2-astra")
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *rest: None if name == "claude_agent_sdk" else real_find_spec(name, *rest),
+    )
+    asked: list[str | None] = []
+    real_model = loader.resolve_execution_model
+
+    def execution_model(backend: str | None) -> str | None:
+        asked.append(backend)
+        return real_model(backend)
+
+    monkeypatch.setattr(loader, "resolve_execution_model", execution_model)
+    launched = _recording_auto(monkeypatch)
+    state = _state()
+    chat = state.harness.create({"goal": "palindrome", "mode": "auto", "cwd": str(tmp_path)})
+
+    session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
+
+    assert [_runtime_arg(args) for args in launched] == ["claude-cli"]
+    # The model is the one the Execute handler gives the Claude Code CLI worker,
+    # not Codex's configured default.
+    assert asked == ["claude_mcp"]
+    assert session["auto_model"] == {
+        "model": real_model("claude_mcp") or "default",
+        "backend": "claude-cli",
+        "configured": None,
+    }
+
+
+def test_without_an_override_the_configured_execute_stage_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    _config(
+        isolated_home,
+        "orchestrator:\n  runtime_backend: codex\n"
+        "  runtime_profile:\n    stages:\n      execute: opencode\n",
+    )
+    launched = _recording_auto(monkeypatch)
+    state = _state()
+    chat = state.harness.create({"goal": "palindrome", "mode": "auto", "cwd": str(tmp_path)})
+
+    session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
+
+    assert [_runtime_arg(args) for args in launched] == [None]
+    assert session["auto_model"]["backend"] == "opencode"
+
+
+def test_a_pinned_execute_model_is_looked_up_for_the_runtime_that_runs(
+    monkeypatch: pytest.MonkeyPatch, isolated_home: Path
 ) -> None:
     from ouroboros.config import loader
 
-    monkeypatch.setattr(loader, "resolve_execution_model", lambda _backend: "gpt-6-sol")
+    _config(
+        isolated_home,
+        "orchestrator:\n  runtime_backend: codex\n"
+        "  runtime_profile:\n    stages:\n      execute: opencode\n",
+    )
+    pins = {"codex": "gpt-6-sol", "opencode": "glm-5"}
+    monkeypatch.setattr(loader, "resolve_execution_model", lambda backend: pins.get(backend))
+
+    # An explicit runtime drives Execute too; no override follows the profile.
     assert harness._auto_model("codex") == {
         "model": "gpt-6-sol",
         "backend": "codex",
         "configured": None,
     }
-
-
-def test_an_auto_model_follows_the_execute_agent_from_settings(isolated_home: Path) -> None:
-    config = isolated_home / ".ouroboros" / "config.yaml"
-    config.parent.mkdir(parents=True, exist_ok=True)
-    config.write_text("orchestrator:\n  runtime_backend: codex\n", encoding="utf-8")
-    model = harness._auto_model(None)
-    assert model is not None and model["backend"] == "codex"
+    assert harness._auto_model(None) == {
+        "model": "glm-5",
+        "backend": "opencode",
+        "configured": None,
+    }
 
 
 def test_an_unreadable_config_gives_no_auto_model_rather_than_a_guess(
     isolated_home: Path,
 ) -> None:
-    config = isolated_home / ".ouroboros" / "config.yaml"
-    config.parent.mkdir(parents=True, exist_ok=True)
-    config.write_text("- not a mapping\n", encoding="utf-8")
+    _config(isolated_home, "- not a mapping\n")
     assert harness._auto_model(None) is None
     assert harness._auto_model("not-an-agent") is None
 

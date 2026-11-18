@@ -94,6 +94,8 @@ const BACKEND_NAMES: Record<string, string> = {
   claude: "Claude Code",
   claude_code: "Claude Code",
   claude_mcp: "Claude Code (MCP host)",
+  // The Claude Code CLI worker, as `ouroboros auto --runtime` spells it.
+  "claude-cli": "Claude Code CLI",
   codex: "Codex CLI",
   codex_mcp: "Codex (MCP host)",
   opencode: "OpenCode",
