@@ -460,7 +460,7 @@ _UNSUPPORTED_BASH_STATE_MUTATION = re.compile(
 _DYNAMIC_SHELL_STATE_MUTATION = re.compile(
     r"(?:^|(?:&&|\|\||[;&|\n])\s*)"
     r"(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
-    r"(?:command(?:\s+(?:--|-p|-v|-V))*\s+)?eval(?:\s|$)",
+    r"(?:command(?:\s+(?:--|-p|-v|-V))*\s+)?(?:eval\s|eval$)",
     re.MULTILINE,
 )
 

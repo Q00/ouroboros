@@ -8,10 +8,11 @@
       "name": "ouroboros",
       "source": {
         "source": "local",
-        "path": "."
+        "path": "./"
       },
       "policy": {
-        "installation": "AVAILABLE"
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
       },
       "category": "Developer Tools"
     }

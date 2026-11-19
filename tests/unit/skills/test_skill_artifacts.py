@@ -290,8 +290,8 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
     assert marketplace["plugins"] == [
         {
             "name": "ouroboros",
-            "source": {"source": "local", "path": "."},
-            "policy": {"installation": "AVAILABLE"},
+            "source": {"source": "local", "path": "./"},
+            "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
             "category": "Developer Tools",
         }
     ]

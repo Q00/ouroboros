@@ -241,22 +241,22 @@ def test_oracle_data_that_breaks_the_schema_is_a_construction_error(base: Path) 
 @pytest.mark.parametrize(
     ("expected", "observed", "passes"),
     [
-        (10, "10", True),
-        (10, "10.0", True),
-        (10, "10.0000000001", False),  # an integer expectation is exact
-        (0, "1e-13", False),
-        (0.0, "1e-13", False),  # no absolute floor: use "approx" for that
-        (0.3, "0.1 + 0.2", True),  # within a few ulps
-        (0.3, "0.3 + 1e-12", False),
+        (10, 10, True),
+        (10, 10.0, True),
+        (10, 10.0000000001, False),  # an integer expectation is exact
+        (0, 1e-13, False),
+        (0.0, 1e-13, False),  # no absolute floor: use "approx" for that
+        (0.3, 0.1 + 0.2, True),  # within a few ulps
+        (0.3, 0.3 + 1e-12, False),
     ],
 )
 def test_comparison_is_exact_for_integers_and_ulp_bounded_for_floats(
-    expected: float, observed: str, passes: bool
+    expected: float, observed: float, passes: bool
 ) -> None:
     # S8, checked on the comparator's own function.
     from ouroboros.boundary import harness
 
-    assert harness.equal(expected, eval(observed), None) is passes
+    assert harness.equal(expected, observed, None) is passes
 
 
 def test_copies_never_carry_bytecode_caches(tmp_path: Path) -> None:

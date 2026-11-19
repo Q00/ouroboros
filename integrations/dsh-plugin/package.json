@@ -18,10 +18,13 @@
   ],
   "files": [
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
   ],
   "dsh": {
     "bundle": {
+      "mode": "patch",
       "patch": "./cordis.patch.yml"
     }
   }
