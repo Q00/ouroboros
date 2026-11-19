@@ -401,7 +401,7 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 > **degraded Seed**(인터뷰 기한이 인터뷰를 닫은 경우)는 인터뷰 자체의 종료 규칙을 따릅니다([`auto/degraded_seed.py`](../../src/ouroboros/auto/degraded_seed.py)):
 >
 > - 필수 ledger 섹션이 `BLOCKED`(사람만 줄 수 있는 답)이면 세션은 `degraded_seed_safety_blockers` 사유로 멈춥니다.
-> - 그렇지 않고 사용자의 목표가 기록된 `sourced_scope`가 있으면 다른 auto Seed처럼 **실행됩니다**. 워커는 기록된 목표만 받고, 해결되지 않은 항목은 Seed와 결과에 남습니다.
+> - 그렇지 않고 사용자의 목표가 기록된 `sourced_scope`가 있으면 다른 auto Seed처럼 **실행됩니다**. 워커는 기록된 목표를 받고(한 번의 시도로 여러 수용 기준을 판정할 때는 그 기준들과 기대 산출물도 받습니다), 해결되지 않은 항목은 Seed와 결과에 남습니다.
 > - 기록된 목표가 없으면 RUN에 도달하지 않고, 세션은 `degraded_seed_not_executed` 사유로 `AutoPhase.BLOCKED`에서 멈춥니다. `COMPLETE`가 아닙니다.
 >
 > 실무적으로: 손으로 쓴 seed에 높은 `ambiguity_score`를 박아도 `ouroboros run workflow`가 막지는 않습니다. 이 값은 **강제 차단 장치가 아니라 출처 기록(provenance)**입니다.

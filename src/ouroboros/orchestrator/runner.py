@@ -75,7 +75,7 @@ from ouroboros.core.project_identity import (
 from ouroboros.core.project_identity import (
     ProjectIdentityUnavailableError as ProjectIdentityUnavailableError,
 )
-from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
+from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
     _render_conductor_directive,
@@ -8436,9 +8436,7 @@ class OrchestratorRunner:
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
             usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
         )
-        install_sourced_scope(
-            parallel_executor, seed.sourced_scope, ac_texts(seed.acceptance_criteria)
-        )
+        install_sourced_scope(parallel_executor, seed.sourced_scope, seed.acceptance_criteria)
         if (install := getattr(self.acceptance_authority, "install", None)) is not None:
             # Check package on: it drives repairs; the legacy verifier is advisory.
             install(parallel_executor)

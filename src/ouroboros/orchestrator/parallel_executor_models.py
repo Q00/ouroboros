@@ -655,11 +655,16 @@ def inherit_check_package_hooks(parent: object, child: object) -> None:
     advisory legacy verdict, and the same entry-point interfaces in its prompt.
     It also renders the same worker prompt, so it inherits the run Seed's
     sourced scope and criteria (``atomic_prompt_builder.SOURCED_SCOPE_ATTR``,
-    ``SEED_CRITERIA_ATTR``).
+    ``SEED_CRITERIA_ATTR``, ``SEED_CRITERION_SPECS_ATTR``).
     """
-    from ouroboros.orchestrator.atomic_prompt_builder import SEED_CRITERIA_ATTR, SOURCED_SCOPE_ATTR
+    from ouroboros.orchestrator.atomic_prompt_builder import (
+        SEED_CRITERIA_ATTR,
+        SEED_CRITERION_SPECS_ATTR,
+        SOURCED_SCOPE_ATTR,
+    )
 
-    for name in (*_CHECK_PACKAGE_HOOKS, SOURCED_SCOPE_ATTR, SEED_CRITERIA_ATTR):
+    sourced = (SOURCED_SCOPE_ATTR, SEED_CRITERIA_ATTR, SEED_CRITERION_SPECS_ATTR)
+    for name in (*_CHECK_PACKAGE_HOOKS, *sourced):
         value = getattr(parent, name, None)
         if value is not None:
             setattr(child, name, value)

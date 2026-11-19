@@ -9,14 +9,19 @@ output — so a fleet-wide "why do runs fail" question has an answer.
 
 The vocabulary is closed on purpose.  Extend it here, together with the
 telemetry contract in ``TELEMETRY.md``; never pass free text through it.
+Beside the cause, :func:`derive_run_failure` returns the Seed artifact paths
+the verify-gate failures behind it recorded missing, for the local run result
+only; they never enter the vocabulary.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
+from ouroboros.core.seed import expected_artifact_path_error
 from ouroboros.mcp.failure_taxonomy import (
     RUN_FAILURE_CAUSES,
     UNKNOWN_RUN_FAILURE_CAUSE,
@@ -52,6 +57,21 @@ _REASON_CODE_BY_CAUSE: Mapping[str, FailureReasonCode] = {
 }
 
 
+@dataclass(frozen=True)
+class RunFailure:
+    """A failed run's closed cause, and the artifacts the verify gate found missing for it.
+
+    ``cause`` is a ``RUN_FAILURE_CAUSES`` member and the only part telemetry
+    may carry. ``missing_artifacts`` are the workspace-relative
+    ``expected_artifacts`` paths that the verify-gate failures the cause was
+    derived from recorded as missing, in first-seen order, so the run result
+    can say which file is absent (#3072).
+    """
+
+    cause: str
+    missing_artifacts: tuple[str, ...] = ()
+
+
 def _data(event: Any) -> Mapping[str, Any]:
     data = getattr(event, "data", None)
     return data if isinstance(data, Mapping) else {}
@@ -70,6 +90,24 @@ def _most_common(values: Iterable[str]) -> str | None:
     return sorted(counted.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
+def _missing_artifacts(data: Mapping[str, Any]) -> tuple[str, ...]:
+    """The portable workspace-relative paths a verify-gate failure recorded missing."""
+    value = data.get("missing_artifacts")
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(
+        item
+        for item in value
+        if isinstance(item, str) and expected_artifact_path_error(item) is None
+    )
+
+
+def _attributed(cause: str, sources: Iterable[tuple[str, tuple[str, ...]]]) -> RunFailure:
+    """``cause`` with the missing artifacts of every source attributed to it, deduplicated."""
+    missing = (path for source, paths in sources if source == cause for path in paths)
+    return RunFailure(cause, tuple(dict.fromkeys(missing)))
+
+
 def derive_run_failure_cause(
     events: Iterable[Any],
     *,
@@ -77,6 +115,19 @@ def derive_run_failure_cause(
     terminal_status: str | None,
 ) -> str:
     """Return one ``RUN_FAILURE_CAUSES`` member for a session's failed run.
+
+    The cause of :func:`derive_run_failure`.
+    """
+    return derive_run_failure(events, session_id=session_id, terminal_status=terminal_status).cause
+
+
+def derive_run_failure(
+    events: Iterable[Any],
+    *,
+    session_id: str,
+    terminal_status: str | None,
+) -> RunFailure:
+    """Return a session's failed-run cause and the artifacts it names.
 
     ``events`` is the session's durable event stream (any order).  Only events
     whose ``session_id`` matches are considered.  Precedence follows causal
@@ -90,15 +141,20 @@ def derive_run_failure_cause(
        orchestrator raised instead of judging (``runtime_error``).
     4. Every judged attempt ``blocked`` — an upstream dependency failed the
        run without anything itself failing (``dependency_blocked``).
+    5. A criterion whose latest judgment failed on its verify gate with no
+       recovery record — one judged once from a shared attempt (#2737), which
+       gets no retry of its own — attributed to the verify-gate cause that
+       judgment recorded (``verify_cause``).
     """
     if terminal_status == "cancelled":
-        return "cancelled"
+        return RunFailure("cancelled")
 
-    verify_final: list[str] = []
-    verify_last_by_ac: dict[int, tuple[tuple[Any, str], str]] = {}
+    verify_final: list[tuple[str, tuple[str, ...]]] = []
+    verify_last_by_ac: dict[int, tuple[tuple[Any, str], str, tuple[str, ...]]] = {}
     exhausted: list[Mapping[str, Any]] = []
     judged_outcomes: list[str] = []
-    last_judged_by_ac: dict[int, tuple[Any, str]] = {}
+    # Per root AC: the latest judgment's ordering key, outcome, and verify-gate cause.
+    last_judged_by_ac: dict[int, tuple[Any, str, str | None]] = {}
     session_error_type: str | None = None
 
     for event in events:
@@ -115,8 +171,9 @@ def derive_run_failure_cause(
             cause = data.get("verify_cause")
             if not isinstance(cause, str) or cause not in _VERIFY_GATE_CAUSES:
                 continue
+            missing = _missing_artifacts(data)
             if data.get("final_workspace_revalidation") is True:
-                verify_final.append(cause)
+                verify_final.append((cause, missing))
             ac_index = data.get("ac_index")
             if isinstance(ac_index, int) and not isinstance(ac_index, bool):
                 timestamp = getattr(event, "timestamp", None)
@@ -132,7 +189,7 @@ def derive_run_failure_cause(
                     or previous[0][0] is None
                     or previous[0] <= ordering_key
                 ):
-                    verify_last_by_ac[ac_index] = (ordering_key, cause)
+                    verify_last_by_ac[ac_index] = (ordering_key, cause, missing)
         elif event_type == "execution.ac.recovery_exhausted":
             exhausted.append(data)
         elif event_type == "execution.ac.attempt_judged":
@@ -158,15 +215,25 @@ def derive_run_failure_cause(
                         or previous[0][0] is None
                         or previous[0] <= ordering_key
                     ):
-                        last_judged_by_ac[ac_index] = (ordering_key, outcome)
+                        judged_cause = data.get("verify_cause")
+                        last_judged_by_ac[ac_index] = (
+                            ordering_key,
+                            outcome,
+                            judged_cause
+                            if isinstance(judged_cause, str) and judged_cause in _VERIFY_GATE_CAUSES
+                            else None,
+                        )
         elif event_type == "orchestrator.session.failed":
             error_type = data.get("error_type")
             if isinstance(error_type, str) and error_type:
                 session_error_type = error_type
 
-    final_cause = _most_common(verify_final)
+    final_cause = _most_common(cause for cause, _ in verify_final)
     if final_cause is not None:
-        return f"verify_{final_cause}"
+        return _attributed(
+            f"verify_{final_cause}",
+            ((f"verify_{cause}", missing) for cause, missing in verify_final),
+        )
 
     if exhausted:
         # Dependency-cascade victims can also emit recovery_exhausted, but
@@ -187,34 +254,56 @@ def derive_run_failure_cause(
             )
         ]
         if causal_exhausted and not has_non_blocked_exhaustion:
-            return "dependency_blocked"
-        attributed: list[str] = []
+            return RunFailure("dependency_blocked")
+        attributed: list[tuple[str, tuple[str, ...]]] = []
         for data in causal_exhausted:
             ac_index = data.get("root_ac_index")
             if isinstance(ac_index, int) and ac_index in verify_last_by_ac:
-                attributed.append(f"verify_{verify_last_by_ac[ac_index][1]}")
+                _, cause, missing = verify_last_by_ac[ac_index]
+                attributed.append((f"verify_{cause}", missing))
                 continue
             failure_class = data.get("last_failure_class")
             attributed.append(
-                _WORKER_FAILURE_CLASSES.get(
-                    failure_class if isinstance(failure_class, str) else "",
-                    "worker_failed",
+                (
+                    _WORKER_FAILURE_CLASSES.get(
+                        failure_class if isinstance(failure_class, str) else "",
+                        "worker_failed",
+                    ),
+                    (),
                 )
             )
         # An exhausted AC with a concrete verify cause outranks an
         # unattributed worker failure on a sibling.
-        verify_attributed = [cause for cause in attributed if cause.startswith("verify_")]
-        chosen = _most_common(verify_attributed) or _most_common(attributed)
+        causes = [cause for cause, _ in attributed]
+        verify_attributed = [cause for cause in causes if cause.startswith("verify_")]
+        chosen = _most_common(verify_attributed) or _most_common(causes)
         if chosen is not None:
-            return chosen
+            return _attributed(chosen, attributed)
 
     if session_error_type is not None:
-        return "runtime_error"
+        return RunFailure("runtime_error")
 
     if judged_outcomes and all(outcome == "blocked" for outcome in judged_outcomes):
-        return "dependency_blocked"
+        return RunFailure("dependency_blocked")
 
-    return UNKNOWN_RUN_FAILURE_CAUSE
+    # No recovery record: a criterion judged once from a shared attempt fails
+    # without a retry of its own. The verify-gate cause its judgment recorded is
+    # why the run failed; the gate's rejection event names what was missing.
+    judged_failed = [
+        (
+            f"verify_{cause}",
+            verify_last_by_ac[ac_index][2]
+            if ac_index in verify_last_by_ac and verify_last_by_ac[ac_index][1] == cause
+            else (),
+        )
+        for ac_index, (_, outcome, cause) in last_judged_by_ac.items()
+        if outcome == "failed" and cause is not None
+    ]
+    chosen = _most_common(cause for cause, _ in judged_failed)
+    if chosen is not None:
+        return _attributed(chosen, judged_failed)
+
+    return RunFailure(UNKNOWN_RUN_FAILURE_CAUSE)
 
 
 def failure_reason_code_for_run_cause(cause: str) -> FailureReasonCode:
@@ -231,6 +320,8 @@ def failure_reason_code_for_run_cause(cause: str) -> FailureReasonCode:
 __all__ = [
     "RUN_FAILURE_CAUSES",
     "UNKNOWN_RUN_FAILURE_CAUSE",
+    "RunFailure",
+    "derive_run_failure",
     "derive_run_failure_cause",
     "failure_reason_code_for_run_cause",
 ]

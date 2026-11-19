@@ -10,6 +10,8 @@ a Seed runs one worker attempt (root 0, whose task is the sourced objective),
 and every other criterion is judged from that attempt against its own text:
 the typed evidence, the legacy verifier, its own verify command and the check
 package gate, exactly once per criterion (:func:`settle_from_shared_attempt`).
+Because every criterion is judged from it, root 0's prompt lists each
+criterion's text and expected artifacts, never its verify command (#3072).
 Progress reports every criterion ``executing`` while root 0's attempt runs,
 and each one's status as soon as it is judged (:func:`report_progress`).
 
@@ -216,6 +218,17 @@ async def settle_from_shared_attempt(
         execution_id=execution_id,
         ac_index=ac_index,
     )
+    if (
+        verify_gate_outcome is not None
+        and not verify_gate_outcome.passed
+        and not verify_gate_outcome.environment_unverifiable
+    ):
+        # The criterion's own verify gate rejects it. ``_apply_verify_gate``
+        # below decides that rejection from the cached outcome and records it
+        # (``execution.verify.failed``, with the missing artifacts), with or
+        # without a check package gate, so the run's failure cause can name it
+        # (#3072). This criterion gets no retry to record it later.
+        error = None
     success = error is None
     if success and executor._execution_profile is not None and typed_evidence is not None:
         typed_evidence = _scoped_evidence_record_for_ac(

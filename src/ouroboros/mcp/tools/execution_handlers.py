@@ -60,7 +60,7 @@ from ouroboros.mcp.tools.job_observer import (
     build_job_observer_contract,
 )
 from ouroboros.mcp.tools.run_ac_tally import derive_terminal_run_meta
-from ouroboros.mcp.tools.run_failure_meta import launch_error
+from ouroboros.mcp.tools.run_failure_meta import failure_cause_text, launch_error
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -2088,7 +2088,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     )
                     meta.update(terminal_meta)
                     if "failure_cause" in terminal_meta:
-                        message += f"Failure Cause: {terminal_meta['failure_cause']}\n"
+                        message += f"Failure Cause: {failure_cause_text(terminal_meta)}\n"
                 if session_status == SessionStatus.PAUSED:
                     meta["paused"] = True
                     meta.update(pause_metadata)
