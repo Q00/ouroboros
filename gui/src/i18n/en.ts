@@ -701,6 +701,7 @@ const en = {
   "error.no_interview": "There's no interview to turn into a spec yet.",
   "error.no_spec": "Write the spec before handing it off.",
   "error.already_running": "This spec is already running.",
+  "error.previous_run_unconfirmed": "Wait until the previous run has finished before trying again.",
   "error.bad_prepare_git": "prepare_git must be true or false.",
   "error.no_question": "There's no open question to answer.",
   "error.suggestion_pending": "A suggestion is already being drafted.",

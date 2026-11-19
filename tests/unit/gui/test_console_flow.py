@@ -7,10 +7,12 @@ runs are stubbed, and LLM adapters are recorders.
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -260,6 +262,118 @@ def test_the_folder_probe_reads_git_state_and_creates_nothing(tmp_path: Path) ->
         with pytest.raises(api.ApiError) as refused:
             api.get_chat_folder(state, query={"path": bad}, body=None)
         assert refused.value.code == "bad_path"
+
+
+# ── Interview run retries ────────────────────────────────────────────
+
+
+def test_retry_after_failed_job_starts_one_attempt_and_ignores_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.dashboard_web import reader
+
+    db = tmp_path / "events # test.db"
+    with closing(sqlite3.connect(db)) as connection:
+        connection.execute("CREATE TABLE events (aggregate_id, event_type, payload)")
+
+    class NoRunEvents:
+        def fetch_new(self) -> list[Any]:
+            return []
+
+    monkeypatch.setattr(reader, "default_db_path", lambda: db)
+    monkeypatch.setattr(reader, "EventTail", lambda *_args: NoRunEvents())
+    starts: list[str] = []
+    jobs: dict[str, dict[str, str]] = {}
+
+    class RunStarter:
+        def run_starter(self, _cwd: str) -> Any:
+            return self.start
+
+        async def start(self, _seed: Any, *, idempotency_key: str) -> dict[str, str]:
+            starts.append(idempotency_key)
+            if idempotency_key not in jobs:
+                number = len(jobs) + 1
+                job_id = f"job_{number}"
+                jobs[idempotency_key] = {"job_id": job_id, "execution_id": f"exec_{number}"}
+                with closing(sqlite3.connect(db)) as connection:
+                    connection.execute(
+                        "INSERT INTO events VALUES (?, 'mcp.job.failed', '{}')", (job_id,)
+                    )
+                    connection.commit()
+            return jobs[idempotency_key]
+
+    monkeypatch.setattr(harness.Harness, "_handlers_for", lambda *_args: RunStarter())
+    state = _state()
+    chat_id = _spec_chat(state.harness, _repo(tmp_path / "project"))
+    state.harness._sessions[chat_id]["seed_yaml"] = (
+        "goal: t\nontology_schema: {name: t, description: t}\nmetadata: {}\n"
+    )
+
+    first_request = {"action": "run", "previous_job_id": None}
+    api.post_chat_action(state, chat_id, query={}, body=first_request)
+    first = _wait(state.harness, chat_id, lambda s: s["status"] == "failed")
+    assert first["run_job_id"] == "job_1"
+
+    retry_request = {"action": "run", "previous_job_id": first["run_job_id"]}
+    api.post_chat_action(state, chat_id, query={}, body=retry_request)
+    retry = _wait(state.harness, chat_id, lambda s: s["status"] == "failed")
+    assert retry["run_job_id"] == "job_2"
+    assert [m["job_id"] for m in retry["messages"] if m["kind"] == "run"] == ["job_1", "job_2"]
+    assert len(starts) == 2 and starts[0] != starts[1]
+
+    # The retry already failed, so checking only for an active run would admit a replay.
+    for request in (first_request, retry_request):
+        assert api.post_chat_action(state, chat_id, query={}, body=request) == retry
+    assert len(starts) == 2
+
+
+@pytest.mark.parametrize("terminal_status", [None, "completed"])
+def test_retry_does_not_start_when_previous_job_is_unconfirmed_or_completed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started_runs: list[str],
+    terminal_status: str | None,
+) -> None:
+    terminal = {"status": terminal_status} if terminal_status else None
+    monkeypatch.setattr(harness, "_job_terminal", lambda *_args: terminal)
+    state = _state()
+    chat_id = _spec_chat(state.harness, _repo(tmp_path / "project"))
+    state.harness._sessions[chat_id].update(status="failed", run_job_id="job_1")
+
+    request = {"action": "run", "previous_job_id": "job_1"}
+    before = state.harness.get(chat_id)
+    if terminal_status is None:
+        with pytest.raises(api.ApiError) as refused:
+            api.post_chat_action(state, chat_id, query={}, body=request)
+        assert (refused.value.status, refused.value.code) == (409, "previous_run_unconfirmed")
+    else:
+        assert api.post_chat_action(state, chat_id, query={}, body=request) == before
+
+    assert state.harness.get(chat_id) == before
+    assert started_runs == []
+
+
+def test_retry_can_start_after_a_recorded_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started_runs: list[str]
+) -> None:
+    from ouroboros.dashboard_web import reader
+
+    db = tmp_path / "events.db"
+    with closing(sqlite3.connect(db)) as connection:
+        connection.execute("CREATE TABLE events (aggregate_id, event_type, payload)")
+        connection.execute("INSERT INTO events VALUES ('job_1', 'mcp.job.interrupted', '{}')")
+        connection.commit()
+
+    monkeypatch.setattr(reader, "default_db_path", lambda: db)
+    state = _state()
+    chat_id = _spec_chat(state.harness, _repo(tmp_path / "project"))
+    state.harness._sessions[chat_id].update(status="interrupted", run_job_id="job_1")
+    session = api.post_chat_action(
+        state, chat_id, query={}, body={"action": "run", "previous_job_id": "job_1"}
+    )
+
+    assert session["status"] == "running"
+    _wait(state.harness, chat_id, lambda _s: started_runs == [chat_id])
 
 
 # ── 2 and 7. Auto jobs: listed in Activity, and ending with a result ──

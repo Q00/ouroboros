@@ -681,6 +681,7 @@ const zh: Catalog = {
   "error.no_interview": "还没有可以转为规格的访谈。",
   "error.no_spec": "交接前请先撰写规格。",
   "error.already_running": "此规格已在运行。",
+  "error.previous_run_unconfirmed": "请等上一次运行结束后再试。",
   "error.bad_prepare_git": "prepare_git 必须是 true 或 false。",
   "error.no_question": "没有待回答的问题。",
   "error.suggestion_pending": "已经在起草建议的回答。",

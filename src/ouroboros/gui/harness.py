@@ -569,8 +569,23 @@ class Harness:
             elif action == "run":
                 if not session.get("seed_yaml"):
                     raise Refusal("no_spec", "Write the spec before running it.")
+                previous_job_id = session.get("run_job_id")
+                # A repeated request can arrive after its successor has already finished.
+                if payload.get("previous_job_id") != previous_job_id:
+                    return self.get(session_id) or {}
                 if status == "running":
                     raise Refusal("already_running", "This spec is already running.")
+                if previous_job_id:
+                    from ouroboros.dashboard_web.reader import default_db_path
+
+                    previous = _job_terminal(str(default_db_path()), previous_job_id)
+                    if previous is None:
+                        raise Refusal(
+                            "previous_run_unconfirmed",
+                            "Wait until the previous run has finished before trying again.",
+                        )
+                    if previous["status"] == "completed":
+                        return self.get(session_id) or {}
                 prepare = payload.get("prepare_git", False)
                 if not isinstance(prepare, bool):
                     raise Refusal("bad_prepare_git", "prepare_git must be true or false.")
@@ -929,7 +944,11 @@ class Harness:
         session = self.get(session_id) or {}
         starter = await asyncio.to_thread(self._handlers_for(session).run_starter, session["cwd"])
         seed = Seed.from_dict(yaml.safe_load(session["seed_yaml"]))
-        meta = await starter(seed, idempotency_key=f"gui-{session_id}")
+        # Until a new receipt arrives, retries for this predecessor share one key.
+        idempotency_key = f"gui-{session_id}"
+        if previous_job_id := session.get("run_job_id"):
+            idempotency_key += f"-after-{previous_job_id}"
+        meta = await starter(seed, idempotency_key=idempotency_key)
         execution_id = meta.get("execution_id")
 
         def apply(s: dict[str, Any]) -> None:
@@ -1632,13 +1651,15 @@ def _job_terminal(db_path: str, job_id: str) -> dict[str, str] | None:
     import sqlite3
 
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
+        uri = Path(db_path).absolute().as_uri()
+        conn = sqlite3.connect(f"{uri}?mode=ro", uri=True, timeout=1)
     except sqlite3.Error:
         return None
     try:
         row = conn.execute(
             "SELECT event_type, payload FROM events WHERE aggregate_id = ? "
-            "AND event_type IN ('mcp.job.failed', 'mcp.job.completed', 'mcp.job.cancelled') "
+            "AND event_type IN ('mcp.job.failed', 'mcp.job.completed', "
+            "'mcp.job.cancelled', 'mcp.job.interrupted') "
             "ORDER BY rowid DESC LIMIT 1",
             (job_id,),
         ).fetchone()
