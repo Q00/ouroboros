@@ -509,9 +509,10 @@ def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
     These are the active entries of every section but the goal that do not
     bind (see :attr:`LedgerEntry.binds_seed`) and that either no interviewer
     question produced (auto's conservative defaults and assumptions) or hold
-    the answer auto chose for an interviewer question (``_is_assumed_answer``).
-    The generic safe-default closure block is interview bookkeeping, not a
-    statement about the task, so it is left out.
+    the answer auto chose for an interviewer question (``_is_assumed_answer``,
+    kept verbatim as in :func:`ledger_assumed_answers`). The generic
+    safe-default closure block is interview bookkeeping, not a statement about
+    the task, so it is left out.
 
     Any other entry that answers an interviewer question renders nothing
     here, neither its draft nor its question: auto decided nothing for it, so
@@ -519,42 +520,54 @@ def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
     which no execution prompt renders. A requester's answer renders in
     ``Seed.requester_answers`` instead (``ledger_requester_answers``).
     """
-    return _assumption_lines(
-        ledger, lambda entry: not entry.question.strip() or _is_assumed_answer(entry)
-    )
+    return _assumption_lines(ledger, include_unasked=True)
 
 
 def ledger_assumed_answers(ledger: SeedDraftLedger) -> tuple[str, ...]:
     """The answers auto chose for its interviewer questions, as labelled assumption lines.
 
-    The subset of :func:`ledger_assumptions` that ``_is_assumed_answer``
-    selects, in section and ledger order. They never bind; ``ooo auto`` gives
-    them to the worker as ``SourcedScope.assumptions``, under a heading that
-    says nobody confirmed them.
+    Each line is the section label (``Non-goal: ``, ``Failure modes: ``, none
+    for constraints and criteria) followed by the entry's value exactly as the
+    refiner wrote it, outer whitespace aside: no punctuation is stripped and
+    nothing is split. In section and ledger order. They never bind; ``ooo
+    auto`` gives them to the worker as ``SourcedScope.assumptions``, under a
+    heading that says nobody confirmed them.
     """
-    return _assumption_lines(ledger, _is_assumed_answer)
+    return _assumption_lines(ledger, include_unasked=False)
 
 
-def _assumption_lines(
-    ledger: SeedDraftLedger, keep: Callable[[LedgerEntry], bool]
-) -> tuple[str, ...]:
-    """Labelled lines for the non-binding entries ``keep`` accepts.
+def _assumption_lines(ledger: SeedDraftLedger, *, include_unasked: bool) -> tuple[str, ...]:
+    """Labelled assumption lines: auto's assumed answers, and optionally its unasked drafts.
 
-    One value written for several sections is listed once, under the first
-    section's label, the way the interview answer states it once.
+    An unasked draft is cleaned and split like every ledger line
+    (``_lines_from_section``); an assumed answer is kept verbatim. One value
+    written for several sections is listed once, under the first section's
+    label, the way the interview answer states it once.
     """
     lines: dict[str, str] = {}
     for section_name in _ASSUMPTION_SECTIONS:
         prefix = _ASSUMPTION_PREFIXES.get(
             section_name, f"{section_name.replace('_', ' ').capitalize()}: "
         )
-        values = _lines_from_section(
-            ledger,
-            section_name,
-            split_clauses=False,
-            binding=False,
-            closure=False,
-            keep=keep,
+        values: list[str] = []
+        if include_unasked:
+            values.extend(
+                _lines_from_section(
+                    ledger,
+                    section_name,
+                    split_clauses=False,
+                    binding=False,
+                    closure=False,
+                    keep=lambda entry: not entry.question.strip(),
+                )
+            )
+        values.extend(
+            entry.value.strip()
+            for entry in _active_entries(ledger, section_name)
+            if not entry.binds_seed
+            and _is_assumed_answer(entry)
+            and not _is_requester_answer(entry)
+            and not _is_repo_fact(entry)
         )
         for value in values:
             lines.setdefault(value, f"{prefix}{value}")

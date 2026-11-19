@@ -75,11 +75,11 @@ SPEED_QUESTION = "What range and default should the speed slider have?"
 COUNT_QUESTION = "What range and default should the particle count slider have?"
 KO_SPEED_QUESTION = "속도 슬라이더의 범위와 기본값은 무엇이어야 하나요?"
 REPO_QUESTION = "Which test runner does the repository use today?"
-SPEED = "The speed slider spans 0.1 to 5 with default 1"
-COUNT = "The particle count slider spans 100 to 5000 with default 1000"
-SPEED_FAILURE = "A speed outside 0.1-5 is clamped to the nearest end"
-KO_SPEED = "속도 슬라이더는 0.1부터 5까지, 기본값 1입니다"
-KO_SPEED_FAILURE = "속도 값이 0.1–5 밖이면 가장 가까운 끝값으로 맞춘다"
+SPEED = "The speed slider spans 0.1 to 5 with default 1."
+COUNT = "The particle count slider spans 100 to 5000 with default 1000."
+SPEED_FAILURE = "A speed outside 0.1-5 is clamped to the nearest end."
+KO_SPEED = "속도 슬라이더는 0.1부터 5까지, 기본값 1입니다."
+KO_SPEED_FAILURE = "속도 값이 0.1–5 밖이면 가장 가까운 끝값으로 맞춘다."
 _HANGUL = re.compile(r"[가-힣]")
 
 
@@ -149,9 +149,7 @@ class _FakeInterviewLLM:
             text = SPEED_FAILURE if failure else SPEED
         else:
             text = COUNT
-        return Result.ok(
-            CompletionResponse(content=f"{text}.", model="fake", usage=UsageInfo(1, 1, 2))
-        )
+        return Result.ok(CompletionResponse(content=text, model="fake", usage=UsageInfo(1, 1, 2)))
 
 
 class _DecliningRequester:
@@ -717,5 +715,105 @@ def test_ledger_sourced_scope_assumptions_follow_provenance_not_text() -> None:
     assert scope is not None
     assert scope.assumptions == (f"Outputs: {COUNT}",)
     assert ledger_open_questions(ledger) == (SPEED_QUESTION,)
-    assert SPEED in ledger_assumptions(ledger)
+    # The unasked fill stays in the record, cleaned like every other ledger line.
+    assert SPEED.rstrip(".") in ledger_assumptions(ledger)
     assert "Inputs: Preserve the requested behavior" not in ledger_assumptions(ledger)
+
+
+# -- verbatim: only the section label is added ------------------------------------
+
+_LABELS = {
+    "constraints": "",
+    "non_goals": "Non-goal: ",
+    "acceptance_criteria": "",
+    "actors": "Actors: ",
+    "inputs": "Inputs: ",
+    "outputs": "Outputs: ",
+    "verification_plan": "Verification plan: ",
+    "failure_modes": "Failure modes: ",
+    "runtime_context": "Runtime context: ",
+}
+
+VERBATIM_ANSWERS = (
+    ("constraints", "Answer ends."),
+    ("constraints", "Ratio: 3:1 by default;"),
+    ("acceptance_criteria", "- Leading dash stays"),
+    ("acceptance_criteria", "*Starred* text stays*"),
+    ("failure_modes", "First sentence. Second sentence; third clause."),
+    ("verification_plan", ": a leading colon and a trailing colon:"),
+    ("non_goals", "배경 별과 성운은 범위 밖입니다."),
+    ("outputs", "속도 슬라이더는 0.1부터 5까지; 기본값은 1입니다..."),
+    ("inputs", "One value\n- with a bullet line is not split"),
+)
+
+
+def _assumed_ledger(answers: tuple[tuple[str, str], ...]) -> SeedDraftLedger:
+    ledger = SeedDraftLedger.from_goal(GOAL)
+    for index, (section, value) in enumerate(answers, 1):
+        ledger.add_entry(
+            section,
+            _entry(
+                f"{section}.k.investigated.{index}",
+                value,
+                question=f"Question {index}?",
+                refined=True,
+            ),
+        )
+    return _closed(ledger, GOAL)
+
+
+@pytest.mark.parametrize(("section", "value"), VERBATIM_ANSWERS)
+def test_an_assumed_answer_reaches_every_surface_verbatim(
+    section: str, value: str, tmp_path: Path
+) -> None:
+    from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
+
+    line = f"{_LABELS[section]}{value}"
+    ledger = _assumed_ledger(((section, value),))
+
+    assert ledger_assumed_answers(ledger) == (line,)
+    seed = _recorded_seed(tmp_path, ledger)
+    assert seed.sourced_scope is not None
+    assert seed.sourced_scope.assumptions == (line,)
+    assert line in seed.assumptions
+    # The Seed file round trip keeps every byte.
+    restored = Seed.from_dict(yaml.safe_load(yaml.safe_dump(seed.to_dict(), allow_unicode=True)))
+    assert restored.sourced_scope == seed.sourced_scope
+    # The worker prompt adds only the bullet.
+    assert f"\n- {line}" in _assumptions_part(_worker_input(seed))
+    # The auto result, MCP text and meta carry it unchanged.
+    state = AutoPipelineState(goal=GOAL, cwd=str(tmp_path))
+    pipeline = AutoPipeline(_Unused(), None)  # type: ignore[arg-type]
+    pipeline._record_generated_seed(state, ledger, _generated_seed())
+    result = pipeline._result(state, ledger)
+    assert result.assumed_answers == (line,)
+    assert _result_meta(result)["assumed_answers"] == [line]
+    assert f"- {line}" in _format_result(result)
+
+
+def test_the_cli_result_prints_an_assumed_answer_unchanged(tmp_path: Path) -> None:
+    from ouroboros.cli.commands.auto import _print_result
+    from ouroboros.cli.formatters import console
+
+    value = "[bold]Markup[/bold] stays text: 3:1;"
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_x",
+        phase="complete",
+        assumed_answers=(value,),
+    )
+    with console.capture() as capture:
+        _print_result(result, show_ledger=False)
+    assert f"- {value}" in re.sub(r"\x1b\[[0-9;]*m", "", capture.get())
+
+
+def test_every_section_label_renders_in_order() -> None:
+    answers = tuple((section, f"Answer for {section}.") for section in _LABELS)
+    seed = with_ledger_carryover(_generated_seed(), _assumed_ledger(answers))
+
+    expected = tuple(f"{label}Answer for {section}." for section, label in _LABELS.items())
+    assert seed.sourced_scope is not None
+    assert seed.sourced_scope.assumptions == expected
+    section_text = _assumptions_part(_worker_input(seed))
+    rendered = [line[2:] for line in section_text.splitlines() if line.startswith("- ")]
+    assert tuple(rendered) == expected
