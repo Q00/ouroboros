@@ -161,10 +161,9 @@ def _plan(seed: Seed) -> Any:
 
 
 async def _execute(executor: ParallelACExecutor, seed: Seed) -> Any:
-    from ouroboros.core.seed import ac_texts
     from ouroboros.orchestrator.atomic_prompt_builder import install_sourced_scope
 
-    install_sourced_scope(executor, seed.sourced_scope, ac_texts(seed.acceptance_criteria))
+    install_sourced_scope(executor, seed.sourced_scope, seed.acceptance_criteria)
     return await executor.execute_parallel(
         seed=seed,
         execution_plan=_plan(seed),
@@ -228,8 +227,9 @@ async def test_a_shared_attempt_seed_runs_one_worker_and_judges_every_criterion(
     assert len(runtime.prompts) == 1
     prompt = runtime.prompts[0]
     assert USER_REQUEST in prompt and GOAL_OBJECTIVE_CRITERION in prompt
-    for criterion in MODEL_CRITERIA:
-        assert criterion not in prompt
+    # Every criterion is judged from this attempt, so its worker sees each one (#3072).
+    for number, criterion in enumerate(MODEL_CRITERIA, 1):
+        assert f"{number}. {criterion}" in prompt
     # Root 0's criterion is documentation-only, the others are not: the one
     # worker is asked for every field a criterion judged from it requires.
     assert _is_documentation_only_ac(DOC_CRITERION)

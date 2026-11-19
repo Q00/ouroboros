@@ -10,6 +10,8 @@ import pytest
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.failure_taxonomy import RUN_FAILURE_CAUSES, FailureReasonCode
 from ouroboros.orchestrator.run_failure_cause import (
+    RunFailure,
+    derive_run_failure,
     derive_run_failure_cause,
     failure_reason_code_for_run_cause,
 )
@@ -324,6 +326,181 @@ def test_unaudited_verify_cause_is_not_forwarded() -> None:
         )
     ]
     assert _derive(events) == "unknown"
+
+
+def _failure(events: list[BaseEvent]) -> RunFailure:
+    return derive_run_failure(events, session_id=SESSION, terminal_status="failed")
+
+
+def _judged(ac_index: int, outcome: str, verify_cause: str | None = None, **data: Any) -> BaseEvent:
+    return _execution_event(
+        "execution.ac.attempt_judged",
+        ac_index=ac_index,
+        root_ac_index=ac_index,
+        outcome=outcome,
+        verify_cause=verify_cause,
+        **data,
+    )
+
+
+def test_a_judged_verify_failure_without_recovery_names_its_missing_artifacts() -> None:
+    """#3072: a criterion judged once from a shared attempt fails with no retry record."""
+    events = [
+        _judged(0, "succeeded"),
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=1,
+            verify_cause="artifacts_missing",
+            missing_artifacts=["tests/test_galaxy_rotation.py"],
+        ),
+        _judged(1, "failed", "artifacts_missing"),
+        _session_failed(),
+    ]
+
+    assert _failure(events) == RunFailure(
+        "verify_artifacts_missing", ("tests/test_galaxy_rotation.py",)
+    )
+    assert _derive(events) == "verify_artifacts_missing"
+
+
+def test_a_judged_verify_failure_without_a_recorded_rejection_names_only_its_cause() -> None:
+    assert _failure([_judged(1, "failed", "exit_nonzero")]) == RunFailure("verify_exit_nonzero")
+
+
+def test_a_judged_failure_names_only_the_artifacts_of_its_own_cause() -> None:
+    events = [
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=1,
+            verify_cause="artifacts_missing",
+            missing_artifacts=["a.py"],
+        ),
+        _judged(1, "failed", "exit_nonzero"),
+    ]
+
+    assert _failure(events) == RunFailure("verify_exit_nonzero")
+
+
+def test_judged_failures_name_every_missing_artifact_of_the_chosen_cause_once() -> None:
+    events = [
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=1,
+            verify_cause="artifacts_missing",
+            missing_artifacts=["tests/a.py", "tests/b.py"],
+        ),
+        _judged(1, "failed", "artifacts_missing"),
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=2,
+            verify_cause="artifacts_missing",
+            missing_artifacts=["tests/b.py", "docs/c.md"],
+        ),
+        _judged(2, "failed", "artifacts_missing"),
+        _judged(3, "failed", "exit_nonzero"),
+    ]
+
+    assert _failure(events) == RunFailure(
+        "verify_artifacts_missing", ("tests/a.py", "tests/b.py", "docs/c.md")
+    )
+
+
+def test_recorded_missing_artifacts_that_are_not_workspace_paths_are_not_named() -> None:
+    events = [
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=1,
+            verify_cause="artifacts_missing",
+            missing_artifacts=["/Users/private/secret.txt", "../escape.py", 7, "", "ok.py"],
+        ),
+        _judged(1, "failed", "artifacts_missing"),
+    ]
+
+    assert _failure(events) == RunFailure("verify_artifacts_missing", ("ok.py",))
+
+
+@pytest.mark.parametrize("verify_cause", [None, "rm -rf / went wrong", ["artifacts_missing"]])
+def test_a_judged_failure_without_an_audited_verify_cause_stays_unknown(
+    verify_cause: Any,
+) -> None:
+    assert _failure([_judged(1, "failed", verify_cause)]) == RunFailure("unknown")
+
+
+def test_a_criterion_whose_latest_judgment_passed_is_not_the_cause() -> None:
+    when = datetime(2026, 11, 20, tzinfo=UTC)
+    failed = _judged(1, "failed", "artifacts_missing")
+    passed = _judged(1, "succeeded")
+    failed = failed.model_copy(update={"timestamp": when, "id": "a" * 32})
+    passed = passed.model_copy(update={"timestamp": when, "id": "z" * 32})
+
+    assert _failure([passed, failed]) == RunFailure("unknown")
+
+
+def test_more_decisive_evidence_outranks_a_judged_verify_failure() -> None:
+    judged = [
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=1,
+            verify_cause="artifacts_missing",
+            missing_artifacts=["a.py"],
+        ),
+        _judged(1, "failed", "artifacts_missing"),
+    ]
+    runtime = [*judged, _session_failed(error_type="OrchestratorError")]
+    exhausted = [
+        *judged,
+        _execution_event(
+            "execution.ac.recovery_exhausted", root_ac_index=0, last_failure_class="unknown"
+        ),
+    ]
+
+    assert _failure(runtime) == RunFailure("runtime_error")
+    assert _failure(exhausted) == RunFailure("worker_failed")
+
+
+def test_exhaustion_and_final_revalidation_name_their_missing_artifacts() -> None:
+    exhausted = [
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=0,
+            verify_cause="artifacts_missing_found_elsewhere",
+            missing_artifacts=["app/out.txt"],
+        ),
+        _execution_event(
+            "execution.ac.recovery_exhausted", root_ac_index=0, last_failure_class="unknown"
+        ),
+        _execution_event(
+            "execution.ac.recovery_exhausted", root_ac_index=1, last_failure_class="unknown"
+        ),
+    ]
+    final = [
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=0,
+            verify_cause="artifacts_missing",
+            missing_artifacts=["dist/app"],
+            final_workspace_revalidation=True,
+        ),
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=1,
+            verify_cause="workspace_mutated",
+            missing_artifacts=[],
+            final_workspace_revalidation=True,
+        ),
+        _execution_event(
+            "execution.verify.failed",
+            ac_index=2,
+            verify_cause="artifacts_missing",
+            missing_artifacts=["dist/app.map"],
+            final_workspace_revalidation=True,
+        ),
+    ]
+
+    assert _failure(exhausted) == RunFailure(
+        "verify_artifacts_missing_found_elsewhere", ("app/out.txt",)
+    )
+    assert _failure(final) == RunFailure("verify_artifacts_missing", ("dist/app", "dist/app.map"))
 
 
 def test_every_derivable_cause_is_in_the_closed_set() -> None:

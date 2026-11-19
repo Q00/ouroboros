@@ -413,8 +413,10 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 > - a required ledger section marked `BLOCKED` (an answer only a human can
 >   give) stops the session with stop reason `degraded_seed_safety_blockers`;
 > - otherwise, a degraded Seed that carries the user's goal on record
->   (`sourced_scope`) **runs** like any auto Seed: the worker is told only that
->   goal, and the unresolved slots stay in the Seed and the result;
+>   (`sourced_scope`) **runs** like any auto Seed: the worker is told that goal
+>   (and, when one attempt is judged against several acceptance criteria, those
+>   criteria and their expected artifacts), and the unresolved slots stay in the
+>   Seed and the result;
 > - without a sourced goal it never reaches RUN, so the session stops
 >   `AutoPhase.BLOCKED` with stop reason `degraded_seed_not_executed`, never
 >   `COMPLETE`.
