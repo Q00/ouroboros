@@ -338,3 +338,95 @@ async def test_a_seed_without_sourced_scope_runs_one_leaf_per_criterion(tmp_path
 
     assert len(runtime.prompts) == 3
     assert {r.outcome for r in result.results} == {ACExecutionOutcome.SUCCEEDED}
+
+
+def _snapshots(executor: ParallelACExecutor) -> list[tuple[str, tuple[str, ...]]]:
+    """Every workflow snapshot the run appended: its activity and statuses by criterion."""
+    return [
+        (
+            call.args[0].data["activity"],
+            tuple(item["status"] for item in call.args[0].data["acceptance_criteria"]),
+        )
+        for call in executor._event_store.append.call_args_list
+        if call.args[0].type == "workflow.progress.updated"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_criteria_judged_from_the_attempt_execute_with_it_then_settle_one_by_one(
+    tmp_path,
+) -> None:
+    """The board shows every criterion executing with root 0's attempt, then each as judged (#3060)."""
+    runtime = _CountingRuntime(str(tmp_path))
+    executor = _executor(runtime)
+    seen_while_judging: dict[int, tuple[str, ...]] = {}
+
+    async def gate(*, seed: Any, ac_index: int, result: ACExecutionResult, **_: Any) -> Any:
+        seen_while_judging[ac_index] = _snapshots(executor)[-1][1]
+        if ac_index == 2:
+            return replace(
+                result, success=False, outcome=ACExecutionOutcome.FAILED, error="check failed"
+            )
+        return result
+
+    executor.check_package_gate = gate  # type: ignore[attr-defined]
+    await _execute(executor, _seed())
+
+    assert _snapshots(executor) == [
+        ("Starting parallel execution", ("pending", "pending", "pending")),
+        ("Executing", ("executing", "executing", "executing")),
+        ("Monitoring", ("completed", "executing", "executing")),
+        ("Monitoring", ("completed", "completed", "executing")),
+        ("Level 1 complete", ("completed", "completed", "failed")),
+    ]
+    # Each criterion is judged with every earlier judgment already on the board.
+    assert seen_while_judging == {
+        0: ("executing", "executing", "executing"),
+        1: ("completed", "executing", "executing"),
+        2: ("completed", "completed", "executing"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_criteria_a_failed_attempt_leaves_unjudged_are_shown_skipped_in_turn(
+    tmp_path,
+) -> None:
+    runtime = _CountingRuntime(str(tmp_path), support=False)
+    executor = _executor(runtime)
+    await _execute(executor, _seed())
+
+    assert _snapshots(executor)[1:] == [
+        ("Executing", ("executing", "executing", "executing")),
+        ("Monitoring", ("failed", "executing", "executing")),
+        ("Monitoring", ("failed", "skipped", "executing")),
+        ("Level 1 complete", ("failed", "skipped", "skipped")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_seed_without_sourced_scope_reports_its_leaves_as_before(tmp_path) -> None:
+    """One leaf per criterion: no criterion is judged from another, no extra snapshot."""
+    runtime = _CountingRuntime(str(tmp_path))
+    executor = _executor(runtime)
+    seed = _seed(scope=None)
+    graph = DependencyGraph(
+        nodes=tuple(ACNode(index=i, content=c) for i, c in enumerate(MODEL_CRITERIA)),
+        execution_levels=((0,), (1, 2)),
+    )
+    await executor.execute_parallel(
+        seed=seed,
+        execution_plan=graph.to_execution_plan(),
+        session_id="orch_leaves",
+        execution_id="exec_leaves",
+        tools=["Read", "Edit", "Bash"],
+        tool_catalog=None,
+        system_prompt="system",
+    )
+
+    assert _snapshots(executor) == [
+        ("Starting parallel execution", ("pending", "pending", "pending")),
+        ("Executing", ("executing", "pending", "pending")),
+        ("Level 1 complete", ("completed", "pending", "pending")),
+        ("Executing", ("completed", "executing", "executing")),
+        ("Level 2 complete", ("completed", "completed", "completed")),
+    ]
