@@ -982,7 +982,7 @@ class Harness:
         except Exception as exc:
             if job_id := (self.get(session_id) or {}).get("pending_run_job_id"):
                 if await self._restore_run(
-                    session_id, job_id, rejected=not acceptance.may_have_accepted(exc)
+                    session_id, job_id, can_clear=acceptance.can_clear_missing_receipt(exc)
                 ):
                     return
             raise
@@ -998,16 +998,16 @@ class Harness:
                 self._follow_run, session_id, str(execution_id), str(job_id) if job_id else None
             )
 
-    async def _restore_run(self, session_id: str, job_id: str, *, rejected: bool = False) -> bool:
-        state = await self._read_run(session_id, job_id, rejected=rejected)
+    async def _restore_run(self, session_id: str, job_id: str, *, can_clear: bool = False) -> bool:
+        state = await self._read_run(session_id, job_id, can_clear=can_clear)
         if state in ("active", "unavailable"):
             self._loop_ready().submit(
-                self._watch_restored_run(session_id, job_id, rejected=rejected)
+                self._watch_restored_run(session_id, job_id, can_clear=can_clear)
             )
         return state in ("active", "terminal")
 
     async def _read_run(
-        self, session_id: str, job_id: str, *, rejected: bool
+        self, session_id: str, job_id: str, *, can_clear: bool
     ) -> Literal["active", "terminal", "missing", "unavailable"]:
         with self._lock:
             saved = self._sessions.get(session_id) or {}
@@ -1017,7 +1017,7 @@ class Harness:
                 return "missing"
         try:
             job = await run_recovery.read_job(job_id)
-            if pending and job is None and not rejected:
+            if pending and job is None and not can_clear:
                 if not run_recovery.pending_owner_can_no_longer_accept(owner):
                     return "unavailable"
                 job = await run_recovery.read_job(
@@ -1055,12 +1055,12 @@ class Harness:
                 self._touch(session)
         return "terminal" if job.is_terminal else "active"
 
-    async def _watch_restored_run(self, session_id: str, job_id: str, *, rejected: bool) -> None:
+    async def _watch_restored_run(self, session_id: str, job_id: str, *, can_clear: bool) -> None:
         while session := self.get(session_id):
             if (session.get("pending_run_job_id") or session.get("run_job_id")) != job_id:
                 return
             await asyncio.sleep(_RUN_POLL_SEC)
-            if await self._read_run(session_id, job_id, rejected=rejected) not in (
+            if await self._read_run(session_id, job_id, can_clear=can_clear) not in (
                 "active",
                 "unavailable",
             ):

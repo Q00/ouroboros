@@ -87,6 +87,13 @@ class BackgroundJobAcceptanceState:
     def mark_accepted(self) -> None:
         self.phase = "accepted"
 
+    def mark_local_failed(self) -> None:
+        self.phase = "local_failed"
+
+    def can_clear_missing_receipt(self, exc: BaseException) -> bool:
+        """A fresh read can settle a failed inline start's receipt."""
+        return self.phase == "local_failed" or not self.may_have_accepted(exc)
+
     def may_have_accepted(self, _exc: BaseException) -> bool:
         """Classify ownership from the transport phase, not exception type alone."""
         if self.phase == "accepted":
@@ -100,7 +107,11 @@ class BackgroundJobAcceptanceState:
             return not callable(has_unresolved_acceptance) or bool(
                 has_unresolved_acceptance(self.job_manager, self.job_id)
             )
-        if self.phase != "local_pending" or self.job_manager is None or self.job_id is None:
+        if (
+            self.phase not in ("local_pending", "local_failed")
+            or self.job_manager is None
+            or self.job_id is None
+        ):
             return False
         has_accepted_job = getattr(type(self.job_manager), "has_accepted_job", None)
         return bool(callable(has_accepted_job) and has_accepted_job(self.job_manager, self.job_id))
@@ -403,6 +414,8 @@ async def start_background_tool_job(
                     extra={"job_type": job_type},
                     exc_info=True,
                 )
+        # The inline start's receipt write has already committed or rolled back.
+        acceptance_state.mark_local_failed()
         raise
 
     acceptance_state.mark_accepted()

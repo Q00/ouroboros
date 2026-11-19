@@ -747,6 +747,120 @@ async def test_definite_enqueue_rejection_releases_pending_receipt_in_the_same_c
         ).fetchall() == [(first_job,), (accepted_job,)]
 
 
+@pytest.mark.parametrize("receipt_written", [False, True], ids=["no-receipt", "created-receipt"])
+async def test_settled_inline_enqueue_failure_reconciles_receipt_before_allowing_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receipt_written: bool
+) -> None:
+    from ouroboros.dashboard_web import reader
+    from ouroboros.mcp.job_manager import JobLinks, JobManager
+    from ouroboros.mcp.tools.background import start_background_tool_job
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
+
+    db = tmp_path / "events.db"
+    unreadable_db = tmp_path / "unreadable.db"
+    unreadable_db.write_bytes(b"not a SQLite database")
+    recovery_db = db
+    first_job = "job_000000000001"
+    await _write_restart_job(db, first_job, terminal="failed")
+    monkeypatch.setattr(reader, "default_db_path", lambda: recovery_db)
+    monkeypatch.setattr(harness, "_RUN_POLL_SEC", 0.05)
+
+    store = EventStore(sqlite_database_url(db))
+    manager = JobManager(store)
+    real_append = manager._append_event
+    real_job_exists = manager._job_exists
+    uncertain_jobs: list[str] = []
+    unavailable_probes: list[str] = []
+    worker_calls: list[str] = []
+
+    async def unreadable_receipt(job_id: str) -> bool:
+        if len(unavailable_probes) < 3:
+            unavailable_probes.append(job_id)
+            raise OSError("Immediate receipt query unavailable")
+        return await real_job_exists(job_id)
+
+    async def append_event(event_type: str, job_id: str, data: Any, **kwargs: Any) -> None:
+        nonlocal recovery_db
+        if event_type == "mcp.job.created" and not uncertain_jobs:
+            uncertain_jobs.append(job_id)
+            recovery_db = unreadable_db
+            if receipt_written:
+                await real_append(event_type, job_id, data, **kwargs)
+            # Only the inline acceptance probes fail here. Console recovery
+            # uses a separate SQLite reader whose database is restored below.
+            monkeypatch.setattr(manager, "_job_exists", unreadable_receipt)
+            raise OSError("Could not confirm job creation")
+        await real_append(event_type, job_id, data, **kwargs)
+
+    class RunStarter:
+        def run_starter(self, _cwd: str) -> Any:
+            return self.start
+
+        async def start(self, _seed: Any, *, idempotency_key: str, **kwargs: Any) -> dict[str, Any]:
+            async def work(_handle: Any) -> Any:
+                worker_calls.append(idempotency_key)
+                raise RuntimeError("Controlled worker failure")
+
+            snapshot = await start_background_tool_job(
+                job_manager=manager,
+                event_store=store,
+                job_type="execute_seed",
+                intent="execute_seed",
+                process_scope="test",
+                initial_message="Test job",
+                links=JobLinks(execution_id="exec_000000000002"),
+                work_fn=work,
+                cancelled_text="Cancelled test job",
+                **kwargs,
+            )
+            return {"job_id": snapshot.job_id, "execution_id": snapshot.links.execution_id}
+
+    monkeypatch.setattr(manager, "_append_event", append_event)
+    monkeypatch.setattr(harness.Harness, "_handlers_for", lambda *_args: RunStarter())
+    state = _state()
+    chat_id = _spec_chat(state.harness, _repo(tmp_path / "project"))
+    state.harness._sessions[chat_id].update(
+        status="failed",
+        run_job_id=first_job,
+        seed_yaml="goal: t\nontology_schema: {name: t, description: t}\nmetadata: {}\n",
+    )
+    request = {"action": "run", "previous_job_id": first_job}
+    try:
+        api.post_chat_action(state, chat_id, query={}, body=request)
+        pending = _wait(state.harness, chat_id, lambda s: s["status"] == "failed")
+        assert pending["pending_run_job_id"] == uncertain_jobs[0]
+        assert unavailable_probes == uncertain_jobs * 3
+        with pytest.raises(api.ApiError) as refused:
+            api.post_chat_action(state, chat_id, query={}, body=request)
+        assert (refused.value.status, refused.value.code) == (409, "previous_run_unconfirmed")
+
+        recovery_db = db
+        recovered = _wait(
+            state.harness, chat_id, lambda s: "pending_run_job_id" not in s, timeout=5
+        )
+        if receipt_written:
+            assert recovered["run_job_id"] == uncertain_jobs[0]
+            accepted = recovered
+        else:
+            assert recovered["run_job_id"] == first_job
+            api.post_chat_action(state, chat_id, query={}, body=request)
+            accepted = _wait(
+                state.harness,
+                chat_id,
+                lambda s: s["status"] == "failed" and s["run_job_id"] != first_job,
+            )
+        assert api.post_chat_action(state, chat_id, query={}, body=request) == accepted
+        assert len(worker_calls) == (0 if receipt_written else 1)
+        with closing(sqlite3.connect(db)) as connection:
+            assert connection.execute(
+                "SELECT aggregate_id FROM events WHERE event_type = 'mcp.job.created' ORDER BY rowid"
+            ).fetchall() == [(first_job,), (accepted["run_job_id"],)]
+    finally:
+        with state.harness._lock:
+            state.harness._sessions.pop(chat_id, None)
+        state.harness._loop_ready().submit(store.close()).result(timeout=5)
+
+
 # ── 2 and 7. Auto jobs: listed in Activity, and ending with a result ──
 
 _AUTO_SCRIPT = """
