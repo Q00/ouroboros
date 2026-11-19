@@ -343,8 +343,8 @@ class AutoAnswerer:
         ``asked`` is the interviewer's current question. When the answer
         replies to it (``question`` is that question, not a driver gap-reopen
         prompt), it is kept on each new entry (``LedgerEntry.question``) so an
-        unconfirmed entry can reach the worker as the open question instead of
-        the drafted answer.
+        unconfirmed entry is kept as that open question, or, when the refiner
+        wrote it (``LedgerEntry.refined``), as a labelled assumption.
         """
         ledger.record_qa(question, answer.prefixed_text)
         if answer.blocker is not None:

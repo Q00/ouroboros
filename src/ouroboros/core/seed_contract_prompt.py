@@ -86,6 +86,25 @@ say otherwise.
 {assumptions_text}"""
 
 
+def render_sourced_assumptions_section(contract: SeedContract) -> str:
+    """Render the answers auto chose for its interview questions, labelled as unconfirmed.
+
+    Only a contract of sourced content carries them (``SourcedScope.assumptions``).
+    They are kept apart from the constraints and never narrow the goal.
+    """
+    if not contract.assumptions:
+        return ""
+    assumptions_text = "\n".join(f"- {assumption}" for assumption in contract.assumptions)
+    return f"""## Assumptions (chosen by auto, not confirmed)
+Nobody confirmed these. Auto chose them on the requester's behalf while answering its
+own interview, for details the request left open. They are not requirements and do not
+bind. Use an assumed value where the goal, the constraints, the requester's answers and
+the code leave that detail open, and follow those over any assumption. An assumption
+never narrows the goal: doing more than an assumption describes, where the goal calls
+for it, is not a failure.
+{assumptions_text}"""
+
+
 def render_brownfield_section(contract: SeedContract) -> str:
     """Render existing-codebase boundaries from the Seed contract."""
     context = contract.brownfield_context
@@ -223,6 +242,9 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
     if contract.sourced_only:
         # Only content with a known source reaches the worker; the Seed's
         # model-written sections stay in the Seed (``Seed.sourced_scope``).
+        sourced_assumptions = render_sourced_assumptions_section(contract)
+        if sourced_assumptions:
+            sections.extend(["", sourced_assumptions])
         return "\n".join(sections)
 
     assumptions = render_assumptions_section(contract)
@@ -302,5 +324,6 @@ __all__ = [
     "render_repo_facts_section",
     "render_requester_answers_section",
     "render_seed_contract_for_execution",
+    "render_sourced_assumptions_section",
     "render_sourced_objective",
 ]

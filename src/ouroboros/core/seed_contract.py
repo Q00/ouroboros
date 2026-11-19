@@ -74,6 +74,8 @@ class SeedContract:
         A Seed with ``sourced_scope`` yields a contract of its sourced content
         only: the user's goal verbatim, the binding constraints and criteria
         (or, with no binding criterion, :data:`GOAL_OBJECTIVE_CRITERION`), the
+        answers auto chose for its interview questions (``scope.assumptions``,
+        never ``Seed.assumptions``, which the generator also writes), the
         requester answers and the repo facts. Every other field stays in the
         Seed and is left out of the contract.
         """
@@ -88,6 +90,7 @@ class SeedContract:
                 evaluation_principles=(),
                 exit_conditions=(),
                 brownfield_context=BrownfieldContext(),
+                assumptions=scope.assumptions,
                 requester_answers=seed.requester_answers,
                 repo_facts=seed.repo_facts,
                 sourced_only=True,

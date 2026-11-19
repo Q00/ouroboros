@@ -52,7 +52,11 @@ from ouroboros.auto.ledger import (
     LedgerStatus,
     SeedDraftLedger,
 )
-from ouroboros.auto.ledger_seed import ledger_open_questions, synthesize_seed_from_ledger
+from ouroboros.auto.ledger_seed import (
+    ledger_open_questions,
+    ledger_sourced_scope,
+    synthesize_seed_from_ledger,
+)
 from ouroboros.auto.profiles.coding import CODING_PROFILE
 from ouroboros.auto.requester import RequesterQuestion, RequesterReply
 from ouroboros.auto.safe_defaults import finalize_safe_defaultable_gaps
@@ -270,7 +274,14 @@ async def test_defaults_stay_assumptions_and_the_spec_stays_user_owned(
     bound = [*seed.constraints, *(str(item) for item in seed.acceptance_criteria)]
     bound += [field.description for field in seed.ontology_schema.fields]
     assert not any("Return None when fewer than two" in text for text in bound)
-    assert set(REQUIREMENT_QUESTIONS) <= set(ledger_open_questions(ledger))
+    # The refined defaults are auto's answers (#3059): non-binding assumptions
+    # the worker sees, so their questions are no longer open.
+    scope = ledger_sourced_scope(ledger)
+    assert scope is not None
+    assert scope.constraints == ()
+    assert scope.acceptance_criteria == ()
+    assert any("Return None when fewer than two" in line for line in scope.assumptions)
+    assert not set(REQUIREMENT_QUESTIONS) & set(ledger_open_questions(ledger))
 
 
 @pytest.mark.asyncio

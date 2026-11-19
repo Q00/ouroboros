@@ -1550,6 +1550,10 @@ def _print_result(
     if result.seed_path:
         console.print(f"Seed: {result.seed_path}")
     console.print(f"Seed origin: {result.seed_origin}")
+    if result.assumed_answers:
+        console.print("Assumed answers (chosen by auto, not confirmed; given to the worker):")
+        for item in result.assumed_answers:
+            console.print(f"  - {_rich_escape(item)}")
     if result.open_questions:
         console.print("Open questions (kept in the Seed, not given to the worker):")
         for item in result.open_questions:
