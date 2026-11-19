@@ -461,11 +461,11 @@ function RunCard({ message }: { message: ChatMessage }) {
             </ul>
           ) : null}
         </>
-      ) : (
+      ) : status === "running" ? (
         <p className="run-card-activity">
           <Spinner size={13} /> {t("chat.run.starting")}
         </p>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -1076,7 +1076,7 @@ function Thread({ id }: { id: string }) {
   const [lastAction, setLastAction] = useState<string>("");
   const run = (action: Action, extra?: Record<string, unknown>) => {
     setLastAction(action);
-    return act(action, extra);
+    return act(action, action === "run" ? { ...extra, previous_job_id: session?.run_job_id ?? null } : extra);
   };
 
   const [remove, removing] = useAction(

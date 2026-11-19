@@ -40,7 +40,8 @@ import uuid
 
 import yaml
 
-from ouroboros.gui import auto_progress, model_refusal, workspace
+from ouroboros.core.errors import PersistenceError
+from ouroboros.gui import auto_progress, model_refusal, run_recovery, workspace
 from ouroboros.gui.answer_language import LANGUAGE_NAMES, goal_language, in_language, plain_answer
 from ouroboros.gui.interview_assist import (
     AUTO_CONFIRMED_PREFIX,
@@ -51,6 +52,7 @@ from ouroboros.gui.interview_assist import (
     load_interview_view,
 )
 from ouroboros.gui.jobs import JobRegistry, ouroboros_command
+from ouroboros.gui.run_recovery import job_terminal as _job_terminal
 
 _MAX_LOG_LINES = 400
 _RUN_POLL_SEC = 2.0
@@ -348,6 +350,10 @@ class Harness:
         # ``AutoStore``, which is where ``ouroboros auto`` saves it).
         self._auto_store: Any = None
         self._load_all()
+        for data in tuple(self._sessions.values()):
+            job_id = data.get("pending_run_job_id") or data.get("run_job_id")
+            if data.get("mode") == "interview" and job_id and data.get("status") != "done":
+                self._loop_ready().submit(self._restore_run(data["id"], job_id)).result()
 
     # ── persistence ─────────────────────────────────────────────────
 
@@ -569,8 +575,30 @@ class Harness:
             elif action == "run":
                 if not session.get("seed_yaml"):
                     raise Refusal("no_spec", "Write the spec before running it.")
+                previous_job_id = session.get("run_job_id")
+                # A repeated request can arrive after its successor has already finished.
+                if payload.get("previous_job_id") != previous_job_id:
+                    return self.get(session_id) or {}
                 if status == "running":
                     raise Refusal("already_running", "This spec is already running.")
+                if status == "done":
+                    return self.get(session_id) or {}
+                if session.get("pending_run_job_id"):
+                    raise Refusal(
+                        "previous_run_unconfirmed",
+                        "Wait until the previous run has finished before trying again.",
+                    )
+                if previous_job_id:
+                    from ouroboros.dashboard_web.reader import default_db_path
+
+                    previous = _job_terminal(str(default_db_path()), previous_job_id)
+                    if previous is None:
+                        raise Refusal(
+                            "previous_run_unconfirmed",
+                            "Wait until the previous run has finished before trying again.",
+                        )
+                    if previous["status"] == "completed":
+                        return self.get(session_id) or {}
                 prepare = payload.get("prepare_git", False)
                 if not isinstance(prepare, bool):
                     raise Refusal("bad_prepare_git", "prepare_git must be true or false.")
@@ -925,35 +953,118 @@ class Harness:
 
     async def _start_run(self, session_id: str) -> None:
         from ouroboros.core.seed import Seed
+        from ouroboros.mcp.tools.background import BackgroundJobAcceptanceState
 
         session = self.get(session_id) or {}
         starter = await asyncio.to_thread(self._handlers_for(session).run_starter, session["cwd"])
         seed = Seed.from_dict(yaml.safe_load(session["seed_yaml"]))
-        meta = await starter(seed, idempotency_key=f"gui-{session_id}")
-        execution_id = meta.get("execution_id")
+        acceptance = BackgroundJobAcceptanceState()
+        # Until a new receipt arrives, retries for this predecessor share one key.
+        idempotency_key = f"gui-{session_id}"
+        if previous_job_id := session.get("run_job_id"):
+            idempotency_key += f"-after-{previous_job_id}"
 
-        def apply(s: dict[str, Any]) -> None:
-            s["execution_id"] = execution_id
-            s["run_job_id"] = meta.get("job_id")
-            s["run_session_id"] = meta.get("session_id")
-            s["messages"].append(
-                _msg(
-                    "assistant",
-                    "run",
-                    "Run started.",
-                    execution_id=execution_id,
-                    job_id=meta.get("job_id"),
-                    run_status="running",
-                    progress=None,
+        def remember_job(job_id: str) -> None:
+            with self._lock:
+                current = self._require(session_id)
+                current.update(
+                    pending_run_job_id=job_id, pending_run_owner=run_recovery.pending_job_owner()
                 )
-            )
+                self._save(current)
 
-        self._update(session_id, apply)
+        try:
+            meta = await starter(
+                seed,
+                idempotency_key=idempotency_key,
+                on_job_allocated=remember_job,
+                acceptance_state=acceptance,
+            )
+        except Exception as exc:
+            if job_id := (self.get(session_id) or {}).get("pending_run_job_id"):
+                if await self._restore_run(
+                    session_id, job_id, can_clear=acceptance.can_clear_missing_receipt(exc)
+                ):
+                    return
+            raise
+        execution_id, job_id = meta.get("execution_id"), meta.get("job_id")
+        self._update(
+            session_id,
+            lambda s: run_recovery.apply_run_receipt(
+                s, job_id, execution_id, meta.get("session_id"), "running", make_message=_msg
+            ),
+        )
         if execution_id:
-            job_id = meta.get("job_id")
             await asyncio.to_thread(
                 self._follow_run, session_id, str(execution_id), str(job_id) if job_id else None
             )
+
+    async def _restore_run(self, session_id: str, job_id: str, *, can_clear: bool = False) -> bool:
+        state = await self._read_run(session_id, job_id, can_clear=can_clear)
+        if state in ("active", "unavailable"):
+            self._loop_ready().submit(
+                self._watch_restored_run(session_id, job_id, can_clear=can_clear)
+            )
+        return state in ("active", "terminal")
+
+    async def _read_run(
+        self, session_id: str, job_id: str, *, can_clear: bool
+    ) -> Literal["active", "terminal", "missing", "unavailable"]:
+        with self._lock:
+            saved = self._sessions.get(session_id) or {}
+            pending = saved.get("pending_run_job_id")
+            owner = saved.get("pending_run_owner")
+            if (pending or saved.get("run_job_id")) != job_id:
+                return "missing"
+        try:
+            job = await run_recovery.read_job(job_id)
+            if pending and job is None and not can_clear:
+                if not run_recovery.pending_owner_can_no_longer_accept(owner):
+                    return "unavailable"
+                job = await run_recovery.read_job(
+                    job_id
+                )  # It may have been accepted just before exit.
+        except (OSError, PersistenceError, ValueError):
+            return "unavailable"  # An unreadable receipt cannot authorize a new run.
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return "missing"
+            if (session.get("pending_run_job_id"), session.get("pending_run_owner")) != (
+                pending,
+                owner,
+            ):
+                return "missing"
+            if (pending or session.get("run_job_id")) != job_id:
+                return "missing"
+            if job is None:
+                if pending:
+                    run_recovery.clear_pending_job(session)
+                    self._touch(session)
+                return "missing"
+            status = job.status.value if job.is_terminal else "running"
+            if status == "completed" and job.result_meta.get("status") == "paused":
+                status = "paused"
+            if run_recovery.apply_run_receipt(
+                session,
+                job_id,
+                job.links.execution_id,
+                job.links.session_id,
+                status,
+                make_message=_msg,
+            ):
+                self._touch(session)
+        return "terminal" if job.is_terminal else "active"
+
+    async def _watch_restored_run(self, session_id: str, job_id: str, *, can_clear: bool) -> None:
+        while session := self.get(session_id):
+            if (session.get("pending_run_job_id") or session.get("run_job_id")) != job_id:
+                return
+            await asyncio.sleep(_RUN_POLL_SEC)
+            if await self._read_run(session_id, job_id, can_clear=can_clear) not in (
+                "active",
+                "unavailable",
+            ):
+                return
 
     def _follow_run(
         self,
@@ -1625,36 +1736,6 @@ def _run_result(cwd: str, run_session_id: object) -> dict[str, Any] | None:
         "file_count": len(files),
         "uncommitted": len(pending),
     }
-
-
-def _job_terminal(db_path: str, job_id: str) -> dict[str, str] | None:
-    """The job's terminal status from the EventStore (read-only), or ``None`` while it runs."""
-    import sqlite3
-
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
-    except sqlite3.Error:
-        return None
-    try:
-        row = conn.execute(
-            "SELECT event_type, payload FROM events WHERE aggregate_id = ? "
-            "AND event_type IN ('mcp.job.failed', 'mcp.job.completed', 'mcp.job.cancelled') "
-            "ORDER BY rowid DESC LIMIT 1",
-            (job_id,),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        conn.close()
-    if row is None:
-        return None
-    try:
-        payload = json.loads(row[1]) if isinstance(row[1], str) else {}
-    except ValueError:
-        payload = {}
-    status = row[0].rsplit(".", 1)[-1]
-    message = payload.get("message") if isinstance(payload, dict) else None
-    return {"status": status, "message": str(message or status)}
 
 
 def settings_stage(name: str) -> Any:

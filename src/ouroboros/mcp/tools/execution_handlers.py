@@ -6,7 +6,7 @@ This module contains handlers for seed execution:
 """
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
@@ -52,7 +52,11 @@ from ouroboros.evaluation.verification_artifacts import build_verification_artif
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
-from ouroboros.mcp.tools.background import job_work_error, start_background_tool_job
+from ouroboros.mcp.tools.background import (
+    BackgroundJobAcceptanceState,
+    job_work_error,
+    start_background_tool_job,
+)
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.execution_preferences import persisted_execution_preferences
 from ouroboros.mcp.tools.job_observer import (
@@ -2440,25 +2444,24 @@ class StartExecuteSeedHandler:
     async def handle(
         self,
         arguments: dict[str, Any],
+        *,
+        on_job_allocated: Callable[[str], None] | None = None,
+        acceptance_state: BackgroundJobAcceptanceState | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
-        # Serialize concurrent calls with the same idempotency_key so the
-        # check-cache / dispatch / write-cache sequence is atomic per key.
-        # Without this, two in-flight requests can both miss the cache and
-        # each enqueue a fresh execution, breaking the "second call with
-        # the same key does not enqueue" contract. ``setdefault`` is
-        # atomic in single-threaded asyncio (no ``await`` between the
-        # ``in`` check and insert), so lock-creation is race-free.
+        # Hold the per-key lock across the lookup, dispatch, and receipt write.
         raw_key_outer = arguments.get("idempotency_key")
         idem_key_outer = raw_key_outer.strip() if isinstance(raw_key_outer, str) else ""
         if idem_key_outer:
             lock = self._idempotency_locks.setdefault(idem_key_outer, asyncio.Lock())
             async with lock:
-                return await self._handle_inner(arguments)
-        return await self._handle_inner(arguments)
+                return await self._handle_inner(arguments, on_job_allocated, acceptance_state)
+        return await self._handle_inner(arguments, on_job_allocated, acceptance_state)
 
     async def _handle_inner(
         self,
         arguments: dict[str, Any],
+        on_job_allocated: Callable[[str], None] | None,
+        acceptance_state: BackgroundJobAcceptanceState | None,
     ) -> Result[MCPToolResult, MCPServerError]:
         # Idempotency short-circuit: if this exact key was previously
         # served, return the same metadata without enqueuing another
@@ -2774,6 +2777,8 @@ class StartExecuteSeedHandler:
                 execution_id=execution_id,
                 preserve_runner_result=auto_evaluate_enabled or check_package.keeps_runner_result(),
             ),
+            on_job_allocated=on_job_allocated,
+            acceptance_state=acceptance_state,
             work_fn=_runner,
             cancelled_text="Seed execution cancelled before restart work began.",
             detached_tool_name="ouroboros_start_execute_seed",
