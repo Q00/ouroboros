@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import yaml
@@ -45,6 +45,9 @@ from ouroboros.mcp.types import MCPToolResult
 from ouroboros.orchestrator.runtime_evidence import HeadlessRunProbe, RuntimeEvidence
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 from ouroboros.resilience.lateral import ThinkingPersona
+
+if TYPE_CHECKING:
+    from ouroboros.mcp.tools.background import BackgroundJobAcceptanceState
 
 log = structlog.get_logger(__name__)
 
@@ -272,6 +275,7 @@ class HandlerRunStarter:
         *,
         idempotency_key: str = "",
         on_job_allocated: Callable[[str], None] | None = None,
+        acceptance_state: BackgroundJobAcceptanceState | None = None,
     ) -> dict[str, object]:
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
@@ -291,8 +295,10 @@ class HandlerRunStarter:
         if idempotency_key:
             arguments["idempotency_key"] = idempotency_key
         response = (
-            await self.handler.handle(arguments, on_job_allocated=on_job_allocated)
-            if on_job_allocated is not None
+            await self.handler.handle(
+                arguments, on_job_allocated=on_job_allocated, acceptance_state=acceptance_state
+            )
+            if on_job_allocated is not None or acceptance_state is not None
             else await self.handler.handle(arguments)
         )
         result = _unwrap(response, tool_name="ouroboros_start_execute_seed")

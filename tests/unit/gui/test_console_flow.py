@@ -272,6 +272,7 @@ def test_retry_after_failed_job_starts_one_attempt_and_ignores_replays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from ouroboros.dashboard_web import reader
+    from ouroboros.orchestrator.persisted_process_identity import current_persisted_process_owner
 
     db = tmp_path / "events # test.db"
     with closing(sqlite3.connect(db)) as connection:
@@ -285,6 +286,7 @@ def test_retry_after_failed_job_starts_one_attempt_and_ignores_replays(
     monkeypatch.setattr(reader, "EventTail", lambda *_args: NoRunEvents())
     starts: list[str] = []
     jobs: dict[str, dict[str, str]] = {}
+    pending_records: list[dict[str, Any]] = []
 
     class RunStarter:
         def run_starter(self, _cwd: str) -> Any:
@@ -296,12 +298,15 @@ def test_retry_after_failed_job_starts_one_attempt_and_ignores_replays(
             *,
             idempotency_key: str,
             on_job_allocated: Callable[[str], None],
+            acceptance_state: Any = None,
         ) -> dict[str, str]:
             starts.append(idempotency_key)
             if idempotency_key not in jobs:
                 number = len(jobs) + 1
                 job_id = f"job_{number}"
                 on_job_allocated(job_id)
+                chat_file = harness.chats_dir() / f"{chat_id}.json"
+                pending_records.append(json.loads(chat_file.read_text(encoding="utf-8")))
                 jobs[idempotency_key] = {"job_id": job_id, "execution_id": f"exec_{number}"}
                 with closing(sqlite3.connect(db)) as connection:
                     connection.execute(
@@ -328,6 +333,15 @@ def test_retry_after_failed_job_starts_one_attempt_and_ignores_replays(
     assert retry["run_job_id"] == "job_2"
     assert [m["job_id"] for m in retry["messages"] if m["kind"] == "run"] == ["job_1", "job_2"]
     assert len(starts) == 2 and starts[0] != starts[1]
+    assert [record["pending_run_job_id"] for record in pending_records] == ["job_1", "job_2"]
+    owner = current_persisted_process_owner()
+    pending_owners = [record["pending_run_owner"] for record in pending_records]
+    assert all(
+        {key: pending_owner[key] for key in owner} == owner for pending_owner in pending_owners
+    )
+    assert pending_owners[0]["console_instance_id"]
+    assert pending_owners[0]["console_instance_id"] == pending_owners[1]["console_instance_id"]
+    assert "pending_run_owner" not in retry
 
     # The retry already failed, so checking only for an active run would admit a replay.
     for request in (first_request, retry_request):
@@ -431,7 +445,7 @@ async def test_restart_recovers_retry_accepted_before_the_chat_saved_its_receipt
     monkeypatch.setattr(harness, "chats_dir", lambda: chats)
     monkeypatch.setattr(reader, "default_db_path", lambda: db)
 
-    async def stop_watching(*_args: Any) -> None:
+    async def stop_watching(*_args: Any, **_kwargs: Any) -> None:
         pass
 
     monkeypatch.setattr(harness.Harness, "_watch_restored_run", stop_watching, raising=False)
@@ -564,6 +578,173 @@ async def test_restart_recovers_unreadable_pending_job_without_starting_a_duplic
     assert recovered["run_job_id"] == pending
     assert api.post_chat_action(restarted, chat_id, query={}, body=request) == recovered
     assert started_runs == []
+
+
+async def _save_pending_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: dict[str, object]
+) -> tuple[Path, str, str, str]:
+    from ouroboros.dashboard_web import reader
+
+    db = tmp_path / "events.db"
+    monkeypatch.setattr(reader, "default_db_path", lambda: db)
+    monkeypatch.setattr(harness, "_RUN_POLL_SEC", 0.1)
+    state = _state()
+    chat_id = _spec_chat(state.harness, _repo(tmp_path / "project"))
+    first_job, pending = "job_000000000001", "job_000000000002"
+    saved = state.harness._sessions[chat_id]
+    saved.update(
+        status="running", run_job_id=first_job, pending_run_job_id=pending, pending_run_owner=owner
+    )
+    state.harness._save(saved)
+    await _write_restart_job(db, first_job, terminal="failed")
+    return db, chat_id, first_job, pending
+
+
+@pytest.mark.parametrize("owner_alive", [True, None, False], ids=["alive", "unknown", "exited"])
+async def test_missing_pending_receipt_is_released_only_after_owner_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started_runs: list[str],
+    owner_alive: bool | None,
+) -> None:
+    from ouroboros.gui import run_recovery
+
+    owner = {"owner_pid": os.getpid() + 1, "console_instance_id": "other-console"}
+    monkeypatch.setattr(run_recovery, "persisted_process_owner_alive", lambda _owner: owner_alive)
+    db, chat_id, first_job, pending = await _save_pending_restart(tmp_path, monkeypatch, owner)
+
+    restarted = _state()
+    restored = api.get_chat_session(restarted, chat_id, query={}, body=None)
+    request = {"action": "run", "previous_job_id": first_job}
+    assert restored["status"] == "interrupted"
+    assert restored["run_job_id"] == first_job
+    if owner_alive is False:
+        assert "pending_run_job_id" not in restored
+        assert "pending_run_owner" not in restored
+        result = api.post_chat_action(restarted, chat_id, query={}, body=request)
+        assert result["status"] == "running"
+        _wait(restarted.harness, chat_id, lambda _s: started_runs == [chat_id])
+        return
+
+    assert restored["pending_run_job_id"] == pending
+    with pytest.raises(api.ApiError) as refused:
+        api.post_chat_action(restarted, chat_id, query={}, body=request)
+    assert (refused.value.status, refused.value.code) == (409, "previous_run_unconfirmed")
+    await _write_restart_job(db, pending, terminal="completed")
+    recovered = _wait(restarted.harness, chat_id, lambda s: s["status"] == "done", timeout=5)
+    assert recovered["run_job_id"] == pending
+    assert "pending_run_owner" not in recovered
+    assert started_runs == []
+
+
+async def test_exited_pending_owner_rechecks_receipt_before_releasing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started_runs: list[str]
+) -> None:
+    from ouroboros.gui import run_recovery
+
+    owner = {"owner_pid": os.getpid() + 1, "console_instance_id": "other-console"}
+    db, chat_id, first_job, pending = await _save_pending_restart(tmp_path, monkeypatch, owner)
+    receipts = tmp_path / "late.db"
+    await _write_restart_job(receipts, pending, terminal="completed")
+
+    def publish_and_confirm_exit(owner_checked: dict[str, object]) -> bool:
+        assert owner_checked == owner
+        with closing(sqlite3.connect(db)) as connection:
+            connection.execute("ATTACH DATABASE ? AS late", (str(receipts),))
+            connection.execute(
+                "INSERT INTO events SELECT * FROM late.events WHERE aggregate_id = ?", (pending,)
+            )
+            connection.commit()
+        return False
+
+    monkeypatch.setattr(run_recovery, "persisted_process_owner_alive", publish_and_confirm_exit)
+    restarted = _state()
+    restored = api.get_chat_session(restarted, chat_id, query={}, body=None)
+    assert (restored["run_job_id"], restored["status"]) == (pending, "done")
+    request = {"action": "run", "previous_job_id": first_job}
+    assert api.post_chat_action(restarted, chat_id, query={}, body=request) == restored
+    assert started_runs == []
+
+
+async def test_reexec_releases_missing_receipt_with_same_process_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started_runs: list[str]
+) -> None:
+    from ouroboros.gui import run_recovery
+    from ouroboros.orchestrator.persisted_process_identity import current_persisted_process_owner
+
+    owner = {**current_persisted_process_owner(), "console_instance_id": "before-exec"}
+    monkeypatch.setattr(run_recovery, "persisted_process_owner_alive", lambda _owner: True)
+    _, chat_id, first_job, _ = await _save_pending_restart(tmp_path, monkeypatch, owner)
+
+    restarted = _state()
+    restored = api.get_chat_session(restarted, chat_id, query={}, body=None)
+    assert "pending_run_job_id" not in restored
+    assert "pending_run_owner" not in restored
+    request = {"action": "run", "previous_job_id": first_job}
+    result = api.post_chat_action(restarted, chat_id, query={}, body=request)
+    assert result["status"] == "running"
+    _wait(restarted.harness, chat_id, lambda _s: started_runs == [chat_id])
+
+
+async def test_definite_enqueue_rejection_releases_pending_receipt_in_the_same_console(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.dashboard_web import reader
+
+    db = tmp_path / "events.db"
+    first_job, rejected_job, accepted_job = (f"job_{number:012x}" for number in range(1, 4))
+    await _write_restart_job(db, first_job, terminal="failed")
+    monkeypatch.setattr(reader, "default_db_path", lambda: db)
+    monkeypatch.setattr(harness.Harness, "_follow_run", lambda *_args: None)
+    attempts: list[str] = []
+
+    class RunStarter:
+        def run_starter(self, _cwd: str) -> Any:
+            return self.start
+
+        async def start(
+            self,
+            _seed: Any,
+            *,
+            on_job_allocated: Callable[[str], None],
+            **_kwargs: Any,
+        ) -> dict[str, str]:
+            job_id = accepted_job if attempts else rejected_job
+            attempts.append(job_id)
+            on_job_allocated(job_id)
+            if job_id == rejected_job:
+                raise OSError("The job was rejected before acceptance")
+            await _write_restart_job(db, job_id)
+            return {
+                "job_id": job_id,
+                "execution_id": "exec_000000000003",
+                "session_id": "orch_000000000003",
+            }
+
+    monkeypatch.setattr(harness.Harness, "_handlers_for", lambda *_args: RunStarter())
+    state = _state()
+    chat_id = _spec_chat(state.harness, _repo(tmp_path / "project"))
+    state.harness._sessions[chat_id].update(
+        status="failed",
+        run_job_id=first_job,
+        seed_yaml="goal: t\nontology_schema: {name: t, description: t}\nmetadata: {}\n",
+    )
+    request = {"action": "run", "previous_job_id": first_job}
+
+    api.post_chat_action(state, chat_id, query={}, body=request)
+    rejected = _wait(state.harness, chat_id, lambda s: s["status"] == "failed")
+    assert rejected["run_job_id"] == first_job
+    assert "pending_run_job_id" not in rejected
+    assert "pending_run_owner" not in rejected
+
+    api.post_chat_action(state, chat_id, query={}, body=request)
+    accepted = _wait(state.harness, chat_id, lambda s: s["run_job_id"] == accepted_job)
+    assert api.post_chat_action(state, chat_id, query={}, body=request) == accepted
+    assert attempts == [rejected_job, accepted_job]
+    with closing(sqlite3.connect(db)) as connection:
+        assert connection.execute(
+            "SELECT aggregate_id FROM events WHERE event_type = 'mcp.job.created' ORDER BY rowid"
+        ).fetchall() == [(first_job,), (accepted_job,)]
 
 
 # ── 2 and 7. Auto jobs: listed in Activity, and ending with a result ──

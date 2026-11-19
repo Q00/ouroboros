@@ -41,7 +41,7 @@ import uuid
 import yaml
 
 from ouroboros.core.errors import PersistenceError
-from ouroboros.gui import auto_progress, model_refusal, workspace
+from ouroboros.gui import auto_progress, model_refusal, run_recovery, workspace
 from ouroboros.gui.answer_language import LANGUAGE_NAMES, goal_language, in_language, plain_answer
 from ouroboros.gui.interview_assist import (
     AUTO_CONFIRMED_PREFIX,
@@ -129,42 +129,6 @@ def _msg(role: str, kind: str, text: str = "", **data: Any) -> dict[str, Any]:
         "ts": _now(),
         **data,
     }
-
-
-def _apply_run_receipt(
-    session: dict[str, Any], job_id: Any, execution_id: Any, run_session_id: Any, status: str
-) -> bool:
-    state = {
-        "run_job_id": job_id,
-        "execution_id": execution_id,
-        "run_session_id": run_session_id,
-        "status": {
-            "completed": "done",
-            "running": "running",
-            "interrupted": "interrupted",
-            "paused": "interrupted",
-        }.get(status, "failed"),
-    }
-    pending = session.pop("pending_run_job_id", None)
-    changed = pending is not None or any(session.get(key) != value for key, value in state.items())
-    session.update(state)
-    for message in reversed(session["messages"]):
-        if job_id and message.get("kind") == "run" and message.get("job_id") == job_id:
-            changed = changed or message.get("run_status") != status
-            message["run_status"] = status
-            return changed
-    session["messages"].append(
-        _msg(
-            "assistant",
-            "run",
-            "Run started.",
-            job_id=job_id,
-            execution_id=execution_id,
-            run_status=status,
-            progress=None,
-        )
-    )
-    return True
 
 
 class _Loop:
@@ -989,10 +953,12 @@ class Harness:
 
     async def _start_run(self, session_id: str) -> None:
         from ouroboros.core.seed import Seed
+        from ouroboros.mcp.tools.background import BackgroundJobAcceptanceState
 
         session = self.get(session_id) or {}
         starter = await asyncio.to_thread(self._handlers_for(session).run_starter, session["cwd"])
         seed = Seed.from_dict(yaml.safe_load(session["seed_yaml"]))
+        acceptance = BackgroundJobAcceptanceState()
         # Until a new receipt arrives, retries for this predecessor share one key.
         idempotency_key = f"gui-{session_id}"
         if previous_job_id := session.get("run_job_id"):
@@ -1001,23 +967,30 @@ class Harness:
         def remember_job(job_id: str) -> None:
             with self._lock:
                 current = self._require(session_id)
-                current["pending_run_job_id"] = job_id
+                current.update(
+                    pending_run_job_id=job_id, pending_run_owner=run_recovery.pending_job_owner()
+                )
                 self._save(current)
 
         try:
             meta = await starter(
-                seed, idempotency_key=idempotency_key, on_job_allocated=remember_job
+                seed,
+                idempotency_key=idempotency_key,
+                on_job_allocated=remember_job,
+                acceptance_state=acceptance,
             )
-        except Exception:
+        except Exception as exc:
             if job_id := (self.get(session_id) or {}).get("pending_run_job_id"):
-                if await self._restore_run(session_id, job_id):
+                if await self._restore_run(
+                    session_id, job_id, rejected=not acceptance.may_have_accepted(exc)
+                ):
                     return
             raise
         execution_id, job_id = meta.get("execution_id"), meta.get("job_id")
         self._update(
             session_id,
-            lambda s: _apply_run_receipt(
-                s, job_id, execution_id, meta.get("session_id"), "running"
+            lambda s: run_recovery.apply_run_receipt(
+                s, job_id, execution_id, meta.get("session_id"), "running", make_message=_msg
             ),
         )
         if execution_id:
@@ -1025,50 +998,72 @@ class Harness:
                 self._follow_run, session_id, str(execution_id), str(job_id) if job_id else None
             )
 
-    async def _restore_run(self, session_id: str, job_id: str) -> bool:
-        state = await self._read_run(session_id, job_id)
+    async def _restore_run(self, session_id: str, job_id: str, *, rejected: bool = False) -> bool:
+        state = await self._read_run(session_id, job_id, rejected=rejected)
         if state in ("active", "unavailable"):
-            self._loop_ready().submit(self._watch_restored_run(session_id, job_id))
+            self._loop_ready().submit(
+                self._watch_restored_run(session_id, job_id, rejected=rejected)
+            )
         return state in ("active", "terminal")
 
     async def _read_run(
-        self, session_id: str, job_id: str
+        self, session_id: str, job_id: str, *, rejected: bool
     ) -> Literal["active", "terminal", "missing", "unavailable"]:
-        from ouroboros.gui.run_recovery import read_job
-
+        with self._lock:
+            saved = self._sessions.get(session_id) or {}
+            pending = saved.get("pending_run_job_id")
+            owner = saved.get("pending_run_owner")
+            if (pending or saved.get("run_job_id")) != job_id:
+                return "missing"
         try:
-            job = await read_job(job_id)
+            job = await run_recovery.read_job(job_id)
+            if pending and job is None and not rejected:
+                if not run_recovery.pending_owner_can_no_longer_accept(owner):
+                    return "unavailable"
+                job = await run_recovery.read_job(
+                    job_id
+                )  # It may have been accepted just before exit.
         except (OSError, PersistenceError, ValueError):
             return "unavailable"  # An unreadable receipt cannot authorize a new run.
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 return "missing"
-            pending = session.get("pending_run_job_id")
+            if (session.get("pending_run_job_id"), session.get("pending_run_owner")) != (
+                pending,
+                owner,
+            ):
+                return "missing"
             if (pending or session.get("run_job_id")) != job_id:
                 return "missing"
             if job is None:
                 if pending:
-                    # Interview jobs run in the owning console, with a created
-                    # event persisted before starting any work.
-                    session.pop("pending_run_job_id")
+                    run_recovery.clear_pending_job(session)
                     self._touch(session)
                 return "missing"
             status = job.status.value if job.is_terminal else "running"
             if status == "completed" and job.result_meta.get("status") == "paused":
                 status = "paused"
-            if _apply_run_receipt(
-                session, job_id, job.links.execution_id, job.links.session_id, status
+            if run_recovery.apply_run_receipt(
+                session,
+                job_id,
+                job.links.execution_id,
+                job.links.session_id,
+                status,
+                make_message=_msg,
             ):
                 self._touch(session)
         return "terminal" if job.is_terminal else "active"
 
-    async def _watch_restored_run(self, session_id: str, job_id: str) -> None:
+    async def _watch_restored_run(self, session_id: str, job_id: str, *, rejected: bool) -> None:
         while session := self.get(session_id):
             if (session.get("pending_run_job_id") or session.get("run_job_id")) != job_id:
                 return
             await asyncio.sleep(_RUN_POLL_SEC)
-            if await self._read_run(session_id, job_id) not in ("active", "unavailable"):
+            if await self._read_run(session_id, job_id, rejected=rejected) not in (
+                "active",
+                "unavailable",
+            ):
                 return
 
     def _follow_run(
