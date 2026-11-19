@@ -156,6 +156,7 @@ async def start_background_tool_job(
     opencode_mode: str | None = None,
     project_dir: str | None = None,
     on_detaching: Callable[[], Awaitable[None]] | None = None,
+    on_job_allocated: Callable[[str], None] | None = None,
     on_started: Callable[[JobSnapshot], Awaitable[None]] | None = None,
     on_enqueue_failure: Callable[[BaseException], Awaitable[None]] | None = None,
     prepare_inline: (Callable[[], Awaitable[tuple[JobLinks, WorkFn]]] | None) = None,
@@ -190,6 +191,7 @@ async def start_background_tool_job(
         on_detaching: Optional hook invoked only in the accepting process just
             before ownership is transferred. Auto uses it to release its
             parent-owned pending lease so the worker can reserve/claim one.
+        on_job_allocated: Record the reserved ID before either owner can accept work.
         on_started: Optional async hook invoked with the snapshot *after* a
             successful ``start_job`` and *before* this function returns — used
             by auto to update its start lease while still owning the snapshot.
@@ -225,6 +227,12 @@ async def start_background_tool_job(
     """
     acceptance_state = acceptance_state or BackgroundJobAcceptanceState()
     job_id = await job_manager.allocate_job_id()
+    if on_job_allocated is not None:
+        try:
+            on_job_allocated(job_id)
+        except BaseException:
+            job_manager.abandon_reserved_job_id(job_id)
+            raise
     claim_inline = getattr(job_manager, "claim_forced_inline_allocation", None)
     forced_inline = bool(claim_inline(job_id)) if callable(claim_inline) else False
     durable_jobs_enabled = (

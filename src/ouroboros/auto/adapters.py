@@ -266,7 +266,13 @@ class HandlerRunStarter:
         self.frugality_assurance = frugality_assurance
         self.frugality_assurance_explicit = frugality_assurance_explicit
 
-    async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:
+    async def __call__(
+        self,
+        seed: Seed,
+        *,
+        idempotency_key: str = "",
+        on_job_allocated: Callable[[str], None] | None = None,
+    ) -> dict[str, object]:
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
         )
@@ -284,10 +290,12 @@ class HandlerRunStarter:
             arguments["frugality_assurance"] = self.frugality_assurance
         if idempotency_key:
             arguments["idempotency_key"] = idempotency_key
-        result = _unwrap(
-            await self.handler.handle(arguments),
-            tool_name="ouroboros_start_execute_seed",
+        response = (
+            await self.handler.handle(arguments, on_job_allocated=on_job_allocated)
+            if on_job_allocated is not None
+            else await self.handler.handle(arguments)
         )
+        result = _unwrap(response, tool_name="ouroboros_start_execute_seed")
         meta = result.meta or {}
         run_meta: dict[str, object] = {
             "job_id": _optional_str(meta.get("job_id")),

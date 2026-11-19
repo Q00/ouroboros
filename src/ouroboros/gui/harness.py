@@ -40,6 +40,7 @@ import uuid
 
 import yaml
 
+from ouroboros.core.errors import PersistenceError
 from ouroboros.gui import auto_progress, model_refusal, workspace
 from ouroboros.gui.answer_language import LANGUAGE_NAMES, goal_language, in_language, plain_answer
 from ouroboros.gui.interview_assist import (
@@ -51,6 +52,7 @@ from ouroboros.gui.interview_assist import (
     load_interview_view,
 )
 from ouroboros.gui.jobs import JobRegistry, ouroboros_command
+from ouroboros.gui.run_recovery import job_terminal as _job_terminal
 
 _MAX_LOG_LINES = 400
 _RUN_POLL_SEC = 2.0
@@ -127,6 +129,42 @@ def _msg(role: str, kind: str, text: str = "", **data: Any) -> dict[str, Any]:
         "ts": _now(),
         **data,
     }
+
+
+def _apply_run_receipt(
+    session: dict[str, Any], job_id: Any, execution_id: Any, run_session_id: Any, status: str
+) -> bool:
+    state = {
+        "run_job_id": job_id,
+        "execution_id": execution_id,
+        "run_session_id": run_session_id,
+        "status": {
+            "completed": "done",
+            "running": "running",
+            "interrupted": "interrupted",
+            "paused": "interrupted",
+        }.get(status, "failed"),
+    }
+    pending = session.pop("pending_run_job_id", None)
+    changed = pending is not None or any(session.get(key) != value for key, value in state.items())
+    session.update(state)
+    for message in reversed(session["messages"]):
+        if job_id and message.get("kind") == "run" and message.get("job_id") == job_id:
+            changed = changed or message.get("run_status") != status
+            message["run_status"] = status
+            return changed
+    session["messages"].append(
+        _msg(
+            "assistant",
+            "run",
+            "Run started.",
+            job_id=job_id,
+            execution_id=execution_id,
+            run_status=status,
+            progress=None,
+        )
+    )
+    return True
 
 
 class _Loop:
@@ -348,6 +386,10 @@ class Harness:
         # ``AutoStore``, which is where ``ouroboros auto`` saves it).
         self._auto_store: Any = None
         self._load_all()
+        for data in tuple(self._sessions.values()):
+            job_id = data.get("pending_run_job_id") or data.get("run_job_id")
+            if data.get("mode") == "interview" and job_id and data.get("status") != "done":
+                self._loop_ready().submit(self._restore_run(data["id"], job_id)).result()
 
     # ── persistence ─────────────────────────────────────────────────
 
@@ -575,6 +617,13 @@ class Harness:
                     return self.get(session_id) or {}
                 if status == "running":
                     raise Refusal("already_running", "This spec is already running.")
+                if status == "done":
+                    return self.get(session_id) or {}
+                if session.get("pending_run_job_id"):
+                    raise Refusal(
+                        "previous_run_unconfirmed",
+                        "Wait until the previous run has finished before trying again.",
+                    )
                 if previous_job_id:
                     from ouroboros.dashboard_web.reader import default_db_path
 
@@ -948,31 +997,79 @@ class Harness:
         idempotency_key = f"gui-{session_id}"
         if previous_job_id := session.get("run_job_id"):
             idempotency_key += f"-after-{previous_job_id}"
-        meta = await starter(seed, idempotency_key=idempotency_key)
-        execution_id = meta.get("execution_id")
 
-        def apply(s: dict[str, Any]) -> None:
-            s["execution_id"] = execution_id
-            s["run_job_id"] = meta.get("job_id")
-            s["run_session_id"] = meta.get("session_id")
-            s["messages"].append(
-                _msg(
-                    "assistant",
-                    "run",
-                    "Run started.",
-                    execution_id=execution_id,
-                    job_id=meta.get("job_id"),
-                    run_status="running",
-                    progress=None,
-                )
+        def remember_job(job_id: str) -> None:
+            with self._lock:
+                current = self._require(session_id)
+                current["pending_run_job_id"] = job_id
+                self._save(current)
+
+        try:
+            meta = await starter(
+                seed, idempotency_key=idempotency_key, on_job_allocated=remember_job
             )
-
-        self._update(session_id, apply)
+        except Exception:
+            if job_id := (self.get(session_id) or {}).get("pending_run_job_id"):
+                if await self._restore_run(session_id, job_id):
+                    return
+            raise
+        execution_id, job_id = meta.get("execution_id"), meta.get("job_id")
+        self._update(
+            session_id,
+            lambda s: _apply_run_receipt(
+                s, job_id, execution_id, meta.get("session_id"), "running"
+            ),
+        )
         if execution_id:
-            job_id = meta.get("job_id")
             await asyncio.to_thread(
                 self._follow_run, session_id, str(execution_id), str(job_id) if job_id else None
             )
+
+    async def _restore_run(self, session_id: str, job_id: str) -> bool:
+        state = await self._read_run(session_id, job_id)
+        if state in ("active", "unavailable"):
+            self._loop_ready().submit(self._watch_restored_run(session_id, job_id))
+        return state in ("active", "terminal")
+
+    async def _read_run(
+        self, session_id: str, job_id: str
+    ) -> Literal["active", "terminal", "missing", "unavailable"]:
+        from ouroboros.gui.run_recovery import read_job
+
+        try:
+            job = await read_job(job_id)
+        except (OSError, PersistenceError, ValueError):
+            return "unavailable"  # An unreadable receipt cannot authorize a new run.
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return "missing"
+            pending = session.get("pending_run_job_id")
+            if (pending or session.get("run_job_id")) != job_id:
+                return "missing"
+            if job is None:
+                if pending:
+                    # Interview jobs run in the owning console, with a created
+                    # event persisted before starting any work.
+                    session.pop("pending_run_job_id")
+                    self._touch(session)
+                return "missing"
+            status = job.status.value if job.is_terminal else "running"
+            if status == "completed" and job.result_meta.get("status") == "paused":
+                status = "paused"
+            if _apply_run_receipt(
+                session, job_id, job.links.execution_id, job.links.session_id, status
+            ):
+                self._touch(session)
+        return "terminal" if job.is_terminal else "active"
+
+    async def _watch_restored_run(self, session_id: str, job_id: str) -> None:
+        while session := self.get(session_id):
+            if (session.get("pending_run_job_id") or session.get("run_job_id")) != job_id:
+                return
+            await asyncio.sleep(_RUN_POLL_SEC)
+            if await self._read_run(session_id, job_id) not in ("active", "unavailable"):
+                return
 
     def _follow_run(
         self,
@@ -1644,38 +1741,6 @@ def _run_result(cwd: str, run_session_id: object) -> dict[str, Any] | None:
         "file_count": len(files),
         "uncommitted": len(pending),
     }
-
-
-def _job_terminal(db_path: str, job_id: str) -> dict[str, str] | None:
-    """The job's terminal status from the EventStore (read-only), or ``None`` while it runs."""
-    import sqlite3
-
-    try:
-        uri = Path(db_path).absolute().as_uri()
-        conn = sqlite3.connect(f"{uri}?mode=ro", uri=True, timeout=1)
-    except sqlite3.Error:
-        return None
-    try:
-        row = conn.execute(
-            "SELECT event_type, payload FROM events WHERE aggregate_id = ? "
-            "AND event_type IN ('mcp.job.failed', 'mcp.job.completed', "
-            "'mcp.job.cancelled', 'mcp.job.interrupted') "
-            "ORDER BY rowid DESC LIMIT 1",
-            (job_id,),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        conn.close()
-    if row is None:
-        return None
-    try:
-        payload = json.loads(row[1]) if isinstance(row[1], str) else {}
-    except ValueError:
-        payload = {}
-    status = row[0].rsplit(".", 1)[-1]
-    message = payload.get("message") if isinstance(payload, dict) else None
-    return {"status": status, "message": str(message or status)}
 
 
 def settings_stage(name: str) -> Any:

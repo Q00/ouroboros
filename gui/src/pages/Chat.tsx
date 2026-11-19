@@ -461,11 +461,11 @@ function RunCard({ message }: { message: ChatMessage }) {
             </ul>
           ) : null}
         </>
-      ) : (
+      ) : status === "running" ? (
         <p className="run-card-activity">
           <Spinner size={13} /> {t("chat.run.starting")}
         </p>
-      )}
+      ) : null}
     </div>
   );
 }

@@ -6,7 +6,7 @@ This module contains handlers for seed execution:
 """
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
@@ -2438,8 +2438,7 @@ class StartExecuteSeedHandler:
         )
 
     async def handle(
-        self,
-        arguments: dict[str, Any],
+        self, arguments: dict[str, Any], *, on_job_allocated: Callable[[str], None] | None = None
     ) -> Result[MCPToolResult, MCPServerError]:
         # Serialize concurrent calls with the same idempotency_key so the
         # check-cache / dispatch / write-cache sequence is atomic per key.
@@ -2453,12 +2452,13 @@ class StartExecuteSeedHandler:
         if idem_key_outer:
             lock = self._idempotency_locks.setdefault(idem_key_outer, asyncio.Lock())
             async with lock:
-                return await self._handle_inner(arguments)
-        return await self._handle_inner(arguments)
+                return await self._handle_inner(arguments, on_job_allocated)
+        return await self._handle_inner(arguments, on_job_allocated)
 
     async def _handle_inner(
         self,
         arguments: dict[str, Any],
+        on_job_allocated: Callable[[str], None] | None,
     ) -> Result[MCPToolResult, MCPServerError]:
         # Idempotency short-circuit: if this exact key was previously
         # served, return the same metadata without enqueuing another
@@ -2774,6 +2774,7 @@ class StartExecuteSeedHandler:
                 execution_id=execution_id,
                 preserve_runner_result=auto_evaluate_enabled or check_package.keeps_runner_result(),
             ),
+            on_job_allocated=on_job_allocated,
             work_fn=_runner,
             cancelled_text="Seed execution cancelled before restart work began.",
             detached_tool_name="ouroboros_start_execute_seed",

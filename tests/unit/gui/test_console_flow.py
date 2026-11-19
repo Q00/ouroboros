@@ -7,6 +7,7 @@ runs are stubbed, and LLM adapters are recorders.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import closing
 import json
 import os
@@ -289,11 +290,18 @@ def test_retry_after_failed_job_starts_one_attempt_and_ignores_replays(
         def run_starter(self, _cwd: str) -> Any:
             return self.start
 
-        async def start(self, _seed: Any, *, idempotency_key: str) -> dict[str, str]:
+        async def start(
+            self,
+            _seed: Any,
+            *,
+            idempotency_key: str,
+            on_job_allocated: Callable[[str], None],
+        ) -> dict[str, str]:
             starts.append(idempotency_key)
             if idempotency_key not in jobs:
                 number = len(jobs) + 1
                 job_id = f"job_{number}"
+                on_job_allocated(job_id)
                 jobs[idempotency_key] = {"job_id": job_id, "execution_id": f"exec_{number}"}
                 with closing(sqlite3.connect(db)) as connection:
                     connection.execute(
@@ -374,6 +382,188 @@ def test_retry_can_start_after_a_recorded_interruption(
 
     assert session["status"] == "running"
     _wait(state.harness, chat_id, lambda _s: started_runs == [chat_id])
+
+
+async def _write_restart_job(
+    db: Path, job_id: str, *, terminal: str | None = None, result_status: str | None = None
+) -> None:
+    from ouroboros.events.base import BaseEvent
+    from ouroboros.persistence.event_store import EventStore
+
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    try:
+        data = {
+            "job_type": "execute_seed",
+            "status": "queued",
+            "links": {
+                "session_id": job_id.replace("job_", "orch_", 1),
+                "execution_id": job_id.replace("job_", "exec_", 1),
+            },
+        }
+        await store.append(
+            BaseEvent(type="mcp.job.created", aggregate_type="job", aggregate_id=job_id, data=data)
+        )
+        if terminal:
+            await store.append(
+                BaseEvent(
+                    type=f"mcp.job.{terminal}",
+                    aggregate_type="job",
+                    aggregate_id=job_id,
+                    data={
+                        "status": terminal,
+                        "result_meta": {"status": result_status} if result_status else {},
+                    },
+                )
+            )
+    finally:
+        await store.close()
+
+
+async def test_restart_recovers_retry_accepted_before_the_chat_saved_its_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started_runs: list[str]
+) -> None:
+    from ouroboros.dashboard_web import reader
+
+    chats = tmp_path / "chats"
+    chats.mkdir()
+    db = tmp_path / "events.db"
+    monkeypatch.setattr(harness, "chats_dir", lambda: chats)
+    monkeypatch.setattr(reader, "default_db_path", lambda: db)
+
+    async def stop_watching(*_args: Any) -> None:
+        pass
+
+    monkeypatch.setattr(harness.Harness, "_watch_restored_run", stop_watching, raising=False)
+
+    state = _state()
+    chat_id = _spec_chat(state.harness, _repo(tmp_path / "project"))
+    saved = state.harness._sessions[chat_id]
+    first_job = "job_000000000001"
+    successor = "job_000000000002"
+    saved.update(
+        status="running",
+        run_job_id=first_job,
+        execution_id="exec_000000000001",
+        run_session_id="orch_000000000001",
+        pending_run_job_id=successor,
+    )
+    state.harness._save(saved)
+    await _write_restart_job(db, first_job, terminal="failed")
+    await _write_restart_job(db, successor)
+
+    restarted = _state()
+    restored = api.get_chat_session(restarted, chat_id, query={}, body=None)
+    assert (restored["run_job_id"], restored["execution_id"], restored["run_session_id"]) == (
+        successor,
+        "exec_000000000002",
+        "orch_000000000002",
+    )
+    assert restored["status"] == "running"
+
+    # Resend the same request that was interrupted by the process exit.
+    request = {"action": "run", "previous_job_id": first_job}
+    assert api.post_chat_action(restarted, chat_id, query={}, body=request) == restored
+    assert started_runs == []
+    with closing(sqlite3.connect(db)) as connection:
+        assert connection.execute(
+            "SELECT aggregate_id FROM events WHERE event_type = 'mcp.job.created' ORDER BY rowid"
+        ).fetchall() == [(first_job,), (successor,)]
+
+
+@pytest.mark.parametrize(
+    ("result_status", "chat_status", "run_status"),
+    [(None, "done", "completed"), ("paused", "interrupted", "paused")],
+)
+async def test_restart_restores_completed_job_result_without_starting_over(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started_runs: list[str],
+    result_status: str | None,
+    chat_status: str,
+    run_status: str,
+) -> None:
+    from ouroboros.dashboard_web import reader
+
+    chats = tmp_path / "chats"
+    chats.mkdir()
+    db = tmp_path / "events.db"
+    monkeypatch.setattr(harness, "chats_dir", lambda: chats)
+    monkeypatch.setattr(reader, "default_db_path", lambda: db)
+
+    state = _state()
+    chat_id = _spec_chat(state.harness, _repo(tmp_path / "project"))
+    job_id = "job_000000000001"
+    execution_id = "exec_000000000001"
+    saved = state.harness._sessions[chat_id]
+    saved.update(
+        status="running",
+        run_job_id=job_id,
+        execution_id=execution_id,
+        run_session_id="orch_000000000001",
+    )
+    saved["messages"].append(
+        harness._msg(
+            "assistant", "run", execution_id=execution_id, job_id=job_id, run_status="running"
+        )
+    )
+    state.harness._save(saved)
+    await _write_restart_job(db, job_id, terminal="completed", result_status=result_status)
+
+    restarted = _state()
+    restored = api.get_chat_session(restarted, chat_id, query={}, body=None)
+    assert restored["status"] == chat_status
+    assert restored["run_job_id"] == job_id
+    assert [
+        (message["execution_id"], message["run_status"])
+        for message in restored["messages"]
+        if message["kind"] == "run"
+    ] == [(execution_id, run_status)]
+
+    request = {"action": "run", "previous_job_id": job_id}
+    assert api.post_chat_action(restarted, chat_id, query={}, body=request) == restored
+    assert started_runs == []
+
+
+async def test_restart_recovers_unreadable_pending_job_without_starting_a_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started_runs: list[str]
+) -> None:
+    from ouroboros.dashboard_web import reader
+
+    chats = tmp_path / "chats"
+    chats.mkdir()
+    db = tmp_path / "events.db"
+    db.write_bytes(b"not a SQLite database")
+    monkeypatch.setattr(harness, "chats_dir", lambda: chats)
+    monkeypatch.setattr(reader, "default_db_path", lambda: db)
+    monkeypatch.setattr(harness, "_RUN_POLL_SEC", 0.25)
+    original = "job_000000000001"
+    pending = "job_000000000002"
+    usable_db = tmp_path / "usable.db"
+    await _write_restart_job(usable_db, original, terminal="failed")
+    await _write_restart_job(usable_db, pending, terminal="completed")
+
+    state = _state()
+    chat_id = _spec_chat(state.harness, _repo(tmp_path / "project"))
+    saved = state.harness._sessions[chat_id]
+    saved.update(status="running", run_job_id=original, pending_run_job_id=pending)
+    state.harness._save(saved)
+
+    restarted = _state()
+    restored = api.get_chat_session(restarted, chat_id, query={}, body=None)
+    assert restored["status"] == "interrupted"
+    assert (restored["run_job_id"], restored["pending_run_job_id"]) == (original, pending)
+
+    request = {"action": "run", "previous_job_id": original}
+    with pytest.raises(api.ApiError) as refused:
+        api.post_chat_action(restarted, chat_id, query={}, body=request)
+    assert (refused.value.status, refused.value.code) == (409, "previous_run_unconfirmed")
+
+    usable_db.replace(db)
+    recovered = _wait(restarted.harness, chat_id, lambda s: s["status"] == "done", timeout=5)
+    assert recovered["run_job_id"] == pending
+    assert api.post_chat_action(restarted, chat_id, query={}, body=request) == recovered
+    assert started_runs == []
 
 
 # ── 2 and 7. Auto jobs: listed in Activity, and ending with a result ──
