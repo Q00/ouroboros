@@ -2221,7 +2221,7 @@
 
 /* ── Auto chats: the structured view ──────────────────────────────── */
 
-/* Six steps across the top of the thread. They scroll with it (sticky), so
+/* Five steps across the top of the thread. They scroll with it (sticky), so
    they share its box and line up with the cards under any scrollbar. */
 .thread-scroll > .auto-steps {
   position: sticky;
@@ -2240,7 +2240,7 @@
 .auto-steps-list {
   display: grid;
   /* The last step takes only its own width: the rail ends at the last mark. */
-  grid-template-columns: repeat(5, minmax(0, 1fr)) max-content;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) max-content;
   width: 100%;
   max-width: 760px;
   margin: 0 auto;
@@ -2760,108 +2760,6 @@
   margin-top: 12px;
 }
 
-/* The Seed's review, at the top of its card. */
-.auto-review {
-  --grade: var(--text-soft);
-  --grade-bg: var(--sunk);
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  background: var(--bg);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-
-[data-theme="dark"] .auto-review {
-  --grade-bg: var(--hover);
-  background: var(--raised);
-}
-
-.auto-review[data-tone="ok"] {
-  --grade: var(--ok);
-  --grade-bg: var(--ok-soft);
-}
-
-.auto-review[data-tone="warn"] {
-  --grade: var(--warn);
-  --grade-bg: var(--warn-soft);
-}
-
-.auto-review[data-tone="fail"] {
-  --grade: var(--fail);
-  --grade-bg: var(--fail-soft);
-}
-
-.auto-review-main {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-width: 0;
-}
-
-.auto-grade {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-md);
-  background: var(--grade-bg);
-  color: var(--grade);
-  font-size: 0.9375rem;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  transition:
-    background-color var(--base) ease,
-    color var(--base) ease;
-}
-
-.auto-grade > span {
-  display: grid;
-  place-items: center;
-}
-
-.auto-review-text {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-  line-height: 1.4;
-}
-
-.auto-review-text strong {
-  font-size: var(--text-sm);
-  font-weight: 650;
-}
-
-.auto-review-text span {
-  color: var(--text-mute);
-  font-size: var(--text-2xs);
-  font-variant-numeric: tabular-nums;
-}
-
-.auto-findings {
-  display: grid;
-  gap: 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
-}
-
-.auto-findings h4 {
-  margin: 0;
-  color: var(--text-mute);
-  font-size: var(--text-2xs);
-  font-weight: 600;
-}
-
-.auto-findings ul {
-  display: grid;
-  gap: 3px;
-  padding-left: 16px;
-  list-style: disc;
-  color: var(--text-soft);
-  font-size: var(--text-xs);
-}
-
 /* The raw output, folded away at the end of the thread. */
 .auto-log {
   display: grid;
@@ -3062,7 +2960,7 @@
   }
 
   .auto-steps-list {
-    grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
     padding-bottom: 6px;
   }
 

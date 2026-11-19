@@ -1678,7 +1678,7 @@ def _apply_auto_facts(session: dict[str, Any], facts: dict[str, Any]) -> None:
     """Put the auto session record's facts into an Auto chat.
 
     The Seed is one ``seed`` message, the same kind the interview writes,
-    updated in place when a repair rewrites it.
+    updated in place when the record's Seed changes.
     """
     view = session.get("auto")
     if not isinstance(view, dict):

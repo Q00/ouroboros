@@ -4,14 +4,19 @@ The console starts ``ouroboros auto`` with ``--progress-jsonl <file>`` and
 follows that file (:class:`ProgressTail`): each line is one progress event the
 pipeline emitted (``ouroboros.auto.progress.AutoProgressEvent``). The events are
 folded (:func:`fold`) into ``session["auto"]``, the dict the page draws as a
-phase stepper, an automatic interview, a Seed card with its review grade, and
-the run card. What the events do not carry (the Seed itself, the run's
-execution id, the round limit) is read from the auto session record the
-pipeline persists (:func:`load_facts`).
+phase stepper, an automatic interview, the Seed card and the run card. What
+the events do not carry (the Seed itself, the run's execution id, the round
+limit) is read from the auto session record the pipeline persists
+(:func:`load_facts`).
+
+Auto no longer reviews or grades its Seed (#3064). An engine from before that
+wrote ``grade`` and ``repair`` events and entered the ``review`` and ``repair``
+phases. Such a file still reads whole: the phases stay in the view's history
+(the page puts them on its spec step), and nothing of the review is kept.
 
 Everything kept here is saved with the chat, so it is bounded: a fixed number
-of rounds, phase changes and grades, and a cut on every text. A cut text ends
-in ``…``, and the number of rounds dropped from the front is kept.
+of rounds and phase changes, and a cut on every text. A cut text ends in
+``…``, and the number of rounds dropped from the front is kept.
 """
 
 from __future__ import annotations
@@ -28,30 +33,38 @@ _FINAL_CHUNKS = 64
 
 MAX_ROUNDS = 60
 MAX_PHASES = 40
-MAX_GRADES = 20
-MAX_FINDINGS = 3
 MAX_TEXT = 1500
 MAX_MESSAGE = 300
-MAX_FINDING = 300
 MAX_SEED_ITEMS = 40
 MAX_SEED_ITEM = 1000
 MAX_SEED_YAML = 64 * 1024
 
 # The shape of the saved view. A chat saved with another version is rebuilt
 # from its progress file when the console loads it (:func:`upgrade_view`).
-VIEW_VERSION = 2
+# Version 2 split each question's ``(ambiguity: …)`` prefix off into its
+# ``ambiguity``; version 3 dropped the Seed review's fields (#3064).
+VIEW_VERSION = 3
+# The Seed review's fields a view before version 3 kept. An upgrade drops them.
+RETIRED_FIELDS = (
+    "max_repair_rounds",
+    "grade",
+    "grades",
+    "review_message",
+    "findings",
+    "repair_round",
+)
 # What the events do not carry: facts from the auto session record and how
 # the job ended. An upgraded view keeps them from the view it replaces.
 _NOT_FROM_EVENTS = (
     "max_rounds",
-    "max_repair_rounds",
-    "findings",
     "execution_id",
     "seed_loaded",
     "outcome",
     "read_error",
 )
 
+# ``grade`` and ``repair`` are historical: only an engine from before #3064
+# writes them. They are still read, so such a line is not counted as skipped.
 KINDS = frozenset({"phase", "grade", "repair", "question", "answer"})
 _PHASE = re.compile(r"^[a-z_]{1,40}$")
 _GRADE = re.compile(r"^[A-Za-z][+-]?$")
@@ -59,6 +72,7 @@ _GRADE = re.compile(r"^[A-Za-z][+-]?$")
 # (orchestrator/capabilities/question_text.py: ``(ambiguity: 0.43) <question>``).
 _AMBIGUITY = re.compile(r"^\(\s*ambiguity\s*:\s*(\d+(?:\.\d+)?|\.\d+)\s*\)\s*")
 # Phases whose arrival means the persisted record has something new for the page.
+# ``review`` and ``repair`` follow a written Seed in an engine from before #3064.
 _FACT_PHASES = frozenset(
     {
         "seed_generation",
@@ -228,12 +242,6 @@ def new_view() -> dict[str, Any]:
         "rounds_dropped": 0,
         "ambiguity_trend": [],
         "max_rounds": None,
-        "max_repair_rounds": None,
-        "grade": None,
-        "grades": [],
-        "review_message": None,
-        "findings": [],
-        "repair_round": 0,
         "execution_id": None,
         "seed_loaded": False,
         "outcome": None,
@@ -302,6 +310,9 @@ def fold(view: dict[str, Any], event: dict[str, Any]) -> bool:
     question fills a question that was never seen. A question's
     ``(ambiguity: …)`` prefix is kept as the round's ``ambiguity`` and in
     ``ambiguity_trend``, not in its text.
+
+    A ``grade`` or ``repair`` event (an engine from before #3064) adds nothing
+    to the view. A repair rewrote the Seed, so the record is read again.
     """
     reload = False
     if view["auto_session_id"] != event["auto_session_id"]:
@@ -328,39 +339,24 @@ def fold(view: dict[str, Any], event: dict[str, Any]) -> bool:
             if kind == "answer":
                 entry["answer"] = cut((event["answer"] or "").strip(), MAX_TEXT) or None
                 entry["answer_source"] = event["answer_source"]
-    elif kind == "grade" and event["grade"]:
-        view["grade"] = event["grade"]
-        view["grades"].append(
-            {
-                "grade": event["grade"],
-                "repair_round": view["repair_round"],
-                "at": event["timestamp"],
-            }
-        )
-        del view["grades"][:-MAX_GRADES]
-        view["review_message"] = event["message"] or None
-        reload = True
-    elif kind == "repair" and number is not None and number > view["repair_round"]:
-        view["repair_round"] = number
-        view["review_message"] = event["message"] or None
-        reload = True
-    elif kind == "phase" and phase in ("review", "repair"):
-        view["review_message"] = event["message"] or None
+    elif kind == "repair":
+        reload = True  # the record holds the rewritten Seed
     return reload
 
 
 def upgrade_view(old: dict[str, Any], progress: Path) -> dict[str, Any] | None:
-    """The current shape of a view saved by an older console, losing none of it.
+    """The current shape of a view saved by an older console, losing nothing it still shows.
 
-    The old rounds are always migrated in place first (each question's
-    ``(ambiguity: …)`` prefix becomes its ``ambiguity``), so every saved round,
-    phase, grade and fact is kept. The chat's progress file is then folded
+    The old view is always migrated in place first: each question's
+    ``(ambiguity: …)`` prefix becomes its ``ambiguity``, the saved ambiguity
+    trend stays, and the Seed review's fields (:data:`RETIRED_FIELDS`) are
+    dropped, since the console no longer shows a review (#3064). Every saved
+    round, phase and fact is kept. The chat's progress file is then folded
     again, and that replay is merged in only when it covers the saved history:
-    every saved phase and grade in order, every saved round with at least what
-    it had, and no fewer repairs or dropped rounds. A file that is empty,
-    unreadable, truncated or rotated cannot cover it, so the migrated view is
-    the answer. A merged replay only adds: a value the replay lacks is kept
-    from the saved view.
+    every saved phase in order, every saved round with at least what it had,
+    and no fewer dropped rounds. A file that is empty, unreadable, truncated or
+    rotated cannot cover it, so the migrated view is the answer. A merged
+    replay only adds: a value the replay lacks is kept from the saved view.
 
     ``None`` when ``old`` is not a view this console can read safely (a newer
     version, or entries of the wrong shape): the caller keeps it as saved.
@@ -370,7 +366,7 @@ def upgrade_view(old: dict[str, Any], progress: Path) -> dict[str, Any] | None:
         return None
     if not _well_formed(old):
         return None
-    migrated = _migrate_rounds(old)
+    migrated = _migrate(old)
     if not progress.is_file():
         return migrated
     replay = new_view()
@@ -402,28 +398,40 @@ def upgrade_view(old: dict[str, Any], progress: Path) -> dict[str, Any] | None:
     return merged
 
 
+# The lists a migration and a replay read, and the type of each field they read.
+_SHAPES: tuple[tuple[str, tuple[tuple[str, tuple[type, ...]], ...]], ...] = (
+    ("rounds", (("round", (int,)),)),
+    ("phases", (("phase", (str,)),)),
+    ("ambiguity_trend", (("round", (int,)), ("value", (int, float)))),
+)
+
+
 def _well_formed(old: dict[str, Any]) -> bool:
-    """Whether the lists a migration and a replay compare are the shapes they expect."""
-    for name, field_name, kind in (
-        ("rounds", "round", int),
-        ("phases", "phase", str),
-        ("grades", "grade", str),
-    ):
+    """Whether the lists a migration and a replay read are the shapes they expect."""
+    for name, fields in _SHAPES:
         entries = old.get(name, [])
         if not isinstance(entries, list):
             return False
         for entry in entries:
             if not isinstance(entry, dict):
                 return False
-            value = entry.get(field_name)
-            if not isinstance(value, kind) or isinstance(value, bool):
-                return False
+            for field_name, kinds in fields:
+                value = entry.get(field_name)
+                if not isinstance(value, kinds) or isinstance(value, bool):
+                    return False
     return True
 
 
-def _migrate_rounds(old: dict[str, Any]) -> dict[str, Any]:
-    """``old`` in the current shape, with each round's prefix split into its ``ambiguity``."""
-    view = {**new_view(), **old, "v": VIEW_VERSION, "ambiguity_trend": []}
+def _migrate(old: dict[str, Any]) -> dict[str, Any]:
+    """``old`` in the current shape: the review's fields dropped, each round's prefix split off.
+
+    A round's ``ambiguity`` (or the one its question's prefix gives) is put in
+    the trend over the trend the view saved, which can also hold points for
+    rounds it no longer keeps.
+    """
+    remaining = {key: value for key, value in old.items() if key not in RETIRED_FIELDS}
+    view = {**new_view(), **remaining, "v": VIEW_VERSION}
+    view["ambiguity_trend"] = [dict(point) for point in old.get("ambiguity_trend") or []]
     rounds = [dict(entry) for entry in old.get("rounds") or []]
     view["rounds"] = rounds
     for entry in rounds:
@@ -443,14 +451,12 @@ def _replay_covers(saved: dict[str, Any], replay: dict[str, Any]) -> bool:
     """Whether a replayed view holds at least everything ``saved`` holds from events."""
     if saved.get("auto_session_id") and replay["auto_session_id"] != saved["auto_session_id"]:
         return False  # another session's file, or none of it
-    for name, field_name in (("phases", "phase"), ("grades", "grade")):
-        kept = [entry[field_name] for entry in saved.get(name) or []]
-        again = [entry[field_name] for entry in replay[name]]
-        if again[: len(kept)] != kept:
-            return False
-    for name in ("repair_round", "rounds_dropped"):
-        if replay[name] < int(saved.get(name) or 0):
-            return False
+    kept = [entry["phase"] for entry in saved.get("phases") or []]
+    again = [entry["phase"] for entry in replay["phases"]]
+    if again[: len(kept)] != kept:
+        return False
+    if replay["rounds_dropped"] < int(saved.get("rounds_dropped") or 0):
+        return False
     by_round = {entry["round"]: entry for entry in replay["rounds"]}
     for entry in saved.get("rounds") or []:
         again = by_round.get(entry["round"])
@@ -508,33 +514,23 @@ def load_facts(auto_session_id: str, store: Any = None) -> dict[str, Any] | None
         state = store.load(auto_session_id)
     except (ValueError, OSError):
         return None
-    findings = [
-        cut(str(item.get("message")), MAX_FINDING)
-        for item in (state.findings or [])
-        if isinstance(item, dict) and item.get("message")
-    ]
+    # The record's legacy review fields (``last_grade``, ``findings``,
+    # ``max_repair_rounds``) are not read: the console shows no review (#3064).
     return {
         "max_rounds": state.max_interview_rounds,
-        "max_repair_rounds": state.max_repair_rounds,
         "execution_id": state.execution_id,
         "job_id": state.job_id,
         "seed": dict(state.seed_artifact) if state.seed_artifact else None,
         "seed_path": state.seed_path,
-        "grade": state.last_grade,
-        "findings": findings[:MAX_FINDINGS],
     }
 
 
 def apply_facts(view: dict[str, Any], facts: dict[str, Any]) -> None:
     """Copy the record's facts into ``view`` (the Seed itself becomes a message)."""
-    for key in ("max_rounds", "max_repair_rounds"):
-        if isinstance(facts.get(key), int):
-            view[key] = facts[key]
+    if isinstance(facts.get("max_rounds"), int):
+        view["max_rounds"] = facts["max_rounds"]
     if facts.get("execution_id"):
         view["execution_id"] = facts["execution_id"]
-    if facts.get("grade") and not view["grade"]:
-        view["grade"] = facts["grade"]
-    view["findings"] = list(facts.get("findings") or [])
 
 
 __all__ = [
