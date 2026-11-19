@@ -14,9 +14,24 @@ from types import MappingProxyType
 import pytest
 
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
-from ouroboros.auto.grading import VAGUE_TERMS, _is_observable  # noqa: PLC2701
+from ouroboros.auto.grading import _is_observable  # noqa: PLC2701
 from ouroboros.auto.profiles.coding import CODING_PROFILE
 from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
+
+# The vague terms the coding profile hands the auto answerer. The grade gate
+# kept its own copy until it was removed (#3064); the profile is now the only
+# owner, so this list pins its value.
+VAGUE_TERMS = (
+    "easy",
+    "intuitive",
+    "robust",
+    "scalable",
+    "better",
+    "improve",
+    "optimized",
+    "user-friendly",
+    "seamless",
+)
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -33,14 +48,14 @@ def test_coding_profile_registered_in_default_registry() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_vague_terms_match_grading_constant() -> None:
+def test_vague_terms_match_pinned_list() -> None:
     """CODING_PROFILE.vague_terms must equal frozenset(VAGUE_TERMS)."""
     assert CODING_PROFILE.vague_terms == frozenset(VAGUE_TERMS)
 
 
 @pytest.mark.parametrize("term", list(VAGUE_TERMS))
 def test_each_vague_term_present_in_profile(term: str) -> None:
-    """Every term from grading.VAGUE_TERMS must be in the profile."""
+    """Every pinned vague term must be in the profile."""
     assert term in CODING_PROFILE.vague_terms
 
 

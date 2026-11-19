@@ -8,9 +8,8 @@ Two shapes used to reach ``passed=True`` through ``QAHandler.handle``:
   outer verdict discarded;
 * a JSON boolean as ``score`` — ``bool`` is an ``int``, so ``true`` became 1.0.
 
-Both are now rejected at the public entry point, and the two consumers that
-read ``passed`` (Ralph's stop decision, the auto pipeline's Seed QA gate) see a
-failure rather than a pass.
+Both are now rejected at the public entry point, and Ralph's stop decision,
+which reads ``passed``, sees a failure rather than a pass.
 """
 
 from __future__ import annotations
@@ -20,8 +19,6 @@ from typing import Any
 
 import pytest
 
-from ouroboros.auto.adapters import HandlerSeedQAEvaluator
-from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.providers.base import CompletionResponse, UsageInfo
@@ -117,22 +114,6 @@ async def test_ralph_does_not_stop_on_malformed_verdict(body: str) -> None:
 
     assert _qa_passed(step_meta) is False
     assert _qa_authoritative_failure(step_meta) is True
-
-
-@pytest.mark.parametrize("body", list(_FAIL_OPEN.values()), ids=list(_FAIL_OPEN))
-async def test_seed_qa_gate_fails_on_malformed_verdict(body: str) -> None:
-    seed = Seed(
-        goal="Build a CLI todo app",
-        ontology_schema=OntologySchema(name="todo", description="tasks"),
-        acceptance_criteria=("`todo add x` prints 'added x'",),
-        metadata=SeedMetadata(ambiguity_score=0.1),
-    )
-    res = await HandlerSeedQAEvaluator(_handler(body))(seed, {"sections": {}})
-
-    assert res.passed is False
-    assert res.verdict == "fail"
-    assert res.score == 0.0
-    assert res.error is not None and "score must be a float" in res.error
 
 
 # A pure envelope (no verdict field of its own beside the wrapper) is still unwrapped.

@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
-from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
     AmbiguityScore,
@@ -1410,7 +1409,7 @@ class TestSeedGeneratorExtraction:
             assert Seed.model_validate(result.value.model_dump()) == result.value
 
     @pytest.mark.asyncio
-    async def test_generate_preserves_apostrophes_through_seed_schema_and_grade(self) -> None:
+    async def test_generate_preserves_apostrophes_through_seed_schema(self) -> None:
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
@@ -1438,9 +1437,6 @@ class TestSeedGeneratorExtraction:
         assert criterion.expected_artifacts == ("reports/user's guide.md",)
         assert criterion.output_assertion == "operator's ready"
         assert Seed.model_validate(result.value.model_dump()) == result.value
-        grade = GradeGate().grade_seed(result.value)
-        assert grade.grade is SeedGrade.A
-        assert grade.may_run is True
 
     @pytest.mark.asyncio
     async def test_generate_does_not_treat_possessive_description_as_quote_bypass(
@@ -1487,9 +1483,6 @@ class TestSeedGeneratorExtraction:
         assert criterion.description == "User's file exists"
         assert criterion.verify_command == "test -f user.txt"
         assert criterion.expected_artifacts == ("user.txt",)
-        grade = GradeGate().grade_seed(result.value)
-        assert grade.grade is SeedGrade.A
-        assert grade.may_run is True
 
     @pytest.mark.asyncio
     async def test_generate_does_not_treat_word_final_possessive_as_quote_bypass(
@@ -1536,9 +1529,6 @@ class TestSeedGeneratorExtraction:
         assert criterion.description == "Users' files exist"
         assert criterion.verify_command == "test -f users.txt"
         assert criterion.expected_artifacts == ("users.txt",)
-        grade = GradeGate().grade_seed(result.value)
-        assert grade.grade is SeedGrade.A
-        assert grade.may_run is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1605,9 +1595,6 @@ class TestSeedGeneratorExtraction:
         assert criterion.description == "Output file exists"
         assert criterion.verify_command == expected_verify
         assert criterion.expected_artifacts == expected_artifacts
-        grade = GradeGate().grade_seed(result.value)
-        assert grade.grade is SeedGrade.A
-        assert grade.may_run is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1671,9 +1658,6 @@ class TestSeedGeneratorExtraction:
         assert criterion.description == "Output file exists"
         assert criterion.verify_command == expected_verify
         assert criterion.expected_artifacts == expected_artifacts
-        grade = GradeGate().grade_seed(result.value)
-        assert grade.grade is SeedGrade.A
-        assert grade.may_run is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("representation", ("block", "inline"))
@@ -1802,10 +1786,6 @@ class TestSeedGeneratorExtraction:
             assert isinstance(criterion, AcceptanceCriterionSpec)
             assert criterion.has_success_contract
 
-            grade = GradeGate().grade_seed(seed)
-            assert grade.grade is SeedGrade.A
-            assert grade.may_run is True
-
             executor = create_runtime_verify_executor(tmp_dir)
             gated = await executor._apply_verify_gate(
                 seed=seed,
@@ -1860,9 +1840,6 @@ class TestSeedGeneratorExtraction:
         assert criterion.verify_command == verify_command
         assert criterion.expected_artifacts == ("out.txt",)
         assert criterion.output_assertion == "OK"
-        grade = GradeGate().grade_seed(result.value)
-        assert grade.grade is SeedGrade.A
-        assert grade.may_run is True
 
     @pytest.mark.asyncio
     async def test_stored_legacy_unquoted_backtick_case_survives_live_verify(self) -> None:
@@ -1890,9 +1867,6 @@ class TestSeedGeneratorExtraction:
         requirements["acceptance_criteria"] = (criterion,)
         seed = generator._build_seed(requirements, SeedMetadata(interview_id="legacy-backtick"))
         assert Seed.model_validate(seed.model_dump()) == seed
-        grade = GradeGate().grade_seed(seed)
-        assert grade.grade is SeedGrade.A
-        assert grade.may_run is True
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             gated = await create_runtime_verify_executor(tmp_dir)._apply_verify_gate(
@@ -1987,9 +1961,6 @@ class TestSeedGeneratorExtraction:
             assert generated.is_ok
             seed = generated.value
             assert Seed.model_validate(seed.model_dump()) == seed
-            grade = GradeGate().grade_seed(seed)
-            assert grade.grade is SeedGrade.A
-            assert grade.may_run is True
 
             gated = await create_runtime_verify_executor(tmp_dir)._apply_verify_gate(
                 seed=seed,
@@ -2257,9 +2228,6 @@ class TestSeedGeneratorExtraction:
             assert isinstance(criterion, AcceptanceCriterionSpec)
             assert criterion.verify_command == verify_command
             assert Seed.model_validate(result.value.model_dump()) == result.value
-            grade = GradeGate().grade_seed(result.value)
-            assert grade.grade is SeedGrade.A
-            assert grade.may_run is True
 
             gated = await create_runtime_verify_executor(tmp_dir)._apply_verify_gate(
                 seed=result.value,
@@ -2323,10 +2291,6 @@ class TestSeedGeneratorExtraction:
             assert criterion.expected_artifacts == ()
             assert criterion.output_assertion == "READY"
             assert Seed.model_validate(result.value.model_dump()) == result.value
-
-            grade = GradeGate().grade_seed(result.value)
-            assert grade.grade is SeedGrade.A
-            assert grade.may_run is True
 
             executor = create_runtime_verify_executor(tmp_dir)
             gated = await executor._apply_verify_gate(

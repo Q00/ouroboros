@@ -147,7 +147,7 @@ ouroboros dispatch --runtime pi --cwd <pi-session-cwd> "ooo ..."
 
 | 명령 형태 | 완료되는 범위 | Pi 관여 |
 |-----------|---------------|---------|
-| `ouroboros auto --runtime pi ...` | 인터뷰, Seed 생성, Seed QA 및 실행 인계 | Pi 런타임의 실행 인계를 시작하며, 최종 제품은 아직 대기 중일 수 있습니다 |
+| `ouroboros auto --runtime pi ...` | 인터뷰, Seed 생성 및 실행 인계 | Pi 런타임의 실행 인계를 시작하며, 최종 제품은 아직 대기 중일 수 있습니다 |
 
 실행 경로에서 모델 override를 전달하지 않으면 Pi 자체 기본값으로 모델을 선택합니다. 재현 가능한 smoke test를 위해 다음을 설정합니다.
 

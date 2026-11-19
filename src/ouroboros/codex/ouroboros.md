@@ -68,7 +68,7 @@ evaluation—as the automatic pipeline's final state.
 ## Auto Dispatch Safety
 
 `ooo auto` has a strict product contract: bounded interview, Seed generation,
-A-grade review/repair, and execution handoff. Do not emulate it with manual
+and execution handoff. Do not emulate it with manual
 shell, repository, or GitHub work.
 
 If a user input starts with `ooo auto`, call `ouroboros_start_auto`. Full auto

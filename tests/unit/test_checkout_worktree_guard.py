@@ -151,7 +151,6 @@ def test_auto_project_cwd_keeps_the_coding_profile_without_creating_a_worktree(
                 resume=None,
                 runtime="claude",
                 max_interview_rounds=1,
-                max_repair_rounds=1,
                 skip_run=True,
             )
         )

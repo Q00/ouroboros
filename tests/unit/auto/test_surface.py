@@ -173,7 +173,7 @@ def test_cli_auto_status_prints_persisted_session(monkeypatch, tmp_path) -> None
     assert "interview_123" in output
     assert "Current interview round:" in output
     assert "Which runtime should be used?" in output
-    assert "Seed grade:" in output
+    assert "Seed grade:" not in output
     assert "Seed origin: none" in output
     assert "Resume:" in output
 
@@ -532,7 +532,6 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
             status="blocked",
             auto_session_id="auto_test",
             phase="interview",
-            grade="B",
             seed_path="/tmp/seed.yaml",
             interview_session_id="interview_1",
             execution_id="execution_1",
@@ -542,7 +541,6 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
             pending_question="Which runtime should be used?",
             last_progress_message="asking interview round 2/12",
             last_progress_at="2026-05-01T12:00:00+00:00",
-            last_grade="B",
             blocker="waiting for interview answer",
         )
 
@@ -565,8 +563,6 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
         "seed_path": "/tmp/seed.yaml",
         "seed_origin": "none",
         "active_task_class": None,
-        "grade": "B",
-        "last_grade": "B",
         "interview_session_id": "interview_1",
         "execution_id": "execution_1",
         "job_id": "job_1",
@@ -633,7 +629,6 @@ async def test_auto_handler_meta_uses_pipeline_state_progress(monkeypatch, tmp_p
             run_state.last_progress_message = "asking interview round 3/12"
             run_state.last_progress_at = "2026-05-01T12:30:00+00:00"
             run_state.seed_path = "/tmp/seed.yaml"
-            run_state.last_grade = "A"
             captured["auto_session_id"] = run_state.auto_session_id
             return AutoPipelineResult(
                 status=run_state.phase.value,
@@ -644,7 +639,6 @@ async def test_auto_handler_meta_uses_pipeline_state_progress(monkeypatch, tmp_p
                 pending_question=run_state.pending_question,
                 last_progress_message=run_state.last_progress_message,
                 last_progress_at=run_state.last_progress_at,
-                last_grade=run_state.last_grade,
             )
 
     class FakeHandler:
@@ -668,7 +662,8 @@ async def test_auto_handler_meta_uses_pipeline_state_progress(monkeypatch, tmp_p
     assert result.value.meta["last_progress_message"] == "asking interview round 3/12"
     assert result.value.meta["last_progress_at"] == "2026-05-01T12:30:00+00:00"
     assert result.value.meta["seed_path"] == "/tmp/seed.yaml"
-    assert result.value.meta["last_grade"] == "A"
+    assert "grade" not in result.value.meta
+    assert "last_grade" not in result.value.meta
     assert result.value.meta["resume_command"] == (
         f"ooo auto --resume {captured['auto_session_id']}"
     )
@@ -785,7 +780,9 @@ async def test_cli_auto_routes_interview_and_execute_from_stage_plan(monkeypatch
             captured["seed_runtime"] = seed_generator.handler.agent_runtime_backend
             captured["run_runtime"] = run_starter.handler.agent_runtime_backend
             captured["execute_runtime"] = run_starter.handler.execute_handler.agent_runtime_backend
-            captured["qa_runtime"] = kwargs["seed_qa_evaluator"].qa_handler.agent_runtime_backend
+            captured["wires_seed_review"] = any(
+                name in kwargs for name in ("seed_qa_evaluator", "repairer", "reviewer")
+            )
 
         async def run(self, run_state):  # noqa: ANN001
             captured["state_runtime"] = run_state.runtime_backend
@@ -823,7 +820,6 @@ async def test_cli_auto_routes_interview_and_execute_from_stage_plan(monkeypatch
         resume=None,
         runtime=None,
         max_interview_rounds=1,
-        max_repair_rounds=1,
         skip_run=False,
     )
 
@@ -833,7 +829,7 @@ async def test_cli_auto_routes_interview_and_execute_from_stage_plan(monkeypatch
         "seed_runtime": "gjc",
         "run_runtime": "pi",
         "execute_runtime": "pi",
-        "qa_runtime": "gjc",
+        "wires_seed_review": False,
         "state_runtime": "opencode",
     }
 
@@ -857,8 +853,8 @@ async def test_cli_resume_replays_persisted_runtime_and_skip_run(monkeypatch, tm
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             captured["skip_run"] = kwargs.get("skip_run")
             captured["seed_qa_evaluator"] = kwargs.get("seed_qa_evaluator")
+            captured["repairer"] = kwargs.get("repairer")
             captured["driver_rounds"] = args[0].max_rounds
-            captured["repair_rounds"] = kwargs["repairer"].max_repair_rounds
 
         async def run(self, run_state):  # noqa: ANN001
             captured["state_runtime"] = run_state.runtime_backend
@@ -886,7 +882,6 @@ async def test_cli_resume_replays_persisted_runtime_and_skip_run(monkeypatch, tm
         resume=state.auto_session_id,
         runtime=None,
         max_interview_rounds=None,
-        max_repair_rounds=None,
         skip_run=False,
     )
 
@@ -894,9 +889,9 @@ async def test_cli_resume_replays_persisted_runtime_and_skip_run(monkeypatch, tm
     assert captured["state_runtime"] == "codex"
     assert captured["state_skip_run"] is True
     assert captured["skip_run"] is True
-    assert captured["seed_qa_evaluator"] is not None
+    assert captured["seed_qa_evaluator"] is None
+    assert captured["repairer"] is None
     assert captured["driver_rounds"] == 2
-    assert captured["repair_rounds"] == 3
     assert captured["runtimes"] == ["codex", "codex", "codex", "codex"]
 
 
@@ -945,7 +940,6 @@ async def test_cli_resume_migrates_legacy_session_without_runtime_backend(
         resume=state.auto_session_id,
         runtime=None,
         max_interview_rounds=None,
-        max_repair_rounds=None,
         skip_run=False,
     )
 
@@ -1002,7 +996,6 @@ async def test_cli_resume_infers_opencode_for_legacy_session_with_opencode_mode(
         resume=state.auto_session_id,
         runtime=None,
         max_interview_rounds=None,
-        max_repair_rounds=None,
         skip_run=False,
     )
 
@@ -1031,7 +1024,6 @@ async def test_cli_resume_rejects_legacy_opencode_runtime_mismatch(monkeypatch, 
             resume=state.auto_session_id,
             runtime="codex",
             max_interview_rounds=1,
-            max_repair_rounds=1,
             skip_run=False,
         )
 
@@ -1053,7 +1045,6 @@ async def test_cli_resume_rejects_runtime_mismatch(monkeypatch, tmp_path) -> Non
             resume=state.auto_session_id,
             runtime="opencode",
             max_interview_rounds=1,
-            max_repair_rounds=1,
             skip_run=False,
         )
 
@@ -1068,7 +1059,6 @@ async def test_cli_fresh_auto_rejects_blank_goal() -> None:
             resume=None,
             runtime=None,
             max_interview_rounds=1,
-            max_repair_rounds=1,
             skip_run=False,
         )
 
@@ -1096,7 +1086,6 @@ async def test_cli_fresh_auto_rejects_non_writable_project(monkeypatch, tmp_path
             resume=None,
             runtime=None,
             max_interview_rounds=1,
-            max_repair_rounds=1,
             skip_run=False,
         )
 
@@ -1113,7 +1102,6 @@ async def test_cli_fresh_auto_uses_safe_default_cwd(monkeypatch, tmp_path) -> No
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             captured["skip_run"] = kwargs.get("skip_run")
             captured["driver_rounds"] = args[0].max_rounds
-            captured["repair_rounds"] = kwargs["repairer"].max_repair_rounds
 
         async def run(self, run_state):  # noqa: ANN001
             captured["cwd"] = run_state.cwd
@@ -1145,7 +1133,6 @@ async def test_cli_fresh_auto_uses_safe_default_cwd(monkeypatch, tmp_path) -> No
         resume=None,
         runtime=None,
         max_interview_rounds=1,
-        max_repair_rounds=1,
         skip_run=False,
     )
 
@@ -1379,7 +1366,9 @@ async def test_auto_handler_routes_interview_and_execute_from_stage_plan(
             captured["seed_runtime"] = seed_generator.handler.agent_runtime_backend
             captured["run_runtime"] = run_starter.handler.agent_runtime_backend
             captured["execute_runtime"] = run_starter.handler.execute_handler.agent_runtime_backend
-            captured["qa_runtime"] = kwargs["seed_qa_evaluator"].qa_handler.agent_runtime_backend
+            captured["wires_seed_review"] = any(
+                name in kwargs for name in ("seed_qa_evaluator", "repairer", "reviewer")
+            )
 
         async def run(self, run_state):  # noqa: ANN001
             captured["state_runtime"] = run_state.runtime_backend
@@ -1414,7 +1403,7 @@ async def test_auto_handler_routes_interview_and_execute_from_stage_plan(
         "seed_runtime": "gjc",
         "run_runtime": "pi",
         "execute_runtime": "pi",
-        "qa_runtime": "gjc",
+        "wires_seed_review": False,
         "state_runtime": "opencode",
         "runtime_plan_kwargs": {
             "runtime_override": None,
@@ -1444,7 +1433,6 @@ async def test_auto_handler_resume_uses_persisted_cwd_without_revalidating_serve
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             captured["skip_run"] = kwargs.get("skip_run")
             captured["driver_rounds"] = args[0].max_rounds
-            captured["repair_rounds"] = kwargs["repairer"].max_repair_rounds
 
         async def run(self, run_state):  # noqa: ANN001
             captured["cwd"] = run_state.cwd
@@ -1471,7 +1459,6 @@ async def test_auto_handler_resume_uses_persisted_cwd_without_revalidating_serve
     assert result.is_ok
     assert captured["cwd"] == str(tmp_path / "project")
     assert captured["driver_rounds"] == 2
-    assert captured["repair_rounds"] == 3
 
 
 def test_auto_state_persists_loop_bounds() -> None:
@@ -1512,12 +1499,13 @@ def test_auto_state_rejects_invalid_loop_bounds() -> None:
 
 @pytest.mark.asyncio
 async def test_auto_handler_rejects_zero_loop_bounds() -> None:
-    for field_name in ("max_interview_rounds", "max_repair_rounds"):
-        result = await AutoHandler().handle({"goal": "Build a CLI", field_name: 0})
+    # ``max_repair_rounds`` bounded the removed repair loop (#3064) and is now
+    # accepted and ignored, so only the interview bound is validated here.
+    result = await AutoHandler().handle({"goal": "Build a CLI", "max_interview_rounds": 0})
 
-        assert result.is_err
-        assert field_name in str(result.error)
-        assert ">= 1" in str(result.error)
+    assert result.is_err
+    assert "max_interview_rounds" in str(result.error)
+    assert ">= 1" in str(result.error)
 
 
 def test_auto_state_loads_legacy_sessions_without_attached_run_fields() -> None:
@@ -1878,10 +1866,8 @@ async def test_auto_pipeline_backfills_seed_origin_for_legacy_persisted_seed(tmp
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.seed_artifact = seed.to_dict()
     state.seed_path = str(tmp_path / "seed.yaml")
-    state.last_grade = "A"
     state.transition(AutoPhase.INTERVIEW, "primed")
     state.transition(AutoPhase.SEED_GENERATION, "ready for seed generation")
-    state.transition(AutoPhase.REVIEW, "review queued")
     state.transition(AutoPhase.COMPLETE, "skip-run requested")
     # Simulate the legacy persisted state: seed_artifact present but
     # seed_origin still at the schema default (the field did not exist
@@ -1914,7 +1900,6 @@ def test_print_result_renders_seed_origin_line() -> None:
         status="complete",
         auto_session_id="auto_x",
         phase="complete",
-        grade="A",
         seed_path="/tmp/seed.yaml",
         seed_origin="auto_pipeline",
     )
@@ -1939,7 +1924,6 @@ def test_format_result_keeps_evidence_provenance_out_of_user_text() -> None:
         status="complete",
         auto_session_id="auto_x",
         phase="complete",
-        grade="A",
         seed_path="/tmp/seed.yaml",
         seed_origin="auto_pipeline",
     )
@@ -2002,11 +1986,8 @@ async def test_auto_pipeline_backfills_seed_origin_for_seed_path_only_resume(tmp
     Seed was authored by the auto pipeline. The new CLI/MCP surfaces
     must not report ``none`` for it.
     """
-    from ouroboros.auto.grading import GradeResult, SeedGrade
     from ouroboros.auto.ledger import SeedDraftLedger
     from ouroboros.auto.pipeline import AutoPipeline
-    from ouroboros.auto.seed_repairer import RepairResult
-    from ouroboros.auto.seed_reviewer import SeedReview
     from ouroboros.auto.state import (
         AutoPhase,
         AutoPipelineState,
@@ -2057,38 +2038,17 @@ async def test_auto_pipeline_backfills_seed_origin_for_seed_path_only_resume(tmp
     def fake_seed_loader(_path):
         return seed
 
-    class _PassingReviewer:
-        def review(self, _seed, *, ledger=None):  # noqa: ARG002
-            grade = GradeResult(grade=SeedGrade.A, scores={}, may_run=True)
-            return SeedReview(grade_result=grade, findings=())
-
-    class _PassingRepairer:
-        def converge(self, seed_in, *, ledger=None):
-            review = _PassingReviewer().review(seed_in, ledger=ledger)
-            return (
-                seed_in,
-                review,
-                [
-                    RepairResult(
-                        changed=False,
-                        seed=seed_in,
-                        applied_repairs=(),
-                        unresolved_findings=(),
-                    )
-                ],
-            )
-
     store = AutoStore(tmp_path / "store")
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     # Loader path: only seed_path is persisted, seed_artifact is empty,
     # seed_origin is at the legacy default ``none``.
     state.seed_path = str(tmp_path / "seed.yaml")
-    state.last_grade = "A"
     ledger = SeedDraftLedger.from_goal(state.goal)
     state.ledger = ledger.to_dict()
     state.transition(AutoPhase.INTERVIEW, "primed")
     state.transition(AutoPhase.SEED_GENERATION, "ready for seed generation")
-    state.transition(AutoPhase.REVIEW, "review queued")
+    # A legacy session saved in the retired review phase (#3064).
+    state.phase = AutoPhase.REVIEW
     state.skip_run = True
     assert state.seed_origin is SeedOrigin.NONE
     store.save(state)
@@ -2100,8 +2060,6 @@ async def test_auto_pipeline_backfills_seed_origin_for_seed_path_only_resume(tmp
         seed_saver=fake_seed_saver,
         seed_loader=fake_seed_loader,
         skip_run=True,
-        reviewer=_PassingReviewer(),
-        repairer=_PassingRepairer(),
     )
 
     result = await pipeline.run(state)

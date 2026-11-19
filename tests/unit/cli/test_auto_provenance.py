@@ -73,7 +73,6 @@ def test_auto_cli_picks_up_env_provenance(monkeypatch) -> None:
             status="complete",
             auto_session_id=state.auto_session_id,
             phase="complete",
-            grade="A",
         )
 
     with patch("ouroboros.cli.commands.auto.AutoPipeline") as pipeline_cls:
@@ -119,7 +118,6 @@ def test_auto_cli_without_env_keeps_state_provenance_none(monkeypatch) -> None:
             status="complete",
             auto_session_id=state.auto_session_id,
             phase="complete",
-            grade="A",
         )
 
     with patch("ouroboros.cli.commands.auto.AutoPipeline") as pipeline_cls:

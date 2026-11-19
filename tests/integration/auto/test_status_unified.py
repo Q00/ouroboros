@@ -57,8 +57,6 @@ def _state_at_run(tmp_path) -> AutoPipelineState:
     state.interview_session_id = "interview_stub"
     state.interview_completed = True
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.last_grade = "A"
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     return state
 
@@ -613,8 +611,6 @@ def test_cli_status_auto_snapshot(tmp_path) -> None:
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.interview_completed = True
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.last_grade = "A"
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     state.ralph_lineage_id = "ralph-seed-test_001-pinned00"
     state.transition(AutoPhase.RALPH_HANDOFF, "handing off")

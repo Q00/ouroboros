@@ -17,14 +17,12 @@ from typing import Any
 import pytest
 
 from ouroboros.auto.adapters import EnvRuntimeProbeRunner
-from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.ledger import (
     LedgerEntry,
     LedgerSource,
     LedgerStatus,
     SeedDraftLedger,
 )
-from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPipelineState
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -85,15 +83,6 @@ def _fill_ready(ledger: SeedDraftLedger) -> None:
                 status=LedgerStatus.DEFAULTED,
             ),
         )
-
-
-class _PassReviewer(SeedReviewer):
-    def __init__(self) -> None:
-        pass
-
-    def review(self, seed: Seed, *, ledger: Any = None) -> SeedReview:  # noqa: ARG002
-        grade = GradeResult(grade=SeedGrade.A, scores={}, findings=[], blockers=[], may_run=True)
-        return SeedReview(grade_result=grade, findings=())
 
 
 async def _ralph_starter_completed(_seed: Seed, **_kwargs: Any) -> dict[str, Any]:

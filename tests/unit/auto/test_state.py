@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ouroboros.auto.state import (
+    _ALLOWED_TRANSITIONS,
     DEFAULT_TIMEOUT_SECONDS_BY_PHASE,
     AutoCommitPolicy,
     AutoPhase,
@@ -166,7 +167,6 @@ def test_run_phase_uses_run_timeout_key_for_staleness() -> None:
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
     state.transition(AutoPhase.INTERVIEW, "starting")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
 
     future = datetime.fromisoformat(state.last_progress_at) + timedelta(seconds=61)
@@ -526,9 +526,9 @@ def test_recover_uses_transition_table_from_failed_state() -> None:
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.mark_failed("tool failed")
 
-    state.recover(AutoPhase.REVIEW, "retry review")
+    state.recover(AutoPhase.SEED_GENERATION, "retry seed generation")
 
-    assert state.phase is AutoPhase.REVIEW
+    assert state.phase is AutoPhase.SEED_GENERATION
     assert state.last_error is None
 
 
@@ -549,7 +549,6 @@ def test_resume_capability_complete_returns_none() -> None:
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.COMPLETE, "done")
 
     assert state.resume_capability() is AutoResumeCapability.NONE
@@ -562,16 +561,33 @@ def test_resume_capability_non_terminal_returns_resume() -> None:
     assert state.resume_capability() is AutoResumeCapability.RESUME
 
 
-def test_resume_capability_repair_phase_returns_resume() -> None:
-    """Critic fix C2: REPAIR is non-terminal — resume transitions back to REVIEW."""
+@pytest.mark.parametrize("phase", ["review", "repair"])
+def test_resume_capability_retired_review_phase_returns_resume(phase: str) -> None:
+    """A state file saved in a retired review phase (#3064) loads and resumes."""
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
-    state.transition(AutoPhase.REPAIR, "repair")
+    loaded = AutoPipelineState.from_dict({**state.to_dict(), "phase": phase})
 
-    assert state.phase is AutoPhase.REPAIR
-    assert state.resume_capability() is AutoResumeCapability.RESUME
+    assert loaded.phase is AutoPhase(phase)
+    assert loaded.resume_capability() is AutoResumeCapability.RESUME
+    # A retired phase only leaves, back to Seed generation.
+    loaded.transition(AutoPhase.SEED_GENERATION, "resuming at Seed generation")
+    assert loaded.phase is AutoPhase.SEED_GENERATION
+
+
+def test_seed_generation_hands_a_written_seed_straight_to_run_or_complete() -> None:
+    """#3064: no review phase sits between Seed generation and the run."""
+    allowed = _ALLOWED_TRANSITIONS[AutoPhase.SEED_GENERATION]
+    assert {AutoPhase.RUN, AutoPhase.COMPLETE} <= allowed
+    assert AutoPhase.REVIEW not in allowed
+    for retired in (AutoPhase.REVIEW, AutoPhase.REPAIR):
+        assert _ALLOWED_TRANSITIONS[retired] == {
+            AutoPhase.SEED_GENERATION,
+            AutoPhase.BLOCKED,
+            AutoPhase.FAILED,
+        }
+        assert all(retired not in targets for targets in _ALLOWED_TRANSITIONS.values())
 
 
 def test_resume_capability_blocked_unmapped_tool_returns_none() -> None:
@@ -682,7 +698,6 @@ def test_resume_capability_grade_gate_with_artifact_returns_resume() -> None:
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.seed_artifact = {"id": "seed_1"}
     state.mark_blocked("Seed did not reach A-grade", tool_name="grade_gate")
 
@@ -693,7 +708,6 @@ def test_resume_capability_grade_gate_with_seed_path_returns_partial() -> None:
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.seed_path = "/tmp/seed.yaml"
     state.mark_blocked("seed_loader could not read seed", tool_name="seed_loader")
 
@@ -704,7 +718,6 @@ def test_resume_capability_grade_gate_nothing_returns_none() -> None:
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.mark_blocked("seed_saver could not persist seed", tool_name="seed_saver")
 
     assert state.resume_capability() is AutoResumeCapability.NONE
@@ -714,7 +727,6 @@ def test_resume_capability_run_starter_with_handles_returns_resume() -> None:
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     state.job_id = "job_42"
     state.mark_blocked("run start timed out", tool_name="run_starter")
@@ -726,7 +738,6 @@ def test_resume_capability_run_starter_with_artifact_returns_resume() -> None:
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     state.seed_artifact = {"id": "seed_1"}
     state.mark_blocked("run start timed out", tool_name="run_starter")
@@ -739,7 +750,6 @@ def test_resume_capability_run_starter_seed_path_only_returns_partial() -> None:
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     state.seed_path = "/tmp/seed.yaml"
     state.mark_blocked("run start timed out", tool_name="run_starter")
@@ -758,7 +768,6 @@ def test_resume_capability_run_starter_attempted_without_handle_returns_none() -
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     state.seed_artifact = {"id": "seed_1"}  # would otherwise classify as RESUME
     state.run_start_attempted = True
@@ -776,7 +785,6 @@ def test_resume_capability_run_starter_attempted_seed_path_only_returns_none() -
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     state.seed_path = "/tmp/seed.yaml"
     state.run_start_attempted = True

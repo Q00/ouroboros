@@ -82,7 +82,6 @@ def _handoff_only_result(job_id: str) -> AutoPipelineResult:
         status="complete",
         auto_session_id="auto_wait",
         phase="complete",
-        grade="A",
         seed_path="/tmp/seed.yaml",
         job_id=job_id,
         execution_id="exec_wait",
@@ -240,7 +239,6 @@ def _completed_handoff_state(tmp_path, job_id: str) -> AutoPipelineState:
     # CREATED -> ... -> RUN -> COMPLETE, matching the pipeline's fresh path.
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     state.transition(AutoPhase.COMPLETE, "execution started for grade A Seed")
     return state

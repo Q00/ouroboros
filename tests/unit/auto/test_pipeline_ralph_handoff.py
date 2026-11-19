@@ -13,13 +13,11 @@ from typing import Any
 import pytest
 
 from ouroboros.auto import pipeline as pipeline_module
-from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.pipeline import (
     _RALPH_BLOCKED_STOP_REASONS,
     AutoPipeline,
 )
-from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
     _ALLOWED_TRANSITIONS,
     AutoPhase,
@@ -113,8 +111,6 @@ def _state_at_run_phase(tmp_path) -> AutoPipelineState:
     seed = _build_seed()
     state.seed_id = seed.metadata.seed_id
     state.seed_artifact = seed.to_dict()
-    state.last_grade = "A"
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     return state
 
@@ -130,28 +126,6 @@ async def _run_starter_ok(_seed: Seed) -> dict[str, Any]:
 
 async def _seed_generator_unused(_session_id: str) -> Seed:  # pragma: no cover
     raise AssertionError("seed generator should not run when seed_artifact is set")
-
-
-class _PassReviewer(SeedReviewer):
-    """SeedReviewer stub that always passes the grade gate.
-
-    The full GradeGate has stricter requirements than the deliberately
-    minimal Seed used in these tests; bypassing it isolates the
-    transition-under-test from the reviewer's evaluation logic.
-    """
-
-    def __init__(self) -> None:  # noqa: D401 - intentionally trivial
-        pass
-
-    def review(self, seed: Seed, *, ledger: Any = None) -> SeedReview:  # noqa: ARG002
-        grade = GradeResult(
-            grade=SeedGrade.A,
-            scores={},
-            findings=[],
-            blockers=[],
-            may_run=True,
-        )
-        return SeedReview(grade_result=grade, findings=())
 
 
 def _ralph_job_event(
@@ -242,7 +216,6 @@ async def test_run_handoff_uses_contract_idempotency_field_and_kwarg(tmp_path, m
         _StubInterviewDriver(),
         _seed_generator_unused,
         run_starter=run_starter,
-        reviewer=_PassReviewer(),
     )
 
     result = await pipeline.run(state)
@@ -385,7 +358,6 @@ async def test_legacy_complete_product_run_resume_blocks_missing_successor_owner
         _StubInterviewDriver(),
         _seed_generator_unused,
         run_starter=_terminal_success_run_starter(),
-        reviewer=_PassReviewer(),
     )
 
     first = await pipeline.run(state)

@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from ouroboros.auto.answerer import AutoAnswerer
-from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline, _apply_active_profile
-from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoResumeCapability
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -121,15 +117,6 @@ async def _unused_seed_generator(_session_id: str):  # pragma: no cover
     raise AssertionError("seed generator should not run for invalid active profile")
 
 
-class _PassReviewer(SeedReviewer):
-    def __init__(self) -> None:
-        pass
-
-    def review(self, seed: Seed, *, ledger: Any = None) -> SeedReview:  # noqa: ARG002
-        grade = GradeResult(grade=SeedGrade.A, scores={}, findings=[], blockers=[], may_run=True)
-        return SeedReview(grade_result=grade, findings=())
-
-
 @pytest.mark.asyncio
 async def test_pipeline_blocks_cleanly_when_durable_profile_is_missing() -> None:
     state = AutoPipelineState(
@@ -167,7 +154,6 @@ async def test_pipeline_does_not_resolve_profile_for_completed_interview_resume(
     pipeline = AutoPipeline(
         driver,
         _seed_generator_ok,
-        reviewer=_PassReviewer(),
         skip_run=True,
     )
 

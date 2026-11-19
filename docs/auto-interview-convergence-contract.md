@@ -49,7 +49,7 @@ local, reversible, and observable.
 
 Proceeding does **not** mean merely avoiding `blocked`: the resulting ledger must
 include auditable assumptions, non-goals, acceptance criteria, and a verification
-plan so seed generation and review can reject weak or untestable work.
+plan, so the Seed written from it can be run and each criterion verified.
 
 ## Unsafe or authority-requiring goals
 

@@ -206,7 +206,7 @@ because the command entered through Pi.
 
 | Command shape | What completes | Pi involvement |
 |---------------|----------------|----------------|
-| `ouroboros auto --runtime pi ...` | Interview, Seed generation, Seed QA, and run handoff | Starts an execution handoff for the Pi runtime; the final product may still be pending |
+| `ouroboros auto --runtime pi ...` | Interview, Seed generation, and run handoff | Starts an execution handoff for the Pi runtime; the final product may still be pending |
 
 Pi model selection comes from Pi's own default unless the execution path passes
 a model override. For reproducible smoke tests, set:

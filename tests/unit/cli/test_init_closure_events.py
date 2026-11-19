@@ -458,7 +458,7 @@ def test_cli_auto_pipeline_runs_under_the_auto_surface() -> None:
     async def run(self: Any, state: Any) -> AutoPipelineResult:
         seen["surface"] = current_interview_surface()
         return AutoPipelineResult(
-            status="complete", auto_session_id=state.auto_session_id, phase="complete", grade="A"
+            status="complete", auto_session_id=state.auto_session_id, phase="complete"
         )
 
     with (
@@ -474,7 +474,6 @@ def test_cli_auto_pipeline_runs_under_the_auto_surface() -> None:
                 resume=None,
                 runtime="claude",
                 max_interview_rounds=2,
-                max_repair_rounds=1,
                 skip_run=True,
             )
         )

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-from ouroboros.auto.seed_repairer import strip_observable_check_clause
 from ouroboros.core.seed import (
     AcceptanceCriterionInput,
     AcceptanceCriterionSpec,
@@ -74,9 +73,10 @@ _CANONICAL_HELLO_AUTO_OBSERVATION_AC = (
 )
 
 # The wrapper earlier releases of the Seed repairer put around a repaired
-# criterion. The repairer now appends an observation clause instead
-# (``seed_repairer.strip_observable_check_clause``); Seeds those releases
-# persisted still carry this prefix, so both forms are unwrapped.
+# criterion. Later releases appended an observation clause instead
+# (:func:`strip_observable_check_clause`). The repairer itself was removed with
+# the Seed review stage (#3064), but Seeds those releases persisted still carry
+# either form, so both are unwrapped.
 _SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX = (
     "a command/api check returns stable observable output or artifacts proving "
     "the original requirement for "
@@ -1014,6 +1014,38 @@ _SEED_REPAIRER_WRAPPER_RE = re.compile(
     + r"\s+",
     re.IGNORECASE,
 )
+
+
+# The clause the removed Seed repairer appended to a criterion it made
+# observable: the requester's sentence first and verbatim, then the separator,
+# then one clause in the criterion's language. Kept to read persisted Seeds.
+OBSERVABLE_CHECK_SEPARATOR = " — "
+_OBSERVABLE_CHECK_CLAUSES: dict[str, dict[str, str]] = {
+    "en": {
+        "test": "verified when the test suite passes",
+        "api": "verified when an API request returns the expected response",
+        "file": "verified when the expected file is written",
+        "command": "verified when running the command prints the expected output",
+    },
+    "ko": {
+        "test": "테스트를 실행해 통과하는지 확인한다",
+        "api": "API 요청이 기대한 응답을 반환하는지 확인한다",
+        "file": "기대한 파일이 생성되는지 확인한다",
+        "command": "명령을 실행하면 기대한 출력이 나오는지 확인한다",
+    },
+}
+
+
+def strip_observable_check_clause(criterion: str) -> str:
+    """Return ``criterion`` without the observation clause the Seed repairer appended."""
+    text = criterion.strip()
+    body = text.rstrip(" .")
+    for clauses in _OBSERVABLE_CHECK_CLAUSES.values():
+        for clause in clauses.values():
+            suffix = OBSERVABLE_CHECK_SEPARATOR + clause
+            if body.endswith(suffix):
+                return body[: -len(suffix)].rstrip()
+    return text
 
 
 def _unwrap_seed_repairer_original_requirement(criterion: str) -> str:

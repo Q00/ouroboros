@@ -468,7 +468,6 @@ def _cli_result() -> AutoPipelineResult:
         status="complete",
         auto_session_id="auto_requester_cli",
         phase="complete",
-        grade="A",
         seed_path="/tmp/seed.yaml",
         interview_session_id="interview_test",
     )

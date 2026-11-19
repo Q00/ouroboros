@@ -48,10 +48,9 @@ class DecisionProvenance(StrEnum):
     user-confirmed one, so degraded seeds (whose contract fields contained raw
     question text) executed silently.
 
-    The two gated classes — :data:`MODEL_INFERRED` and :data:`TIMEOUT_DEFAULT` —
-    must pass a low-ambiguity criterion (see :mod:`ouroboros.auto.grading`)
-    before the ledger can become an executable Seed. The other three are
-    grounded/human-authorized and pass the gate unconditionally.
+    :data:`MODEL_INFERRED` and :data:`TIMEOUT_DEFAULT` mark decisions no human
+    confirmed; the other three are grounded/human-authorized. The counts are
+    surfaced on ``SeedMetadata.decision_provenance`` for audit.
     """
 
     USER_CONFIRMED = "user_confirmed"
@@ -649,8 +648,8 @@ class SeedDraftLedger:
         """Return the count of entries currently flagged as CONFLICTING.
 
         Used by the deterministic_floor computation in :mod:`grading` so the
-        A-grade gate can see objective conflict pressure even when the LLM
-        under-reports ``ambiguity_score``.
+        Seed's ``ambiguity_score`` reflects objective conflict pressure even
+        when the LLM under-reports it.
         """
         return sum(
             1
