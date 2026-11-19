@@ -371,6 +371,8 @@ class AutoPipelineResult:
     last_lateral_text: str | None = None
     assumptions: tuple[str, ...] = ()
     open_questions: tuple[str, ...] = ()  # the Seed's, verbatim; never in worker input
+    # The Seed's ``sourced_scope.assumptions``: auto's unconfirmed answers the worker sees.
+    assumed_answers: tuple[str, ...] = ()
     # PR-C2 / #1157: ``assumptions`` with ledger source and confidence per entry.
     assumption_sources: tuple[AssumptionRecord, ...] = ()
     non_goals: tuple[str, ...] = ()
@@ -2533,6 +2535,9 @@ class AutoPipeline:
             last_lateral_text=state.last_lateral_text,
             assumptions=tuple(ledger.assumptions()),
             open_questions=tuple(seed_artifact.get("open_questions", ())),
+            assumed_answers=tuple(
+                (seed_artifact.get("sourced_scope") or {}).get("assumptions", ())
+            ),
             assumption_sources=tuple(ledger.assumption_sources()),
             non_goals=tuple(ledger.non_goals()),
             defaulted_sections=tuple(ledger.summary().get("defaulted_sections", ())),

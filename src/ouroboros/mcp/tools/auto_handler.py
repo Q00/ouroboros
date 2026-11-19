@@ -1585,6 +1585,8 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     }
     if result.open_questions:
         meta["open_questions"] = list(result.open_questions)
+    if result.assumed_answers:
+        meta["assumed_answers"] = list(result.assumed_answers)
     if result.artifact_state is not None:
         meta["artifact_state"] = result.artifact_state
     if handoff_only:
@@ -2390,6 +2392,9 @@ def _format_result(result: AutoPipelineResult) -> str:
     if result.seed_path:
         lines.append(f"Seed: {result.seed_path}")
     lines.append(f"Seed origin: {result.seed_origin}")
+    if result.assumed_answers:
+        lines.append("Assumed answers (chosen by auto, not confirmed; given to the worker):")
+        lines.extend(f"- {item}" for item in result.assumed_answers)
     if result.open_questions:
         lines.append("Open questions (kept in the Seed, not given to the worker):")
         lines.extend(f"- {item}" for item in result.open_questions)

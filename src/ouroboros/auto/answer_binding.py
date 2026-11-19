@@ -10,11 +10,14 @@ The driver knows which kind each answer is when it creates it, so it declares
 that with the answer as a structured ``answer_provenance`` argument. The
 interview records it on the round (``bigbang/answer_provenance.py``) and Seed
 extraction withholds the answer. Nothing downstream reads the ``[from-auto]``
-text prefix to decide. A guess no interview question produced still reaches
-the worker: the auto pipeline carries it into ``Seed.assumptions``
-(``auto/ledger_seed.py``). A drafted answer to an interview question is kept
-only as its question in ``Seed.open_questions``, which no execution prompt
-renders.
+text prefix to decide. The auto pipeline carries a guess no interview
+question produced into ``Seed.assumptions`` (``auto/ledger_seed.py``). The
+answer the refiner wrote for an interview question is auto's choice: it
+reaches the worker as a labelled, non-binding assumption
+(``Seed.sourced_scope.assumptions``). A draft auto decided nothing with (the
+answerer's template, the not-settled reply, a question the requester left
+unanswered) is kept only as its question in ``Seed.open_questions``, which no
+execution prompt renders.
 
 A requester answer is a confirmed fact, but it is declared ``"requester"``:
 extraction withholds it too, and the auto pipeline carries it to the worker
