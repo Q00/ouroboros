@@ -219,12 +219,13 @@ def _legacy_state_payload_for_phase(phase: AutoPhase, tmp_path) -> dict:
         state.transition(AutoPhase.INTERVIEW, "interview")
     if phase in {AutoPhase.SEED_GENERATION, AutoPhase.REVIEW, AutoPhase.RUN}:
         state.transition(AutoPhase.SEED_GENERATION, "seed")
-    if phase in {AutoPhase.REVIEW, AutoPhase.RUN}:
-        state.transition(AutoPhase.REVIEW, "review")
     if phase is AutoPhase.RUN:
         state.transition(AutoPhase.RUN, "run")
 
     payload = state.to_dict()
+    if phase is AutoPhase.REVIEW:
+        # Retired with the Seed review stage (#3064): only old files hold it.
+        payload["phase"] = AutoPhase.REVIEW.value
     payload.pop("deadline_at", None)
     payload.pop("deadline_at_epoch", None)
     return payload

@@ -7,7 +7,6 @@ mcp_args:
   resume: "$resume"
   cwd: "$CWD"
   max_interview_rounds: "$max_interview_rounds"
-  max_repair_rounds: "$max_repair_rounds"
   skip_run: "$skip_run"
   pipeline_timeout_seconds: "$pipeline_timeout_seconds"
   efficiency_mode: "$efficiency_mode"
@@ -62,7 +61,6 @@ Translate CLI-style flags typed in chat before invoking `ouroboros_start_auto`:
 |----------|---------|------|
 | `--skip-run` | `skip_run=true` | boolean |
 | `--max-interview-rounds N` | `max_interview_rounds=N` | integer |
-| `--max-repair-rounds N` | `max_repair_rounds=N` | integer |
 | `--pipeline-timeout-seconds X` | `pipeline_timeout_seconds=X` | number |
 | `--efficiency-mode adaptive\|quality_first` | `efficiency_mode=<value>` | string |
 | `--frugality-assurance off\|observe\|strict` | `frugality_assurance=<value>` | string |
@@ -70,6 +68,7 @@ Translate CLI-style flags typed in chat before invoking `ouroboros_start_auto`:
 
 - `--max-generations` belongs to `ooo ralph`, not `ooo auto`.
 - `--complete-product` is deprecated and ignored (the run job owns the chain).
+- `--max-repair-rounds` is deprecated and ignored (Auto no longer reviews or repairs the Seed).
 - `--pipeline-timeout-seconds` is accepted only on a fresh start; with `--resume` it is rejected because the original deadline is preserved.
 - The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP responses already include that ledger summary when available.
 
@@ -87,15 +86,16 @@ send neither argument; Auto restores the persisted contract.
 ## Behavior
 
 1. Starts an auto session and runs bounded Socratic interview rounds with source-tagged auto answers.
-2. Generates a Seed, then reviews and repairs it until it is A-grade (passes the Seed review) or blocked.
-3. Starts execution only after A-grade (unless `skip_run`). Auto reaches `COMPLETE` once the run has a durable handle; the run job then carries its own `run → evaluate → ralph` chain under `execution.auto_evaluate` / `execution.auto_evolve` (both default `true`). Auto does not evaluate the run itself.
+2. Generates a Seed and writes it. Nothing reviews, grades, or repairs the Seed before the run: the written Seed goes straight to execution (with `skip_run`, Auto stops once the Seed is written).
+3. Auto reaches `COMPLETE` once the run has a durable handle; the run job then carries its own `run → evaluate → ralph` chain under `execution.auto_evaluate` / `execution.auto_evolve` (both default `true`), which verifies each acceptance criterion. Auto does not evaluate the run itself.
 4. Every loop is bounded and timeouts return a resumable `auto_session_id`: resume with `ooo auto --resume <auto_session_id>`. The chained Ralph is bounded by `execution.auto_evolve_max_generations` (default 3), each generation capped by Ralph's per-iteration timeout, but there is no total wall-clock cap on the chain, and the auto deadline (`--pipeline-timeout-seconds`, CLI `--timeout`) does not bound it.
 
-**Preflight blocker.** `seed_preflight_unexecutable` is a start-new-session
-boundary, not a `--resume` boundary: the session's Seed is immutable, so use
-the displayed questions to revise the goal/Seed contract and start a new
-`ooo auto` session (the blocked one stays for audit). Transient interview,
-evaluator, or lateral-tool exhaustion is different: resume the same session
+**Sessions from before the Seed review was removed.** A session saved in the
+old `review` or `repair` phase, or blocked by the old pre-run checks
+(`seed_grade_below_required`, `seed_review_withheld_run`,
+`seed_preflight_unexecutable`, `seed_qa_ambiguity_unrepairable`), resumes with
+`--resume`: its persisted Seed is written and goes straight to the run.
+Transient interview or lateral-tool exhaustion also resumes the same session
 once the provider is healthy.
 
 ## Background monitoring

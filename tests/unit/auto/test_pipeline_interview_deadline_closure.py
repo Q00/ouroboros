@@ -18,10 +18,9 @@ product can still surface downstream. These tests pin:
 4. The pipeline does not re-mark ``interview_phase_deadline`` BLOCKED
    on the deadline path.
 5. A complete-ledger deadline Seed with the user's goal on record
-   (``sourced_scope``) runs through Seed QA and RUN like any auto Seed.
+   (``sourced_scope``) goes straight to RUN like any auto Seed.
 
-PR-C tightens the grade-gate side for degraded seeds; #1302 extends the
-degraded stamp to the complete-ledger deadline closure.
+#1302 extends the degraded stamp to the complete-ledger deadline closure.
 """
 
 from __future__ import annotations
@@ -32,7 +31,6 @@ from typing import Any
 
 import pytest
 
-from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.auto.ledger import (
     LedgerEntry,
     LedgerSource,
@@ -225,20 +223,15 @@ async def test_deadline_with_complete_ledger_routes_through_degraded_recovery(tm
 
 
 @pytest.mark.asyncio
-async def test_complete_ledger_deadline_runs_after_seed_qa_on_the_sourced_goal(tmp_path) -> None:
+async def test_complete_ledger_deadline_runs_on_the_sourced_goal(tmp_path) -> None:
     """A complete-ledger deadline Seed with the user's goal on record runs.
 
     The backend never confirmed low ambiguity (#1302), so the Seed stays
     degraded. With ``sourced_scope`` the worker is told only the user's goal,
-    so the Seed takes the same Seed QA and RUN gates as any auto Seed instead
-    of stopping unexecuted.
+    so the written Seed goes straight to RUN like any auto Seed instead of
+    stopping unexecuted.
     """
-    qa_calls: list[str] = []
     run_seeds: list[Any] = []
-
-    async def _passing_seed_qa(seed, _ledger):
-        qa_calls.append(seed.metadata.seed_id)
-        return EvaluateResult(passed=True, score=0.91, verdict="pass")
 
     async def _run_starter(seed, **_kwargs):
         run_seeds.append(seed)
@@ -252,12 +245,10 @@ async def test_complete_ledger_deadline_runs_after_seed_qa_on_the_sourced_goal(t
         _no_seed_generator,
         store=AutoStore(tmp_path),
         run_starter=_run_starter,
-        seed_qa_evaluator=_passing_seed_qa,
     )
 
     result = await pipeline.run(state)
 
-    assert len(qa_calls) == 1
     assert len(run_seeds) == 1
     assert run_seeds[0].metadata.degraded is True
     assert run_seeds[0].sourced_scope.goal == "Build a CLI"

@@ -212,7 +212,7 @@ session can continue handling the input.
 
 | Command shape | What completes | OMP involvement |
 |---------------|----------------|-----------------|
-| `ouroboros auto --runtime omp ...` | Interview, Seed generation, Seed QA, and run handoff | Starts an execution handoff for the OMP runtime; the final product may still be pending |
+| `ouroboros auto --runtime omp ...` | Interview, Seed generation, and run handoff | Starts an execution handoff for the OMP runtime; the final product may still be pending |
 
 OMP model selection comes from OMP's own configured model roles unless the
 execution path passes a model override. With an override, the OMP runtime

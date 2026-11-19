@@ -396,10 +396,13 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 
 > **`ambiguity_score`의 0.2 임계값이 실제로 걸리는 지점:** 이 필드 자체는 `0.0`~`1.0`을 허용합니다([`core/seed.py:409`](../../src/ouroboros/core/seed.py)). 0.2 게이트는 **seed 생성 시점**에 걸립니다. 인터뷰가 0.2 아래로 못 내려가면 seed를 안 만들어 주는 것이고, 여기에는 명시적 우회 선택지가 있습니다. CLI의 "Generate Seed anyway", MCP의 `force` 파라미터입니다. 우회해도 **실제 점수는 그대로 메타데이터에 기록되고 감사 로그에 남습니다.**
 >
-> `ouroboros auto`는 실행 중에 readiness를 다시 보긴 하지만 **조건부이고, 억제되는 두 경우의 결과가 정반대입니다** ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)):
+> `ouroboros auto`는 Seed를 쓴 뒤 점수를 다시 보지 않습니다. Seed 생성과 실행 사이에 Seed 검토나 등급 단계가 없고(#3064), 각 인수 기준은 실행 후에 검증됩니다. 인터뷰가 ledger 근거로 닫혔을 때(`closure_mode`가 `ledger_only`·`safe_default`)는 ledger의 구조적 완결성이 수용 신호이므로 Seed 생성이 0.2 게이트를 강제로 통과합니다.
 >
-> - **ledger 닫힘**(`closure_mode`가 `ledger_only`·`safe_default`이고 degraded가 아닐 때): **ledger의 구조적 완결성이 수용 신호이고 LLM이 매긴 점수는 설계상 낡은 값**이라, 0.2를 크게 웃도는 Seed도 A 등급을 받고 **실행됩니다.** 나머지 채점 축은 그대로 적용됩니다.
-> - **degraded Seed**(인터뷰 기한 초과): 해결되지 않은 항목은 finding으로 보고되어 등급을 A 미만으로 유지하므로, 높은 모호도 블로커와 등급 및 `may_run` 기준을 이 경우에는 억제합니다. 블로커가 없고 사용자의 목표가 기록된 `sourced_scope`가 있는 degraded Seed는 다른 auto Seed처럼 **실행됩니다**. 워커의 실행 목표는 기록된 사용자 목표이며, 해결되지 않은 항목은 Seed와 결과에 남습니다([`auto/grade_gate_terminals.py`](../../src/ouroboros/auto/grade_gate_terminals.py)). 기록된 목표가 없으면 RUN에 도달하지 않고, 세션은 `degraded_seed_not_executed` 사유로 `AutoPhase.BLOCKED`에서 멈춥니다. `COMPLETE`가 아닙니다. 남아 있는 하드 안전 블로커는 그대로 실행을 중단시킵니다.
+> **degraded Seed**(인터뷰 기한이 인터뷰를 닫은 경우)는 인터뷰 자체의 종료 규칙을 따릅니다([`auto/degraded_seed.py`](../../src/ouroboros/auto/degraded_seed.py)):
+>
+> - 필수 ledger 섹션이 `BLOCKED`(사람만 줄 수 있는 답)이면 세션은 `degraded_seed_safety_blockers` 사유로 멈춥니다.
+> - 그렇지 않고 사용자의 목표가 기록된 `sourced_scope`가 있으면 다른 auto Seed처럼 **실행됩니다**. 워커는 기록된 목표를 받고(한 번의 시도로 여러 수용 기준을 판정할 때는 그 기준들과 기대 산출물도 받습니다), 해결되지 않은 항목은 Seed와 결과에 남습니다.
+> - 기록된 목표가 없으면 RUN에 도달하지 않고, 세션은 `degraded_seed_not_executed` 사유로 `AutoPhase.BLOCKED`에서 멈춥니다. `COMPLETE`가 아닙니다.
 >
 > 실무적으로: 손으로 쓴 seed에 높은 `ambiguity_score`를 박아도 `ouroboros run workflow`가 막지는 않습니다. 이 값은 **강제 차단 장치가 아니라 출처 기록(provenance)**입니다.
 

@@ -86,7 +86,6 @@ def test_cli_renders_invoked_by_for_gateway_runs(monkeypatch) -> None:
             status="complete",
             auto_session_id=state.auto_session_id,
             phase="complete",
-            grade="A",
             invoked_by=state.invoked_by(),
             provenance=dict(state.provenance) if state.provenance else None,
         )
@@ -117,7 +116,6 @@ def test_cli_escapes_rich_markup_in_source(monkeypatch) -> None:
             status="complete",
             auto_session_id=state.auto_session_id,
             phase="complete",
-            grade="A",
             invoked_by=state.invoked_by(),
             provenance=dict(state.provenance) if state.provenance else None,
         )
@@ -140,7 +138,6 @@ def test_cli_omits_invoked_by_for_direct_runs(monkeypatch) -> None:
             status="complete",
             auto_session_id=state.auto_session_id,
             phase="complete",
-            grade="A",
         )
 
     with patch("ouroboros.cli.commands.auto.AutoPipeline") as pipeline_cls:

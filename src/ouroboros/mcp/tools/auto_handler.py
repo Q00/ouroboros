@@ -22,7 +22,6 @@ from ouroboros.auto.adapters import (
     HandlerRalphPoller,
     HandlerRunStarter,
     HandlerSeedGenerator,
-    HandlerSeedQAEvaluator,
     build_answer_refiner,
     load_seed,
     save_seed,
@@ -53,7 +52,6 @@ from ouroboros.auto.runtime_routing import (
     demote_plugin_opencode_mode,
     resolve_auto_stage_runtime_plan,
 )
-from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import (
     DEFAULT_PIPELINE_TIMEOUT_SECONDS,
     MAX_PIPELINE_TIMEOUT_SECONDS,
@@ -100,7 +98,6 @@ from ouroboros.mcp.tools.job_observer import (
     append_job_observer_inline_handoff,
     build_job_observer_contract,
 )
-from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.run_successors import resolve_run_successor_handler
 from ouroboros.mcp.tools.subagent import (
@@ -134,7 +131,7 @@ _FOLLOW_JOBS = ("job_id", "ralph_job_id", "chained_evaluate_job_id", "chained_ra
 
 @dataclass(slots=True)
 class AutoHandler:
-    """Run a bounded goal → A-grade Seed → execution handoff pipeline."""
+    """Run a bounded goal → interview → Seed → execution handoff pipeline."""
 
     interview_handler: InterviewHandler | None = field(default=None, repr=False)
     generate_seed_handler: GenerateSeedHandler | None = field(default=None, repr=False)
@@ -157,8 +154,8 @@ class AutoHandler:
             description=(
                 "Blocking form of ouroboros_start_auto (prefer that one; this call can outlast the "
                 "client timeout). Runs ooo auto in the foreground: automatically interview, "
-                "generate an A-grade Seed, and start execution only after the A-grade gate passes. "
-                "All loops are bounded."
+                "write a Seed, and start execution on it; the run verifies each acceptance "
+                "criterion. All loops are bounded."
             ),
             parameters=(
                 MCPToolParameter(
@@ -178,14 +175,16 @@ class AutoHandler:
                 MCPToolParameter(
                     "max_repair_rounds",
                     ToolInputType.INTEGER,
-                    "Max repair rounds",
+                    (
+                        "Deprecated and ignored. Auto no longer reviews or repairs the "
+                        "Seed: a written Seed goes straight to the run."
+                    ),
                     required=False,
-                    default=5,
                 ),
                 MCPToolParameter(
                     "skip_run",
                     ToolInputType.BOOLEAN,
-                    "Stop after A-grade Seed",
+                    "Stop after the Seed is written",
                     required=False,
                     default=False,
                 ),
@@ -392,6 +391,15 @@ class AutoHandler:
                     "run -> evaluate -> ralph"
                 ),
             )
+        # Same contract: the Seed repair loop it bounded was removed (#3064).
+        if arguments.get("max_repair_rounds") is not None:
+            structlog.get_logger(__name__).info(
+                "auto.max_repair_rounds.ignored",
+                detail=(
+                    "max_repair_rounds is deprecated and ignored: auto no longer "
+                    "reviews or repairs the Seed"
+                ),
+            )
         attach_execution = _optional_text_arg(arguments, "attach_execution")
         attach_job = _optional_text_arg(arguments, "attach_job")
         attach_session = _optional_text_arg(arguments, "attach_session")
@@ -436,7 +444,6 @@ class AutoHandler:
                 runtime_backend, state.opencode_mode or self.opencode_mode
             )
             max_interview_rounds = state.max_interview_rounds
-            max_repair_rounds = state.max_repair_rounds
             skip_run = requested_skip_run or state.skip_run
             # Resume contract: caller-supplied preferences override persisted
             # ones; otherwise the original session's preferences are reused so
@@ -469,7 +476,6 @@ class AutoHandler:
             runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
             opencode_mode = _resolved_opencode_mode(runtime_backend, self.opencode_mode)
             max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
-            max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
             skip_run = requested_skip_run
             goal_text = goal.strip()
             state = AutoPipelineState(goal=goal_text, cwd=cwd)
@@ -488,7 +494,6 @@ class AutoHandler:
                 goal_text, state.user_preferences
             ).to_dict()
             state.max_interview_rounds = max_interview_rounds
-            state.max_repair_rounds = max_repair_rounds
             if pipeline_timeout_seconds is not None:
                 state.pipeline_timeout_seconds = pipeline_timeout_seconds
         state.runtime_backend = runtime_backend
@@ -532,10 +537,8 @@ class AutoHandler:
 
         context_provider = _build_context_provider(dict(state.user_preferences))
 
-        # Issue #1248 — construct ``lateral_thinker`` ahead of the driver so
-        # the safe-default escalation path (interview phase, runs regardless
-        # of complete-product mode) has the same lateral handle the
-        # EVALUATE → UNSTUCK_LATERAL path uses below. Gate this on the
+        # Issue #1248 — construct ``lateral_thinker`` for the driver's
+        # safe-default escalation path (interview phase). Gate this on the
         # resolved REFLECT stage rather than the default runtime: a default
         # OpenCode plugin profile can still route reflect work to an inline
         # backend that the synchronous auto pipeline can consume.
@@ -568,25 +571,6 @@ class AutoHandler:
             ),
             event_store=runtime_event_store,
         )
-        # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
-        # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
-        # demoted authoring mode as Interview/GenerateSeed so QA executes
-        # inline instead of emitting an out-of-band ``_subagent`` envelope that
-        # the synchronous pipeline cannot consume.
-        #
-        # Issue #1248 — ``lateral_thinker`` is constructed above (before
-        # the driver) so it is available to both the driver's
-        # safe-default escalation path and the pipeline's
-        # EVALUATE → UNSTUCK_LATERAL path. The complete-product evaluator is
-        # plugin-skipped based on the resolved EVALUATE stage, not the default
-        # runtime, so explicit non-plugin stage overrides remain consumable.
-        seed_qa_handler = QAHandler(
-            event_store=runtime_event_store,
-            llm_backend=self.llm_backend,
-            agent_runtime_backend=runtime_plan.interview.runtime_backend,
-            opencode_mode=authoring_opencode_mode,
-        )
-        seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
         watchdog = Watchdog(
             controls=load_runtime_controls(None),
             event_appender=runtime_event_store,
@@ -611,7 +595,6 @@ class AutoHandler:
                 frugality_assurance_explicit=state.frugality_assurance_explicit,
             ),
             store=store,
-            repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
             seed_saver=save_seed,
             seed_loader=load_seed,
             skip_run=skip_run,
@@ -622,8 +605,6 @@ class AutoHandler:
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
             ralph_resumer=ralph_resumer,
-            seed_qa_evaluator=seed_qa_evaluator,
-            lateral_thinker=lateral_thinker,
             watchdog=watchdog,
         )
         result: AutoPipelineResult | None = None
@@ -644,7 +625,7 @@ class AutoHandler:
 class StartAutoHandler:
     """Start an ``ooo auto`` pipeline in the background and return a job ID.
 
-    The full auto pipeline (Socratic interview + repair loops + seed
+    The full auto pipeline (Socratic interview + seed
     generation + optional run/Ralph handoff) routinely runs longer than
     an MCP client's default tool-call timeout. This handler wraps
     :class:`AutoHandler` in a :class:`JobManager`-backed background job so
@@ -706,7 +687,7 @@ class StartAutoHandler:
                 "(rewrites and migrations included), or is a high-risk change, and the user wants "
                 "it to end up working and tested; call it first instead of implementing inline, "
                 "even if the user never says 'ooo'. Result: a bounded interview fills only the "
-                "gaps, an A-grade Seed with acceptance criteria, then execution that verifies each "
+                "gaps, a Seed with acceptance criteria, then execution that verifies each "
                 "criterion, started in the background and returning auto_session_id + job_id "
                 "immediately. Do not use when: the request is a simple question or small "
                 "unambiguous edit, or a validated Seed already exists (use "
@@ -1039,7 +1020,6 @@ class StartAutoHandler:
         state.frugality_assurance_explicit = preferences.frugality_assurance_explicit
         _apply_requested_domain_and_policies(state, arguments)
         state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
-        state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
         state.skip_run = bool(arguments.get("skip_run", False))
         supplied_user_preferences: dict[str, str | None] = {}
         if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
@@ -1574,8 +1554,6 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "seed_path": result.seed_path,
         "seed_origin": result.seed_origin,
         "active_task_class": result.active_task_class,
-        "grade": result.grade,
-        "last_grade": result.last_grade,
         "interview_session_id": result.interview_session_id,
         "execution_id": result.execution_id,
         "job_id": result.job_id,
@@ -1585,6 +1563,8 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     }
     if result.open_questions:
         meta["open_questions"] = list(result.open_questions)
+    if result.assumed_answers:
+        meta["assumed_answers"] = list(result.assumed_answers)
     if result.artifact_state is not None:
         meta["artifact_state"] = result.artifact_state
     if handoff_only:
@@ -2380,8 +2360,6 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append("Product status: not verified complete; execution is still external/pending")
     elif result.status == "detached":
         lines.append("Product status: not verified complete; background work is still running")
-    if result.grade:
-        lines.append(f"Seed grade: {result.grade}")
     if result.interview_session_id:
         lines.append(f"Interview session: {result.interview_session_id}")
     if result.pending_question:
@@ -2390,6 +2368,9 @@ def _format_result(result: AutoPipelineResult) -> str:
     if result.seed_path:
         lines.append(f"Seed: {result.seed_path}")
     lines.append(f"Seed origin: {result.seed_origin}")
+    if result.assumed_answers:
+        lines.append("Assumed answers (chosen by auto, not confirmed; given to the worker):")
+        lines.extend(f"- {item}" for item in result.assumed_answers)
     if result.open_questions:
         lines.append("Open questions (kept in the Seed, not given to the worker):")
         lines.extend(f"- {item}" for item in result.open_questions)

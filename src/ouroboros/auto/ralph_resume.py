@@ -81,9 +81,7 @@ async def reconcile_ralph_checkpoint(
     if isinstance(generation, int) and not isinstance(generation, bool) and generation >= 0:
         state.ralph_current_generation = generation
     if terminal_status == "completed":
-        await pipeline._emit_product_emitted_terminal(
-            state, review=None, stop_reason=stop_reason, resumed=True
-        )
+        await pipeline._emit_product_emitted_terminal(state, stop_reason=stop_reason, resumed=True)
         state.transition(AutoPhase.COMPLETE, "reconciled completed Ralph job")
         pipeline._save(state)
         return pipeline._result(state, ledger)

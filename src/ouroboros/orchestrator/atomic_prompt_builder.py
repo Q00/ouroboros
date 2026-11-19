@@ -11,11 +11,18 @@ it used to build inline.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 import os
 from typing import TYPE_CHECKING, Any
 
-from ouroboros.core.seed import AcceptanceCriterionSpec, SourcedScope
+from ouroboros.core.seed import (
+    AcceptanceCriterionInput,
+    AcceptanceCriterionSpec,
+    SourcedScope,
+    ac_text,
+    ac_texts,
+)
 from ouroboros.core.seed_contract_prompt import (
     render_auto_recursion_guard,
     render_sourced_objective,
@@ -33,6 +40,7 @@ from ouroboros.orchestrator.profile_strategy import (
     render_completion_check,
 )
 from ouroboros.orchestrator.shared_attempt import (
+    SHARED_ATTEMPT_ROOT,
     renders_sourced_objective,
     shares_one_attempt,
     sourced_criteria_aligned,
@@ -68,20 +76,66 @@ def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
     return "\n".join(lines)
 
 
-# Executor attributes holding the run Seed's ``sourced_scope`` and its own
-# criteria texts. The runner sets them (``install_sourced_scope``) the way the
-# check package sets its hooks, and a derived executor inherits them
-# (``inherit_check_package_hooks``).
+def _build_covered_criteria_block(criteria: Sequence[AcceptanceCriterionInput]) -> str:
+    """Render every criterion one shared attempt is judged against (#3072).
+
+    The worker of a shared attempt (``shared_attempt``) does the work every
+    criterion is judged from, so it sees each criterion's text and expected
+    artifacts, in Seed order. Like the single-criterion block, it never shows a
+    ``verify_command`` or an ``output_assertion``.
+    """
+    lines = [
+        "ACCEPTANCE CRITERIA judged from this attempt:",
+        "This one attempt is the work for every criterion below, and the harness "
+        "judges each of them from it. None of them is sibling or future work: all "
+        "of them are the current AC of this dispatch.",
+    ]
+    for number, criterion in enumerate(criteria, 1):
+        lines.append(f"{number}. {ac_text(criterion)}")
+        if isinstance(criterion, AcceptanceCriterionSpec) and criterion.expected_artifacts:
+            lines.append(
+                "   - Expected artifacts: "
+                + ", ".join(criterion.expected_artifacts)
+                + " — ensure they exist in the workspace"
+            )
+    lines.append(
+        "- The harness independently verifies each criterion; complete the work "
+        "from the goal and these criteria and provide truthful evidence."
+    )
+    return "\n".join(lines)
+
+
+# Executor attributes holding the run Seed's ``sourced_scope``, its own
+# criteria texts, and the criteria as written (text or structured spec). The
+# runner sets them (``install_sourced_scope``) the way the check package sets
+# its hooks, and a derived executor inherits them (``inherit_check_package_hooks``).
 SOURCED_SCOPE_ATTR = "sourced_scope"
 SEED_CRITERIA_ATTR = "seed_criteria"
+SEED_CRITERION_SPECS_ATTR = "seed_criterion_specs"
 
 
 def install_sourced_scope(
-    executor: object, scope: SourcedScope | None, criteria: tuple[str, ...] = ()
+    executor: object,
+    scope: SourcedScope | None,
+    criteria: Sequence[AcceptanceCriterionInput] = (),
 ) -> None:
     """Record the run Seed's sourced scope and criteria on ``executor`` for its leaf prompts."""
     setattr(executor, SOURCED_SCOPE_ATTR, scope)
-    setattr(executor, SEED_CRITERIA_ATTR, criteria)
+    setattr(executor, SEED_CRITERIA_ATTR, ac_texts(criteria))
+    setattr(executor, SEED_CRITERION_SPECS_ATTR, tuple(criteria))
+
+
+def _shared_attempt_criteria(
+    executor: object, criteria: tuple[str, ...]
+) -> tuple[AcceptanceCriterionInput, ...]:
+    """The criteria root 0's shared attempt is judged against, as written when recorded.
+
+    The recorded specs carry each criterion's expected artifacts. Specs that
+    are not the Seed's criteria (an executor that recorded only the texts)
+    are not used: the texts are.
+    """
+    specs = tuple(getattr(executor, SEED_CRITERION_SPECS_ATTR, None) or ())
+    return specs if ac_texts(specs) == criteria else criteria
 
 
 def dispatch_renders_sourced_objective(executor: object, root_index: int | None) -> bool:
@@ -145,11 +199,14 @@ class AtomicPromptBuilder:
         # A Seed with ``sourced_scope`` gives the worker only content with a
         # known source: the user's goal verbatim and the binding criteria (or the
         # request itself). The criterion text below is the Seed's own, kept for
-        # the evidence schema so the worker's fields match the verifier's.
+        # the evidence schema so the worker's fields match the verifier's. The
+        # one exception is root 0's shared attempt: every criterion is judged
+        # from it, so it lists each one's text and expected artifacts (#3072).
         task_text = ac_content
         scope = getattr(executor, SOURCED_SCOPE_ATTR, None)
         criteria: tuple[str, ...] = getattr(executor, SEED_CRITERIA_ATTR, ())
         schema_criteria = (ac_content,)
+        covered_criteria: tuple[AcceptanceCriterionInput, ...] = ()
         root_index = parent_ac_index if is_sub_ac else ac_index
         aligned = (
             sourced_criteria_aligned(scope, criteria)
@@ -168,6 +225,8 @@ class AtomicPromptBuilder:
             )
             if shares_one_attempt(scope, criteria):
                 schema_criteria = criteria
+                if root_index == SHARED_ATTEMPT_ROOT:
+                    covered_criteria = _shared_attempt_criteria(executor, criteria)
             seed_goal = scope.goal
             sibling_acs = None  # siblings would list model-written criteria
             if level_contexts and not aligned:
@@ -208,7 +267,11 @@ class AtomicPromptBuilder:
         )
         # Surface only the worker-owned portion of the success contract. Harness
         # commands and assertions remain hidden grading inputs.
-        contract_block = _build_success_contract_block(ac_spec)
+        contract_block = (
+            _build_covered_criteria_block(covered_criteria)
+            if covered_criteria
+            else _build_success_contract_block(ac_spec)
+        )
         if contract_block:
             task_section = f"{task_section}\n\n{contract_block}"
         legacy_context_section = (

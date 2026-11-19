@@ -5,8 +5,8 @@
 A run can be safe, non-destructive, and even useful, while still being wrong for
 the user's stated goal.
 
-This document names that failure mode so `ooo auto`, interview, Seed review, and
-QA can discuss it directly.
+This document names that failure mode so `ooo auto`, interview, and QA can
+discuss it directly.
 
 ## Definition
 
@@ -86,7 +86,7 @@ This failure mode is related to:
 
 - interview convergence;
 - intent preservation;
-- Seed QA;
+- QA;
 - TraceGuard evidence;
 - `ooo auto` final status reporting.
 

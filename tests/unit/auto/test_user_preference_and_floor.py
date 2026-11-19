@@ -5,7 +5,6 @@ Covers gaps 4 and 5 of RFC #809:
 - ``LedgerSource.USER_PREFERENCE`` round-trips and is treated as evidence-backed
 - ``count_active_conflicting_entries`` helper returns correct counts
 - ``deterministic_floor`` formula and clamping behaviour
-- Grading gate blocks Seeds when the floor pushes ambiguity_score above the gate
 - ``AutoAnswerer`` upgrades a CONSERVATIVE_DEFAULT to USER_PREFERENCE when a
   caller-supplied preference matches the question's intent section
 - Stronger sources (REPO_FACT) beat caller-supplied preferences
@@ -20,7 +19,7 @@ from ouroboros.auto.answerer import (
     AutoAnswerer,
     AutoAnswerSource,
 )
-from ouroboros.auto.grading import GradeGate, SeedGrade, deterministic_floor
+from ouroboros.auto.grading import deterministic_floor
 from ouroboros.auto.ledger import (
     SOURCE_PRIORITY,
     LedgerEntry,
@@ -408,25 +407,6 @@ def test_deterministic_floor_clamped_at_one() -> None:
         )
     floor = deterministic_floor(ledger)
     assert floor == 1.0
-
-
-# ---------------------------------------------------------------------------
-# Grade gate consumes ambiguity_score; the floor application happens in the
-# pipeline (covered separately). Here we verify the gate still rejects high
-# ambiguity_score on its own — proving the threshold path works for whatever
-# value the pipeline writes.
-# ---------------------------------------------------------------------------
-
-
-def test_grade_gate_blocks_seed_when_ambiguity_score_above_threshold() -> None:
-    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
-    _fill_minimal_ready_ledger(ledger)
-    # Simulate the floor having been applied to bump score above the 0.20 gate
-    seed = _seed(ambiguity_score=0.35)
-    result = GradeGate().grade_seed(seed, ledger=ledger)
-    assert result.grade == SeedGrade.C
-    assert result.may_run is False
-    assert any(b.code == "high_ambiguity_score" for b in result.blockers)
 
 
 # ---------------------------------------------------------------------------

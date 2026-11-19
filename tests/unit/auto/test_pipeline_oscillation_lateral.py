@@ -17,9 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
-from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -88,8 +86,6 @@ def _state_at_run_phase(tmp_path) -> AutoPipelineState:
     seed = _build_seed()
     state.seed_id = seed.metadata.seed_id
     state.seed_artifact = seed.to_dict()
-    state.last_grade = "A"
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     return state
 
@@ -118,15 +114,6 @@ async def _run_starter_ok(_seed: Seed) -> dict[str, Any]:
 
 async def _seed_generator_unused(_session_id: str) -> Seed:  # pragma: no cover
     raise AssertionError("seed generator should not run when seed_artifact is set")
-
-
-class _PassReviewer(SeedReviewer):
-    def __init__(self) -> None:  # noqa: D401 - intentionally trivial
-        pass
-
-    def review(self, seed: Seed, *, ledger: Any = None) -> SeedReview:  # noqa: ARG002
-        grade = GradeResult(grade=SeedGrade.A, scores={}, findings=[], blockers=[], may_run=True)
-        return SeedReview(grade_result=grade, findings=())
 
 
 def _oscillation_ralph_starter():

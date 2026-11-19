@@ -1,7 +1,7 @@
 // An Auto chat told as a live story: where the pipeline is (stepper), the
-// interview it runs with itself, the review of its spec, and what it is doing
-// now. The data is `session.auto`, folded on the server from the progress
-// events `ouroboros auto --progress-jsonl` writes (gui/auto_progress.py).
+// interview it runs with itself, and what it is doing now. The data is
+// `session.auto`, folded on the server from the progress events
+// `ouroboros auto --progress-jsonl` writes (gui/auto_progress.py).
 
 import { Check, ChevronDown, CircleCheck, CircleDashed, MessagesSquare, Minus, Pause, ScrollText, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -20,23 +20,29 @@ import { runPreparing } from "./Runs";
 
 // ── Steps ────────────────────────────────────────────────────────────
 
-export type AutoStepId = "interview" | "spec" | "review" | "run" | "verify" | "result";
+export type AutoStepId = "interview" | "spec" | "run" | "verify" | "result";
 export type AutoStepState = "done" | "current" | "todo" | "failed" | "stopped" | "warn";
 
-const STEP_IDS: AutoStepId[] = ["interview", "spec", "review", "run", "verify", "result"];
+const STEP_IDS: AutoStepId[] = ["interview", "spec", "run", "verify", "result"];
+const SPEC = STEP_IDS.indexOf("spec");
+const RUN = STEP_IDS.indexOf("run");
+const VERIFY = STEP_IDS.indexOf("verify");
+const RESULT = STEP_IDS.indexOf("result");
 
-// Pipeline phases (auto/state.py AutoPhase) on the six steps. Ralph, evaluation
+// Pipeline phases (auto/state.py AutoPhase) on the five steps. Ralph, evaluation
 // and the lateral recovery all serve verifying the result, so they share a step.
+// Auto no longer reviews its spec (#3064); the review and repair phases of a
+// chat from before that were part of getting the spec ready, so they stay on it.
 const PHASE_STEP: Record<string, number> = {
   created: 0,
   interview: 0,
-  seed_generation: 1,
-  review: 2,
-  repair: 2,
-  run: 3,
-  ralph_handoff: 4,
-  evaluate: 4,
-  unstuck_lateral: 4,
+  seed_generation: SPEC,
+  review: SPEC,
+  repair: SPEC,
+  run: RUN,
+  ralph_handoff: VERIFY,
+  evaluate: VERIFY,
+  unstuck_lateral: VERIFY,
 };
 
 const RESULT_KEY: Record<NonNullable<AutoView["outcome"]>, Key> = {
@@ -73,8 +79,8 @@ function reachedStep(view: AutoView, run: ChatMessage | undefined): number {
     if (step !== undefined) reached = Math.max(reached, step);
   }
   // `complete` is the pipeline handing the run off; the run itself goes on.
-  if (view.phases.some((entry) => entry.phase === "complete") && (view.execution_id || run)) reached = Math.max(reached, 3);
-  if (run?.run_status === "completed") reached = Math.max(reached, 4);
+  if (view.phases.some((entry) => entry.phase === "complete") && (view.execution_id || run)) reached = Math.max(reached, RUN);
+  if (run?.run_status === "completed") reached = Math.max(reached, VERIFY);
   return reached;
 }
 
@@ -88,10 +94,10 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
 
   const states: AutoStepState[] = STEP_IDS.map((_, index) => {
     if (outcome === "completed") return "done";
-    if (outcome === "unverified") return index === 4 ? "warn" : index === 5 || index <= reached ? "done" : "todo";
+    if (outcome === "unverified") return index === VERIFY ? "warn" : index === RESULT || index <= reached ? "done" : "todo";
     if (index < reached) return "done";
     // A failed or stopped run ends on the result step too, in the same state.
-    if (index === 5 && (outcome === "failed" || outcome === "stopped")) return outcome === "failed" ? "failed" : "stopped";
+    if (index === RESULT && (outcome === "failed" || outcome === "stopped")) return outcome === "failed" ? "failed" : "stopped";
     if (index > reached) return "todo";
     if (live) return "current";
     if (outcome === "stopped") return "stopped";
@@ -114,11 +120,6 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
         const count = seed ? (seed.acceptance_total ?? seed.acceptance_criteria?.length ?? 0) : 0;
         return count ? t("auto.caption.criteria", { count }) : null;
       }
-      case "review":
-        if (state === "current" && view.phase === "repair") return t("auto.caption.repair", { n: Math.max(view.repair_round, 1) });
-        // The repair history is on the Seed card; the caption keeps to the grade.
-        if (view.grade) return t("auto.caption.grade", { grade: view.grade });
-        return state === "current" ? t("auto.caption.reviewing") : null;
       case "run":
         if (run?.progress && run.progress.total) return t("auto.caption.criteriaDone", { done: run.progress.done, total: run.progress.total });
         // The run exists but is still planning its tasks, often for minutes.
@@ -146,7 +147,7 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
     id,
     state: states[index],
     caption: captions[index],
-    title: index === 0 && live0 ? t("auto.interview.ceiling", { max: view.max_rounds ?? 0 }) : index === 5 && resultTitle ? resultTitle : (captions[index] ?? undefined),
+    title: index === 0 && live0 ? t("auto.interview.ceiling", { max: view.max_rounds ?? 0 }) : index === RESULT && resultTitle ? resultTitle : (captions[index] ?? undefined),
   }));
 }
 
@@ -158,13 +159,12 @@ function changedCounts(result: ChatMessage | undefined): { files: number; intern
 
 /** The step a failed or stopped Auto chat ended on, for the footer that explains it. */
 export function autoEndStep(steps: AutoStep[]): AutoStep | undefined {
-  return steps.slice(0, 5).find((step) => step.state === "failed" || step.state === "stopped");
+  return steps.slice(0, RESULT).find((step) => step.state === "failed" || step.state === "stopped");
 }
 
 const STEP_LABEL: Record<AutoStepId, Key> = {
   interview: "auto.step.interview",
   spec: "auto.step.spec",
-  review: "auto.step.review",
   run: "auto.step.run",
   verify: "auto.step.verify",
   result: "auto.step.result",
@@ -197,7 +197,7 @@ function StepMark({ state, index }: { state: AutoStepState; index: number }) {
   );
 }
 
-/** The six steps of an Auto chat, across the top of its thread. */
+/** The five steps of an Auto chat, across the top of its thread. */
 export function AutoStepper({ session, view }: { session: ChatSession; view: AutoView }) {
   const { t } = useT();
   const steps = autoSteps(session, view, t);
@@ -230,7 +230,7 @@ export function AutoStepper({ session, view }: { session: ChatSession; view: Aut
           </li>
         ))}
       </ol>
-      {/* Narrow windows show one line for where it is, instead of six labels. */}
+      {/* Narrow windows show one line for where it is, instead of five labels. */}
       <p className="auto-steps-now" aria-hidden>
         <span className="auto-steps-count">{t("auto.steps.position", { n: nowIndex + 1, total: steps.length })}</span>
         <strong>{t(STEP_LABEL[now.id])}</strong>
@@ -470,74 +470,18 @@ export function AutoInterview({ view, live }: { view: AutoView; live: boolean })
   );
 }
 
-// ── Review ───────────────────────────────────────────────────────────
-
-function gradeTone(grade: string | null): Tone {
-  if (!grade) return "muted";
-  if (grade === "A") return "ok";
-  return grade === "B" ? "warn" : "fail";
-}
-
-/** The Seed review: its grade (A runs), how the grade moved, and what the review asked for. */
-export function AutoReview({ view, live }: { view: AutoView; live: boolean }) {
-  const { t } = useT();
-  const repairing = live && view.phase === "repair";
-  const reviewing = live && !view.grade && (view.phase === "review" || view.phase === "seed_generation");
-  const history = view.grades.map((entry) => entry.grade);
-  const moved = history.length > 1 ? history.join(" → ") : null;
-  let title: string;
-  if (repairing) title = t("auto.review.repairing", { n: Math.max(view.repair_round, 1), max: view.max_repair_rounds ?? "–" });
-  else if (view.grade) title = view.grade === "A" ? t("auto.review.passed") : t("auto.review.grade", { grade: view.grade });
-  else if (reviewing) title = t("auto.review.pending");
-  else title = t("auto.review.none");
-  const detail: string[] = [];
-  if (moved) detail.push(moved);
-  if (view.repair_round && !repairing) detail.push(t("auto.review.repairs", { count: view.repair_round }));
-  if (view.grade && view.grade !== "A") detail.push(t("auto.review.required"));
-  const findings = view.grade !== "A" || repairing ? view.findings : [];
-  return (
-    <div className="auto-review" data-tone={repairing ? "muted" : gradeTone(view.grade)}>
-      <div className="auto-review-main">
-        <span className="auto-grade" aria-hidden>
-          <AnimatePresence mode="popLayout" initial={false}>
-            <motion.span key={repairing || reviewing ? "busy" : (view.grade ?? "none")} initial={{ scale: 0.5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.5, opacity: 0 }} transition={SETTLE}>
-              {repairing || reviewing ? <Spinner size={14} /> : (view.grade ?? "–")}
-            </motion.span>
-          </AnimatePresence>
-        </span>
-        <div className="auto-review-text" role="status">
-          <strong>{title}</strong>
-          {detail.length > 0 ? <span>{detail.join(" · ")}</span> : null}
-        </div>
-      </div>
-      {findings.length > 0 ? (
-        <div className="auto-findings">
-          <h4>{t("auto.review.findings")}</h4>
-          <ul>
-            {findings.map((item, index) => (
-              <li key={index}>{item}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 // ── What it is doing now ─────────────────────────────────────────────
 
 /** The line under the thread saying what Auto is doing between the cards, or `null`. */
 export function autoActivity(session: ChatSession, view: AutoView): Key | null {
   if (session.status !== "running") return null;
   const run = lastOf(session.messages, "run");
-  const seed = lastOf(session.messages, "seed");
   switch (view.phase) {
+    // An engine from before #3064 reviews the spec after writing it: still the spec step.
     case "seed_generation":
-      return "auto.activity.seed";
     case "review":
     case "repair":
-      // The Seed card's review line says it, when there is a card.
-      return seed ? null : view.phase === "repair" ? "auto.activity.repair" : "auto.activity.review";
+      return "auto.activity.seed";
     case "run":
       return run ? null : "auto.activity.run";
     case "complete":
@@ -568,7 +512,7 @@ export function autoEnding(session: ChatSession, view: AutoView, t: Translator["
   const step = ended ? t(STEP_LABEL[ended.id]) : null;
   if (view.outcome === "stopped") return { title: "auto.end.stopped.title", body: step ? t("auto.end.stoppedAt", { step }) : "" };
   if (!view.outcome && session.status === "interrupted") return { title: "auto.end.failed.title", body: t("auto.end.restarted") };
-  let body = ended?.id === "review" ? t("auto.end.review") : ended?.id === "run" ? t("auto.end.run") : t("auto.end.other");
+  let body = ended?.id === "run" ? t("auto.end.run") : t("auto.end.other");
   const exited = [...session.messages].reverse().find((message) => message.kind === "error" && message.key === "auto_exited");
   const code = exited?.vars?.code;
   if (code !== undefined && code !== null) body = `${body} ${t("auto.end.code", { code })}`;

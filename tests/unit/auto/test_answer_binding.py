@@ -475,22 +475,6 @@ def test_ledger_defaults_bind_no_ontology_principle_or_exit_condition(partial: b
     assert f"Verification plan: {DEFAULTED_VERIFICATION}" in seed.assumptions
 
 
-def test_repair_of_missing_constraints_adds_no_guessed_limit() -> None:
-    from ouroboros.auto.ledger_seed import CONFIRMED_SCOPE_CONSTRAINT
-    from ouroboros.auto.seed_repairer import SeedRepairer
-    from ouroboros.auto.seed_reviewer import SeedReviewer
-
-    ledger = _ledger_with_defaulted_context()
-    seed = synthesize_seed_from_ledger(ledger).model_copy(update={"constraints": ()})
-    review = SeedReviewer().review(seed, ledger=ledger)
-    assert any(finding.code == "missing_constraints" for finding in review.findings)
-
-    repaired = SeedRepairer().repair_once(seed, review, ledger=ledger).seed
-
-    assert repaired.constraints == (CONFIRMED_SCOPE_CONSTRAINT,)
-    assert repaired.assumptions == seed.assumptions
-
-
 def test_ledger_seed_with_no_confirmed_constraint_keeps_only_the_scope_rule() -> None:
     from ouroboros.auto.ledger_seed import CONFIRMED_SCOPE_CONSTRAINT
 

@@ -13,10 +13,8 @@ from typing import Any
 
 import pytest
 
-from ouroboros.auto.adapters import HandlerEvaluator, HandlerSeedQAEvaluator
-from ouroboros.auto.grading import GradeResult, SeedGrade
+from ouroboros.auto.adapters import HandlerEvaluator
 from ouroboros.auto.interview_driver import AutoInterviewResult
-from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
     _ALLOWED_TRANSITIONS,
     AutoPhase,
@@ -87,8 +85,6 @@ def _state_at_run_phase(tmp_path) -> AutoPipelineState:
     seed = _build_seed()
     state.seed_id = seed.metadata.seed_id
     state.seed_artifact = seed.to_dict()
-    state.last_grade = "A"
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     return state
 
@@ -103,15 +99,6 @@ async def _run_starter_ok(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
 
 async def _seed_generator_unused(_session_id: str) -> Seed:  # pragma: no cover
     raise AssertionError("seed generator should not run when seed_artifact is set")
-
-
-class _PassReviewer(SeedReviewer):
-    def __init__(self) -> None:
-        pass
-
-    def review(self, seed: Seed, *, ledger: Any = None) -> SeedReview:  # noqa: ARG002
-        grade = GradeResult(grade=SeedGrade.A, scores={}, findings=[], blockers=[], may_run=True)
-        return SeedReview(grade_result=grade, findings=())
 
 
 class _StubLedger:
@@ -273,28 +260,6 @@ async def test_handler_evaluator_builds_quality_bar_from_seed_ac() -> None:
     assert args["pass_threshold"] == 0.80
     assert args["seed_content"]  # non-empty seed yaml
     assert args["artifact"] == "stdout: ok\nexit_code: 0"
-
-
-@pytest.mark.asyncio
-async def test_handler_seed_qa_enforces_semantic_ac_granularity() -> None:
-    """The production Auto Seed-QA payload rejects implementation means while
-    preserving genuinely independent outcomes instead of applying a count proxy."""
-    stub = _StubQAHandler()
-    evaluator = HandlerSeedQAEvaluator(stub)
-
-    result = await evaluator(_build_seed(), {"goal": "Build a CLI"})
-
-    assert result.passed is True
-    args = stub.last_arguments
-    assert args is not None
-    quality_bar = args["quality_bar"].lower()
-    assert "observable state of the finished work" in quality_bar
-    assert "not an implementation means" in quality_bar
-    assert "step toward a sibling's outcome" in quality_bar
-    assert "preserve legitimately independent observable outcomes" in quality_bar
-    assert "criterion-count target" in quality_bar
-    assert args["artifact_type"] == "document"
-    assert args["pass_threshold"] == 0.80
 
 
 @pytest.mark.asyncio

@@ -4,11 +4,15 @@ Reads only the durable, machine-readable evidence the executor already wrote
 (verify-gate causes, retry exhaustion, judged outcomes, the audited session
 error type) — never prose — and folds it through
 ``orchestrator.run_failure_cause`` so the MCP result meta, and from there the
-``workflow_outcome`` telemetry event, can say why a run failed.
+``workflow_outcome`` telemetry event, can say why a run failed. When the cause
+is a verify-gate failure that found expected artifacts missing, the meta also
+names those Seed artifact paths (``failure_missing_artifacts``) for the run
+result; ``workflow_outcome`` carries only its allowlisted keys, never them.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import structlog
@@ -17,7 +21,8 @@ from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.failure_taxonomy import LAUNCH_FAILURE_CAUSES
 from ouroboros.orchestrator.run_failure_cause import (
     UNKNOWN_RUN_FAILURE_CAUSE,
-    derive_run_failure_cause,
+    RunFailure,
+    derive_run_failure,
     failure_reason_code_for_run_cause,
 )
 from ouroboros.orchestrator.session import SessionStatus
@@ -32,6 +37,7 @@ _RUN_FAILURE_EVIDENCE_EVENT_TYPES = (
 )
 _RUN_FAILURE_EVIDENCE_LIMIT = 5000
 FAILURE_CAUSE_KEY = "failure_cause"
+FAILURE_MISSING_ARTIFACTS_KEY = "failure_missing_artifacts"
 
 
 def launch_error(cause: str, message: str, **kwargs: Any) -> MCPToolError:
@@ -68,10 +74,12 @@ async def derive_run_failure_meta(
     Reads only the durable, machine-readable evidence the executor already
     wrote (verify-gate causes, retry exhaustion, judged outcomes, the audited
     session error type) — never prose. Best-effort: an unreadable store yields
-    ``unknown`` rather than a failed tool result.
+    ``unknown`` rather than a failed tool result. ``failure_missing_artifacts``
+    is present only when the cause's verify-gate failures recorded missing
+    artifacts.
     """
     terminal_status = session_status.value if session_status is not None else None
-    cause = UNKNOWN_RUN_FAILURE_CAUSE
+    failure = RunFailure(UNKNOWN_RUN_FAILURE_CAUSE)
     try:
         events: list[Any] = []
         for event_type in _RUN_FAILURE_EVIDENCE_EVENT_TYPES:
@@ -89,19 +97,35 @@ async def derive_run_failure_meta(
                 limit=_RUN_FAILURE_EVIDENCE_LIMIT,
             )
         )
-        cause = derive_run_failure_cause(
-            events, session_id=session_id, terminal_status=terminal_status
-        )
+        failure = derive_run_failure(events, session_id=session_id, terminal_status=terminal_status)
     except Exception:
         log.warning(
             "mcp.tool.execute_seed.failure_cause_unavailable",
             session_id=session_id,
             execution_id=execution_id,
         )
-    return {
-        "failure_cause": cause,
-        "failure_reason_code": failure_reason_code_for_run_cause(cause).value,
+    meta: dict[str, Any] = {
+        "failure_cause": failure.cause,
+        "failure_reason_code": failure_reason_code_for_run_cause(failure.cause).value,
     }
+    if failure.missing_artifacts:
+        meta[FAILURE_MISSING_ARTIFACTS_KEY] = list(failure.missing_artifacts)
+    return meta
 
 
-__all__ = ["FAILURE_CAUSE_KEY", "derive_run_failure_meta", "launch_error"]
+def failure_cause_text(meta: Mapping[str, Any]) -> str:
+    """The run result's ``Failure Cause`` value: the cause, then the artifacts it found missing."""
+    cause = str(meta[FAILURE_CAUSE_KEY])
+    missing = meta.get(FAILURE_MISSING_ARTIFACTS_KEY)
+    if isinstance(missing, list) and missing:
+        return f"{cause} (missing: {', '.join(str(path) for path in missing)})"
+    return cause
+
+
+__all__ = [
+    "FAILURE_CAUSE_KEY",
+    "FAILURE_MISSING_ARTIFACTS_KEY",
+    "derive_run_failure_meta",
+    "failure_cause_text",
+    "launch_error",
+]

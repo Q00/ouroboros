@@ -2,8 +2,8 @@
 
 The auto package is intentionally independent from the existing manual
 ``interview``/``seed``/``run`` surfaces.  It provides bounded, serializable
-state plus deterministic quality gates that a higher-level supervisor can use
-before starting execution.
+state, the auto interview, and the pipeline that writes a Seed and hands it to
+the run.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ouroboros.auto.answerer import AutoAnswer, AutoAnswerer, AutoAnswerSource
-    from ouroboros.auto.grading import GradeGate, GradeResult, SeedGrade
     from ouroboros.auto.interview_driver import (
         AutoInterviewDriver,
         AutoInterviewResult,
@@ -26,8 +25,6 @@ if TYPE_CHECKING:
         SeedDraftLedger,
     )
     from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
-    from ouroboros.auto.seed_repairer import RepairResult, SeedRepairer
-    from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
     from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoPolicy, AutoStore
 
 __all__ = [
@@ -43,18 +40,10 @@ __all__ = [
     "AutoPolicy",
     "AutoStore",
     "AssumptionRecord",
-    "GradeGate",
     "InterviewTurn",
-    "GradeResult",
     "LedgerEntry",
     "LedgerSection",
-    "RepairResult",
-    "ReviewFinding",
     "SeedDraftLedger",
-    "SeedReview",
-    "SeedReviewer",
-    "SeedGrade",
-    "SeedRepairer",
 ]
 
 _EXPORTS = {
@@ -70,18 +59,10 @@ _EXPORTS = {
     "AutoPolicy": "ouroboros.auto.state",
     "AutoStore": "ouroboros.auto.state",
     "AssumptionRecord": "ouroboros.auto.ledger",
-    "GradeGate": "ouroboros.auto.grading",
-    "GradeResult": "ouroboros.auto.grading",
     "InterviewTurn": "ouroboros.auto.interview_driver",
     "LedgerEntry": "ouroboros.auto.ledger",
     "LedgerSection": "ouroboros.auto.ledger",
-    "RepairResult": "ouroboros.auto.seed_repairer",
-    "ReviewFinding": "ouroboros.auto.seed_reviewer",
     "SeedDraftLedger": "ouroboros.auto.ledger",
-    "SeedGrade": "ouroboros.auto.grading",
-    "SeedRepairer": "ouroboros.auto.seed_repairer",
-    "SeedReview": "ouroboros.auto.seed_reviewer",
-    "SeedReviewer": "ouroboros.auto.seed_reviewer",
 }
 
 

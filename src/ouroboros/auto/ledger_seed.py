@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 import re
 from typing import Any
@@ -99,7 +100,9 @@ _UNCONFIRMED_FAILURE_MODES = "none confirmed"
 
 # Every ledger section except the goal. Only binding entries fill the Seed's
 # binding fields (constraints, criteria, ontology, principles, exit
-# conditions); the rest are carried as Seed ``assumptions``.
+# conditions); the rest are carried as Seed ``assumptions``. A label names the
+# section an assumption fills; the value after it is kept verbatim, in the
+# language it was written in.
 _ASSUMPTION_SECTIONS = (
     "constraints",
     "non_goals",
@@ -370,11 +373,8 @@ def partial_seed_from_evidence(
     )
 
     # Degraded seeds carry a deliberately elevated ambiguity floor so that
-    # downstream grading observers can see the deadline-driven uncertainty
-    # without us having to special-case the gate logic here. The grade gate
-    # (PR-C) decides whether to suppress the high_ambiguity_score blocker
-    # based on ``metadata.degraded`` / ``generation_mode`` — it does not
-    # re-derive uncertainty from the score itself.
+    # downstream observers can see the deadline-driven uncertainty in the
+    # Seed's ``ambiguity_score``.
     floor = deterministic_floor(ledger)
     ambiguity_score = max(0.05, floor)
     if degraded:
@@ -476,6 +476,22 @@ def _is_repo_fact(entry: LedgerEntry) -> bool:
     return REPO_FACT_KEY_INFIX in entry.key
 
 
+def _is_assumed_answer(entry: LedgerEntry) -> bool:
+    """Whether ``entry`` holds the answer auto chose for an interviewer question.
+
+    Decided by provenance alone: the entry carries the question
+    (``LedgerEntry.question``), the answer refiner wrote its value for this
+    goal (``LedgerEntry.refined``), and the requester did not decline the
+    question (``LedgerEntry.requester_unanswered``). It does not bind (callers
+    pass non-binding entries only): it reaches the worker as a labelled
+    assumption (``SourcedScope.assumptions``), and its question is not open.
+    A question auto decided nothing for keeps no such entry: the
+    investigator's not-settled reply, the answerer's fixed templates and the
+    refiner's fixed fallback are never marked refined.
+    """
+    return bool(entry.question.strip()) and entry.refined and not entry.requester_unanswered
+
+
 def _latest_value(ledger: SeedDraftLedger, section_name: str) -> str:
     values = _active_values(ledger, section_name)
     if not values:
@@ -488,33 +504,90 @@ def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
     """Return the ledger's unconfirmed requirement drafts as Seed assumptions.
 
     These are the active entries of every section but the goal that do not
-    bind (see :attr:`LedgerEntry.binds_seed`) and that no interviewer question
-    produced: auto's conservative defaults and assumptions. The worker sees
-    them as assumptions it may override. The generic safe-default closure
-    block is interview bookkeeping, not a statement about the task, so it is
-    left out.
+    bind (see :attr:`LedgerEntry.binds_seed`) and that either no interviewer
+    question produced (auto's conservative defaults and assumptions) or hold
+    the answer auto chose for an interviewer question (``_is_assumed_answer``,
+    kept verbatim as in :func:`ledger_assumed_answers`). The generic
+    safe-default closure block is interview bookkeeping, not a statement about
+    the task, so it is left out.
 
-    An entry that answers an interviewer question (``LedgerEntry.question``)
-    renders nothing here, neither its drafted answer nor its question: the
-    question goes to ``Seed.open_questions`` (``ledger_open_questions``), which
-    no execution prompt renders. A requester's answer renders in
+    Any other entry that answers an interviewer question renders nothing
+    here, neither its draft nor its question: auto decided nothing for it, so
+    the question goes to ``Seed.open_questions`` (``ledger_open_questions``),
+    which no execution prompt renders. A requester's answer renders in
     ``Seed.requester_answers`` instead (``ledger_requester_answers``).
     """
-    lines: list[str] = []
+    return _assumption_lines(ledger, include_unasked=True)
+
+
+def ledger_assumed_answers(ledger: SeedDraftLedger) -> tuple[str, ...]:
+    """The answers auto chose for its interviewer questions, as labelled assumption lines.
+
+    Each line is the section label (``Non-goal: ``, ``Failure modes: ``, none
+    for constraints and criteria) followed by the entry's value exactly as the
+    refiner wrote it, outer whitespace aside: no punctuation is stripped and
+    nothing is split. In section and ledger order. They never bind; ``ooo
+    auto`` gives them to the worker as ``SourcedScope.assumptions``, under a
+    heading that says nobody confirmed them.
+    """
+    return _assumption_lines(ledger, include_unasked=False)
+
+
+def _assumption_lines(ledger: SeedDraftLedger, *, include_unasked: bool) -> tuple[str, ...]:
+    """Labelled assumption lines: auto's assumed answers, and optionally its unasked drafts.
+
+    An unasked draft is cleaned and split like every ledger line
+    (``_lines_from_section``); an assumed answer is kept verbatim. One value
+    written for several sections is listed once, under the first section's
+    label, the way the interview answer states it once.
+    """
+    lines: dict[str, str] = {}
     for section_name in _ASSUMPTION_SECTIONS:
         prefix = _ASSUMPTION_PREFIXES.get(
             section_name, f"{section_name.replace('_', ' ').capitalize()}: "
         )
-        values = _lines_from_section(
-            ledger,
-            section_name,
-            split_clauses=False,
-            binding=False,
-            closure=False,
-            asked=False,
-        )
-        lines.extend(f"{prefix}{value}" for value in values)
-    return tuple(dict.fromkeys(lines))
+        values: list[str] = []
+        if include_unasked:
+            values.extend(
+                _lines_from_section(
+                    ledger,
+                    section_name,
+                    split_clauses=False,
+                    binding=False,
+                    closure=False,
+                    keep=lambda entry: not entry.question.strip(),
+                )
+            )
+        values.extend(entry.value.strip() for entry in _assumed_entries(ledger, section_name))
+        for value in values:
+            lines.setdefault(value, f"{prefix}{value}")
+    return tuple(lines.values())
+
+
+def _assumed_entries(ledger: SeedDraftLedger, section_name: str) -> tuple[LedgerEntry, ...]:
+    """The active, non-binding entries of a section that hold an answer auto chose."""
+    return tuple(
+        entry
+        for entry in _active_entries(ledger, section_name)
+        if not entry.binds_seed
+        and _is_assumed_answer(entry)
+        and not _is_requester_answer(entry)
+        and not _is_repo_fact(entry)
+    )
+
+
+def _decided_questions(ledger: SeedDraftLedger) -> frozenset[str]:
+    """Interviewer questions auto chose an answer for in at least one section.
+
+    The refiner writes each section of an answer in its own call, and a call
+    that fails leaves that section's template in place. The question is still
+    decided: its chosen answer reaches the worker, so it is not open.
+    """
+    return frozenset(
+        entry.question.strip()
+        for section_name in _ASSUMPTION_SECTIONS
+        for entry in _assumed_entries(ledger, section_name)
+    )
 
 
 def ledger_open_questions(ledger: SeedDraftLedger) -> tuple[str, ...]:
@@ -522,12 +595,17 @@ def ledger_open_questions(ledger: SeedDraftLedger) -> tuple[str, ...]:
 
     The split is by entry provenance, never by text: an active entry that does
     not bind and carries the interviewer's question (``LedgerEntry.question``,
-    stamped where the entry is created) holds a draft nobody confirmed. That
-    covers the investigator's not-found entries (``.investigated.<round>``),
-    auto's own drafted answers, and drafts kept because the requester gave no
-    answer (``LedgerEntry.requester_unanswered``). Requester answers and
-    checked repository facts are answers, so they are never open questions.
+    stamped where the entry is created) holds a draft nobody confirmed. The
+    question is open unless auto chose an answer for it in at least one
+    section (``_decided_questions``); a section whose refiner call failed and
+    kept the template does not reopen it. Open questions therefore cover the
+    investigator's not-settled entries (``NOT_SETTLED_VALUE``), questions only
+    the answerer's template answered, and drafts kept because the requester
+    gave no answer (``LedgerEntry.requester_unanswered``). Requester answers,
+    checked repository facts and the answers auto chose are answers, so they
+    are never open questions.
     """
+    decided = _decided_questions(ledger)
     questions: list[str] = []
     for section_name in _ASSUMPTION_SECTIONS:
         questions.extend(
@@ -535,6 +613,7 @@ def ledger_open_questions(ledger: SeedDraftLedger) -> tuple[str, ...]:
             for entry in _active_entries(ledger, section_name)
             if not entry.binds_seed
             and entry.question.strip()
+            and entry.question.strip() not in decided
             and not _is_requester_answer(entry)
             and not _is_repo_fact(entry)
         )
@@ -546,8 +625,10 @@ def with_ledger_assumptions(seed: Seed, ledger: SeedDraftLedger) -> Seed:
 
     The interview transcript withholds auto's guessed answers from Seed
     extraction (``bigbang/answer_provenance.py``), so they cannot become
-    constraints or criteria; this keeps them visible to the worker as
-    non-binding assumptions. Existing assumptions keep their order first.
+    constraints or criteria; this keeps them in the Seed as non-binding
+    assumptions. Existing assumptions keep their order first. The worker of a
+    Seed with ``sourced_scope`` sees only the answers auto chose
+    (``SourcedScope.assumptions``), not this mixed list.
     """
     merged = tuple(dict.fromkeys((*seed.assumptions, *ledger_assumptions(ledger))))
     if merged == seed.assumptions:
@@ -604,9 +685,11 @@ def ledger_sourced_scope(ledger: SeedDraftLedger) -> SourcedScope | None:
     The goal is the user's request verbatim (the ``USER_GOAL_KEY`` entry). The
     constraints, non-goals and criteria are the entries that bind
     (``LedgerEntry.binds_seed``), split the same way a ledger-synthesized Seed
-    splits them. The decision is by entry provenance only; nothing reads the
-    text. Without an active binding user goal there is no record (``None``),
-    and the Seed renders as before.
+    splits them. The assumptions are the answers auto chose for its interview
+    questions (:func:`ledger_assumed_answers`); they never bind and stay out of
+    the constraints and criteria. The decision is by entry provenance only;
+    nothing reads the text. Without an active binding user goal there is no
+    record (``None``), and the Seed renders as before.
     """
     goal_entries = [
         entry
@@ -623,6 +706,7 @@ def ledger_sourced_scope(ledger: SeedDraftLedger) -> SourcedScope | None:
         acceptance_criteria=_lines_from_section(
             ledger, "acceptance_criteria", split_clauses=False, binding=True
         ),
+        assumptions=ledger_assumed_answers(ledger),
     )
 
 
@@ -644,12 +728,22 @@ def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
     and exit conditions are written by the Seed generator from the whole
     interview, unanswered questions included, so they stay in the Seed for the
     record and for verification only.
+
+    The Seed's open questions are reconciled with the ledger: a question the
+    Seed already lists stays unless auto has since chosen an answer for it
+    (``_decided_questions``), so a Seed recorded again (repair, resume) never
+    keeps a decided question open.
     """
     seed = with_requester_answers(with_ledger_assumptions(seed, ledger), ledger)
     merged = tuple(dict.fromkeys((*seed.repo_facts, *ledger_repo_facts(ledger))))
     if merged != seed.repo_facts:
         seed = seed.model_copy(update={"repo_facts": merged})
-    questions = tuple(dict.fromkeys((*seed.open_questions, *ledger_open_questions(ledger))))
+    decided = _decided_questions(ledger)
+    questions = tuple(
+        question
+        for question in dict.fromkeys((*seed.open_questions, *ledger_open_questions(ledger)))
+        if question.strip() not in decided
+    )
     if questions != seed.open_questions:
         seed = seed.model_copy(update={"open_questions": questions})
     scope = ledger_sourced_scope(ledger)
@@ -665,7 +759,7 @@ def _lines_from_section(
     split_clauses: bool = True,
     binding: bool | None = None,
     closure: bool = True,
-    asked: bool | None = None,
+    keep: Callable[[LedgerEntry], bool] | None = None,
 ) -> tuple[str, ...]:
     """Split a ledger section's active values into deduplicated lines.
 
@@ -678,8 +772,7 @@ def _lines_from_section(
 
     ``binding`` keeps only entries that bind (``True``) or only those that do
     not (``False``); ``None`` keeps both. ``closure=False`` drops the
-    safe-default closure entry. ``asked`` keeps only entries that answer an
-    interviewer question (``True``) or only those that do not (``False``).
+    safe-default closure entry. ``keep`` keeps only the entries it accepts.
     """
     pattern = r"\r?\n\s*[-*]\s+" if not split_clauses else r"(?:\r?\n\s*[-*]\s+|\s*;\s+)"
     lines: list[str] = []
@@ -694,7 +787,7 @@ def _lines_from_section(
             continue
         if not closure and entry.key == f"{section_name}.safe_default_finalization":
             continue
-        if asked is not None and bool(entry.question.strip()) is not asked:
+        if keep is not None and not keep(entry):
             continue
         value = entry.value.strip()
         parts = re.split(pattern, value)

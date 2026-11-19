@@ -48,10 +48,9 @@ class DecisionProvenance(StrEnum):
     user-confirmed one, so degraded seeds (whose contract fields contained raw
     question text) executed silently.
 
-    The two gated classes — :data:`MODEL_INFERRED` and :data:`TIMEOUT_DEFAULT` —
-    must pass a low-ambiguity criterion (see :mod:`ouroboros.auto.grading`)
-    before the ledger can become an executable Seed. The other three are
-    grounded/human-authorized and pass the gate unconditionally.
+    :data:`MODEL_INFERRED` and :data:`TIMEOUT_DEFAULT` mark decisions no human
+    confirmed; the other three are grounded/human-authorized. The counts are
+    surfaced on ``SeedMetadata.decision_provenance`` for audit.
     """
 
     USER_CONFIRMED = "user_confirmed"
@@ -232,9 +231,10 @@ class LedgerEntry:
     provenance: DecisionProvenance | str | None = None
     # The interviewer's question this entry answers, when it came from one.
     # Empty for entries no interview question produced (templated fills,
-    # gap reopening, legacy sessions). An entry that does not bind is kept as
-    # this open question (``Seed.open_questions``), never as its drafted value,
-    # and neither reaches the worker.
+    # gap reopening, legacy sessions). An entry that does not bind and holds
+    # no answer auto chose (``refined``) is kept as this open question
+    # (``Seed.open_questions``), never as its drafted value, and neither
+    # reaches the worker.
     question: str = ""
     # True for auto's draft kept because the requester was asked this question
     # and gave no answer (``auto/requester.py``). The requester already said the
@@ -242,6 +242,14 @@ class LedgerEntry:
     # question; the question is kept in ``Seed.open_questions``. Omitted from
     # ``to_dict`` when False.
     requester_unanswered: bool = False
+    # True when the answer refiner wrote this value for the interview question
+    # (``investigator.settle``): a concrete answer for this goal, in the goal's
+    # language, not the answerer's fixed template or the refiner's fixed
+    # fallback (``mark_refined``). Such an answer to an
+    # interviewer question is auto's choice: it still does not bind, but it
+    # reaches the worker as a labelled assumption (``Seed.sourced_scope``) and
+    # its question is no longer open. Omitted from ``to_dict`` when False.
+    refined: bool = False
 
     def __post_init__(self) -> None:
         self.source = LedgerSource(str(self.source))
@@ -297,6 +305,8 @@ class LedgerEntry:
             data.pop("question", None)
         if not self.requester_unanswered:
             data.pop("requester_unanswered", None)
+        if not self.refined:
+            data.pop("refined", None)
         return data
 
     @classmethod
@@ -331,6 +341,9 @@ class LedgerEntry:
             raise ValueError(msg)
         if not isinstance(data.get("requester_unanswered", False), bool):
             msg = "ledger entry requester_unanswered must be a boolean"
+            raise ValueError(msg)
+        if not isinstance(data.get("refined", False), bool):
+            msg = "ledger entry refined must be a boolean"
             raise ValueError(msg)
         try:
             confidence = float(data["confidence"])
@@ -635,8 +648,8 @@ class SeedDraftLedger:
         """Return the count of entries currently flagged as CONFLICTING.
 
         Used by the deterministic_floor computation in :mod:`grading` so the
-        A-grade gate can see objective conflict pressure even when the LLM
-        under-reports ``ambiguity_score``.
+        Seed's ``ambiguity_score`` reflects objective conflict pressure even
+        when the LLM under-reports it.
         """
         return sum(
             1

@@ -25,6 +25,10 @@ class AutoPhase(StrEnum):
     CREATED = "created"
     INTERVIEW = "interview"
     SEED_GENERATION = "seed_generation"
+    # Retired with the Seed review stage (#3064): a written Seed goes straight
+    # to RUN. Nothing enters these phases any more; the members stay so state
+    # files saved in them still load, and a resume moves them back to
+    # SEED_GENERATION, which writes the persisted Seed and starts the run.
     REVIEW = "review"
     REPAIR = "repair"
     RUN = "run"
@@ -168,8 +172,6 @@ class SeedOrigin(StrEnum):
 DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
     AutoPhase.INTERVIEW.value: 600,
     AutoPhase.SEED_GENERATION.value: 300,
-    AutoPhase.REVIEW.value: 90,
-    AutoPhase.REPAIR.value: 90,
     AutoPhase.RUN.value: 60,
     AutoPhase.EVALUATE.value: 90,
     AutoPhase.UNSTUCK_LATERAL.value: 60,
@@ -210,7 +212,7 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE = _apply_phase_timeout_env_overrides(
 )
 
 # RFC #809 Phase 2.2b — closed-loop recovery cap. Three EVALUATE rounds is
-# the SeedRepairer convention re-applied to the EVALUATE ⇄ UNSTUCK_LATERAL
+# the former Seed repair-round convention re-applied to the EVALUATE ⇄ UNSTUCK_LATERAL
 # retry cycle. Past three rounds the failure mode is structural rather
 # than a transient grading miss; the pipeline blocks for human review
 # (with the two functional operator choices documented at
@@ -241,7 +243,7 @@ _VALID_RECOVERY_GUARD_TAGS: frozenset[str] = frozenset(
 # Top-level pipeline deadline (Q00/ouroboros#779). Default of 7200s (2h) covers
 # a typical product-bootstrap chain — interview ≤ 600s (one LLM call per round
 # across up to 12 rounds, capped at the phase budget) + seed gen ≤ 300s +
-# review/repair ≤ 90s × 5 + run kick-off + ralph 10 generations × 5–15 min —
+# run kick-off + ralph 10 generations × 5–15 min —
 # with headroom, and stays well under "user has gone home" scenarios.
 DEFAULT_PIPELINE_TIMEOUT_SECONDS: float = 7200.0
 MIN_PIPELINE_TIMEOUT_SECONDS: float = 60.0
@@ -362,15 +364,16 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
     },
-    AutoPhase.SEED_GENERATION: {AutoPhase.REVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
-    AutoPhase.REVIEW: {
-        AutoPhase.REPAIR,
+    # A written Seed starts the run, or completes the session under skip-run.
+    AutoPhase.SEED_GENERATION: {
         AutoPhase.RUN,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
     },
-    AutoPhase.REPAIR: {AutoPhase.REVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
+    # Retired review/repair phases (#3064) only leave, back to SEED_GENERATION.
+    AutoPhase.REVIEW: {AutoPhase.SEED_GENERATION, AutoPhase.BLOCKED, AutoPhase.FAILED},
+    AutoPhase.REPAIR: {AutoPhase.SEED_GENERATION, AutoPhase.BLOCKED, AutoPhase.FAILED},
     AutoPhase.RUN: {
         AutoPhase.COMPLETE,
         AutoPhase.RALPH_HANDOFF,
@@ -414,7 +417,6 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     AutoPhase.BLOCKED: {
         AutoPhase.INTERVIEW,
         AutoPhase.SEED_GENERATION,
-        AutoPhase.REVIEW,
         AutoPhase.RUN,
         AutoPhase.RALPH_HANDOFF,
         AutoPhase.EVALUATE,
@@ -423,7 +425,6 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     AutoPhase.FAILED: {
         AutoPhase.INTERVIEW,
         AutoPhase.SEED_GENERATION,
-        AutoPhase.REVIEW,
         AutoPhase.RUN,
         AutoPhase.RALPH_HANDOFF,
         AutoPhase.EVALUATE,
@@ -451,6 +452,10 @@ class AutoPipelineState:
     auto_session_id: str = field(default_factory=lambda: f"auto_{uuid4().hex[:12]}")
     phase: AutoPhase = AutoPhase.CREATED
     policy: AutoPolicy = AutoPolicy.CONSERVATIVE
+    # Legacy Seed review fields (#3064): ``required_grade``, ``max_repair_rounds``,
+    # ``last_grade``, ``findings`` and ``repair_round`` belonged to the retired
+    # Seed review stage. The pipeline no longer reads or writes them; they stay
+    # so state files written before the removal load and round-trip unchanged.
     required_grade: str = "A"
     runtime_backend: str | None = None
     opencode_mode: str | None = None
@@ -881,9 +886,10 @@ class AutoPipelineState:
 
         * :attr:`AutoPhase.COMPLETE` -> :attr:`AutoResumeCapability.NONE`
           (completed sessions render no resume hint).
-        * :attr:`AutoPhase.REPAIR` is non-terminal — a fresh ``--resume``
-          will transition the state back to ``REVIEW``, so the capability
-          is :attr:`AutoResumeCapability.RESUME`.
+        * The retired :attr:`AutoPhase.REVIEW` / :attr:`AutoPhase.REPAIR`
+          phases are non-terminal — a fresh ``--resume`` moves the state back
+          to ``SEED_GENERATION``, which writes the persisted Seed and starts
+          the run, so the capability is :attr:`AutoResumeCapability.RESUME`.
         * Other non-terminal phases also classify as ``RESUME``.
         * :attr:`AutoPhase.BLOCKED` / :attr:`AutoPhase.FAILED` normally
           consult ``_recoverable_phase_for_tool``; an unmapped or missing
@@ -915,10 +921,10 @@ class AutoPipelineState:
             return AutoResumeCapability.NONE
 
         if self.phase not in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
-            # CREATED, INTERVIEW, SEED_GENERATION, REVIEW, REPAIR, RUN.
-            # Pipeline.run() will simply continue from the current phase.
-            # REPAIR explicitly transitions to REVIEW on resume, so this is
-            # still a true RESUME (not a partial one).
+            # CREATED, INTERVIEW, SEED_GENERATION, RUN, and the retired
+            # REVIEW / REPAIR. Pipeline.run() continues from the current
+            # phase; a retired phase moves back to SEED_GENERATION on resume,
+            # so this is still a true RESUME (not a partial one).
             return AutoResumeCapability.RESUME
 
         # --- BLOCKED or FAILED ---
@@ -947,7 +953,8 @@ class AutoPipelineState:
             # interview.start); treat as a retry rather than asserting.
             return AutoResumeCapability.RETRY
 
-        # Seed generation. We reconcile seed_artifact, seed_path, and
+        # Seed generation, including the Seed writer and the retired review
+        # stage's tools. We reconcile seed_artifact, seed_path, and
         # interview_session_id: a persisted artifact is the strongest
         # signal; a seed_path means we can re-load the Seed; otherwise we
         # need the interview session to regenerate.
@@ -961,14 +968,6 @@ class AutoPipelineState:
                 # itself re-runs from scratch — no prior generation work
                 # is reused. That matches the RETRY semantics, not RESUME.
                 return AutoResumeCapability.RETRY
-            return AutoResumeCapability.NONE
-
-        # Review phase tools (seed_saver / grade_gate / seed_loader).
-        if recoverable == AutoPhase.REVIEW:
-            if self.seed_artifact:
-                return AutoResumeCapability.RESUME
-            if self.seed_path:
-                return AutoResumeCapability.PARTIAL_RESUME
             return AutoResumeCapability.NONE
 
         # Run phase. Persisted run handles let us short-circuit to
@@ -1287,8 +1286,6 @@ class AutoPipelineState:
         required_timeout_phases = {
             AutoPhase.INTERVIEW.value,
             AutoPhase.SEED_GENERATION.value,
-            AutoPhase.REVIEW.value,
-            AutoPhase.REPAIR.value,
             AutoPhase.RUN.value,
         }
         missing_timeout_phases = sorted(

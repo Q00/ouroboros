@@ -291,9 +291,10 @@ class SourcedScope(BaseModel, frozen=True):
     """The Seed content with a known source, recorded where the Seed is made.
 
     ``ooo auto`` stamps it from ledger provenance: the goal entry the user
-    wrote and the constraints and criteria whose entries bind
-    (``LedgerEntry.binds_seed``). When a Seed carries it, the worker's
-    execution prompt renders only this record, ``requester_answers`` and
+    wrote, the constraints and criteria whose entries bind
+    (``LedgerEntry.binds_seed``), and the answers auto chose for its own
+    interview questions. When a Seed carries it, the worker's execution
+    prompt renders only this record, ``requester_answers`` and
     ``repo_facts``. The model-written fields (``goal`` as rewritten,
     ``constraints``, ``acceptance_criteria``, ``assumptions``, the ontology,
     the evaluation principles and the exit conditions) stay in the Seed for
@@ -303,11 +304,17 @@ class SourcedScope(BaseModel, frozen=True):
         goal: The user's request, verbatim.
         constraints: Constraints and non-goals that bind by ledger provenance, verbatim.
         acceptance_criteria: Acceptance criteria that bind by ledger provenance, verbatim.
+        assumptions: Answers auto chose for interview questions nobody
+            confirmed (ledger entries that do not bind, carry the question and
+            hold the answer refiner's value), verbatim. They never bind: the
+            worker sees them in their own section, labelled as unconfirmed,
+            never as constraints or criteria.
     """
 
     goal: str = Field(..., min_length=1)
     constraints: tuple[str, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
+    assumptions: tuple[str, ...] = ()
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -872,15 +879,20 @@ class Seed(BaseModel, frozen=True):
             answer and its checked evidence quoted verbatim. They describe the
             current code and are never rewritten into constraints or criteria.
         open_questions: Interview questions nobody answered, verbatim and in
-            ledger order. They stay in the Seed file and the auto result so
-            the self-interview is visible, but no execution prompt renders them:
-            a worker shown a question with its candidate answers builds the fix
-            around one of them.
-        sourced_scope: The goal, constraints and criteria with a known source,
-            stamped by ``ooo auto`` from ledger provenance (see
-            :class:`SourcedScope`). When set, only it, ``requester_answers`` and
-            ``repo_facts`` reach the worker's execution prompt. ``None`` keeps
-            the historical rendering of every field.
+            ledger order: auto decided nothing for them (the code does not
+            settle the question, only the answerer's fixed template answered
+            it, or the requester gave no answer). They stay
+            in the Seed file and the auto result so the self-interview is
+            visible, but no execution prompt renders them: a worker shown a
+            question with its candidate answers builds the fix around one of
+            them. A question auto chose an answer for is not open; the answer
+            is in ``sourced_scope.assumptions``.
+        sourced_scope: The goal, constraints, criteria and auto's unconfirmed
+            interview answers with a known source, stamped by ``ooo auto`` from
+            ledger provenance (see :class:`SourcedScope`). When set, only it,
+            ``requester_answers`` and ``repo_facts`` reach the worker's
+            execution prompt. ``None`` keeps the historical rendering of every
+            field.
         ontology_schema: Conceptual lens for workflow coherence.
         evaluation_principles: Principles for evaluating outputs.
         exit_conditions: Conditions for terminating the workflow.
@@ -971,8 +983,9 @@ class Seed(BaseModel, frozen=True):
     open_questions: tuple[str, ...] = Field(
         default_factory=tuple,
         description=(
-            "Interview questions nobody answered, verbatim and in order; kept for the "
-            "record and never rendered into the worker's execution input"
+            "Interview questions nobody answered and auto decided nothing for, verbatim "
+            "and in order; kept for the record and never rendered into the worker's "
+            "execution input"
         ),
     )
     material_evidence_refs: tuple[MaterialEvidenceRef, ...] = Field(
@@ -983,9 +996,10 @@ class Seed(BaseModel, frozen=True):
     sourced_scope: SourcedScope | None = Field(
         default=None,
         description=(
-            "The goal, constraints and criteria with a known source; when set, the "
-            "worker's execution prompt renders only these plus requester answers and "
-            "repo facts. None (every Seed not made by ooo auto) renders the Seed as before"
+            "The goal, constraints, criteria and auto's unconfirmed interview answers "
+            "with a known source; when set, the worker's execution prompt renders only "
+            "these plus requester answers and repo facts. None (every Seed not made by "
+            "ooo auto) renders the Seed as before"
         ),
     )
 
@@ -1174,9 +1188,13 @@ class Seed(BaseModel, frozen=True):
             excluded.add("open_questions")
         if not self.material_evidence_refs:
             excluded.add("material_evidence_refs")
+        exclude: dict[str, Any] = dict.fromkeys(excluded, True)
         if self.sourced_scope is None:
-            excluded.add("sourced_scope")
-        data = self.model_dump(mode="json", by_alias=True, exclude=excluded)
+            exclude["sourced_scope"] = True
+        elif not self.sourced_scope.assumptions:
+            # Likewise a sourced scope without assumptions serializes as before.
+            exclude["sourced_scope"] = {"assumptions"}
+        data = self.model_dump(mode="json", by_alias=True, exclude=exclude)
         data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
         return data
 

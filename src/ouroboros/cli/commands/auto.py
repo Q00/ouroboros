@@ -1,4 +1,4 @@
-"""Auto command for goal → A-grade Seed → execution handoff."""
+"""Auto command for goal → interview → Seed → execution handoff."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from ouroboros.auto.adapters import (
     HandlerLateralThinker,
     HandlerRunStarter,
     HandlerSeedGenerator,
-    HandlerSeedQAEvaluator,
     build_answer_refiner,
     load_seed,
     save_seed,
@@ -50,7 +49,6 @@ from ouroboros.auto.runtime_routing import (
     demote_plugin_opencode_mode,
     resolve_auto_stage_runtime_plan,
 )
-from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import (
     DEFAULT_PIPELINE_TIMEOUT_SECONDS,
     MAX_PIPELINE_TIMEOUT_SECONDS,
@@ -82,7 +80,6 @@ from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, Intervie
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
-from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.run_successors import build_run_successor_handler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
@@ -173,16 +170,14 @@ def auto_command(
         int | None,
         typer.Option(
             "--max-repair-rounds",
-            min=1,
             help=(
-                "Maximum Seed repair rounds. Defaults to 5 for new sessions and to "
-                "the persisted bound on resume; explicit values raise (never lower) "
-                "the bound."
+                "Deprecated and ignored. Auto no longer reviews or repairs the "
+                "Seed: a written Seed goes straight to the run."
             ),
         ),
     ] = None,
     skip_run: Annotated[
-        bool, typer.Option("--skip-run", help="Stop after A-grade Seed creation.")
+        bool, typer.Option("--skip-run", help="Stop after the Seed is written.")
     ] = False,
     no_wait: Annotated[
         bool,
@@ -238,7 +233,7 @@ def auto_command(
         bool,
         typer.Option(
             "--quiet",
-            help="Suppress live phase/grade/repair progress lines; only the final summary prints.",
+            help="Suppress live progress lines; only the final summary prints.",
         ),
     ] = False,
     timeout: Annotated[
@@ -326,15 +321,15 @@ def auto_command(
             "--progress-jsonl",
             metavar="PATH",
             help=(
-                "Also append every live progress event (phase, grade, repair, interview "
-                "question and answer) to this file, one JSON object per line, flushed per "
+                "Also append every live progress event (phase, interview question and "
+                "answer) to this file, one JSON object per line, flushed per "
                 "line. The text trace is unchanged and --quiet does not silence the file. "
                 "A write error never stops the pipeline: it is reported once on stderr."
             ),
         ),
     ] = None,
 ) -> None:
-    """Run an A-grade-gated auto pipeline.
+    """Run the auto pipeline: interview, write a Seed, then run it.
 
     By default the command waits for the execute run-handoff job to reach a
     terminal state and reports the run verdict, because in direct CLI mode the
@@ -345,6 +340,11 @@ def auto_command(
         print_warning(
             "--complete-product is deprecated and ignored: the run job owns "
             "run -> evaluate -> ralph. Follow it with `ooo status` or the job tools."
+        )
+    if max_repair_rounds is not None:
+        print_warning(
+            "--max-repair-rounds is deprecated and ignored: auto no longer reviews "
+            "or repairs the Seed; a written Seed goes straight to the run."
         )
     if status:
         if not resume:
@@ -389,7 +389,6 @@ def auto_command(
                 resume=resume,
                 runtime=public_runtime_backend(runtime.value if runtime else None),
                 max_interview_rounds=max_interview_rounds,
-                max_repair_rounds=max_repair_rounds,
                 skip_run=skip_run,
                 attach_execution=attach_execution,
                 attach_job=attach_job,
@@ -440,7 +439,6 @@ def _safe_default_cwd() -> Path:
 
 
 _DEFAULT_MAX_INTERVIEW_ROUNDS = 50
-_DEFAULT_MAX_REPAIR_ROUNDS = 5
 
 
 async def _run_auto(
@@ -449,7 +447,6 @@ async def _run_auto(
     resume: str | None,
     runtime: str | None,
     max_interview_rounds: int | None,
-    max_repair_rounds: int | None,
     skip_run: bool,
     attach_execution: str | None = None,
     attach_job: str | None = None,
@@ -515,17 +512,6 @@ async def _run_auto(
             raise ValueError(msg)
         else:
             state.max_interview_rounds = max_interview_rounds
-        if max_repair_rounds is None:
-            max_repair_rounds = state.max_repair_rounds
-        elif max_repair_rounds < state.max_repair_rounds:
-            msg = (
-                f"--max-repair-rounds {max_repair_rounds} is lower than the "
-                f"persisted bound ({state.max_repair_rounds}); refuse to tighten "
-                "a bound on resume"
-            )
-            raise ValueError(msg)
-        else:
-            state.max_repair_rounds = max_repair_rounds
         skip_run = skip_run or state.skip_run
     else:
         if goal is None or not goal.strip():
@@ -533,13 +519,10 @@ async def _run_auto(
         runtime = resolve_agent_runtime_backend(runtime)
         if max_interview_rounds is None:
             max_interview_rounds = _DEFAULT_MAX_INTERVIEW_ROUNDS
-        if max_repair_rounds is None:
-            max_repair_rounds = _DEFAULT_MAX_REPAIR_ROUNDS
         state = AutoPipelineState(goal=goal.strip(), cwd=str(_safe_default_cwd()))
         state.runtime_backend = runtime
         state.skip_run = skip_run
         state.max_interview_rounds = max_interview_rounds
-        state.max_repair_rounds = max_repair_rounds
         if pipeline_timeout_seconds is not None:
             state.pipeline_timeout_seconds = float(pipeline_timeout_seconds)
 
@@ -644,8 +627,8 @@ async def _run_auto(
     )
     # Parity with the MCP auto path (auto_handler.py): construct a
     # ``lateral_thinker`` so the interview safe-default escalation (Issue
-    # #1248) and the EVALUATE → UNSTUCK_LATERAL path have the same lateral
-    # handle the MCP handler wires. Gate on the resolved REFLECT stage: a
+    # #1248) has the same lateral handle the MCP handler wires. Gate on the
+    # resolved REFLECT stage: a
     # plugin-routed reflect backend cannot be consumed by the synchronous
     # auto pipeline, so leave ``lateral_thinker=None`` in that case (the
     # pre-existing BLOCKED branches still apply, preserving prior behaviour).
@@ -663,11 +646,6 @@ async def _run_auto(
         )
     watchdog_event_store = EventStore()
     await watchdog_event_store.initialize()
-    seed_qa = QAHandler(
-        event_store=watchdog_event_store,
-        agent_runtime_backend=runtime_plan.interview.runtime_backend,
-        opencode_mode=authoring_opencode_mode,
-    )
     # AI answer refiner: upgrades generic deterministic auto-answers to concrete,
     # goal-specific ones so interview ambiguity actually converges. Best-effort —
     # any construction failure leaves the deterministic answerer untouched.
@@ -705,7 +683,6 @@ async def _run_auto(
             use_worktree=False,  # auto's worktree policy alone decides isolation
         ),
         store=store,
-        repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
         seed_saver=save_seed,
         seed_loader=load_seed,
         skip_run=skip_run,
@@ -715,8 +692,6 @@ async def _run_auto(
         attach_source=attach_source,
         reconcile_run=reconcile_run,
         reconcile_source=reconcile_source,
-        seed_qa_evaluator=HandlerSeedQAEvaluator(seed_qa),
-        lateral_thinker=lateral_thinker,
         progress_callback=progress_callback,
         watchdog=watchdog,
     )
@@ -799,7 +774,7 @@ def _format_runtime_labels(
 
 
 def _make_progress_renderer(*, quiet: bool) -> AutoProgressCallback | None:
-    """Build a callback that prints live phase/grade/repair lines, unless quiet."""
+    """Build a callback that prints live phase and interview lines, unless quiet."""
     if quiet:
         return None
 
@@ -818,12 +793,7 @@ def _make_progress_renderer(*, quiet: bool) -> AutoProgressCallback | None:
                 console.print(rf"[dim]\[auto][/] {label}{source} Q — {question}")
             console.print(rf"[dim]\[auto][/] {label}{source} A — {answer}")
             return
-        if event.kind == "grade":
-            label = f"grade {event.grade}" if event.grade else "grade"
-        elif event.kind == "repair":
-            label = f"repair round {event.round}"
-        else:
-            label = event.phase
+        label = event.phase
         # A live trace should be a single dim line per event, not a Rich
         # panel — using ``console.print`` keeps the stream lightweight so
         # consumers can grep on the ``[auto]`` prefix without parsing
@@ -906,8 +876,6 @@ def _print_status(state: AutoPipelineState) -> None:
     if state.seed_path:
         console.print(f"Seed: {state.seed_path}")
     console.print(f"Seed origin: {state.seed_origin.value}")
-    if state.last_grade:
-        console.print(f"Seed grade: [bold]{state.last_grade}[/]")
     if state.job_id or state.execution_id or state.run_session_id:
         console.print("Execution:")
         console.print(f"  Job ID: {state.job_id}")
@@ -1455,22 +1423,10 @@ def _render_blocked_panel(
     state: AutoPipelineState | None,
     result: AutoPipelineResult,
 ) -> None:
-    """Print the stop reason, answerable gaps, and authoritative resume action."""
+    """Print the stop reason and the authoritative resume action."""
     stage = (state.last_tool_name if state is not None else None) or "unknown"
     reason_code = result.stop_reason_code or "-"
     blocker_text = " ".join((result.blocker or "").split())[:400]
-    open_items: list[str] = []
-    if reason_code == "seed_preflight_unexecutable" and result.blocker:
-        marker = (
-            "start a new session: " if "start a new session: " in result.blocker else "resume: "
-        )
-        _, _, tail = result.blocker.rpartition(marker)
-        if tail:
-            open_items = [item.strip() for item in tail.split(" | ") if item.strip()]
-    elif (result.last_qa_differences or result.last_qa_suggestions) and (
-        state is None or state.last_tool_name == "seed_qa"
-    ):
-        open_items = [*result.last_qa_differences, *result.last_qa_suggestions][:5]
 
     resume_lines = render_resume_lines(
         result.resume_capability, result.auto_session_id, goal=None, use_markup=False
@@ -1487,10 +1443,6 @@ def _render_blocked_panel(
     console.print(f" stage      : {stage}")
     console.print(f" reason code: {reason_code}")
     console.print(f" blocker    : {blocker_text}")
-    if open_items:
-        console.print(" open items :")
-        for item in open_items:
-            console.print(f"   - {item}")
     console.print(f" resume     : {resume_line}")
     if resume_note:
         console.print(f"              {resume_note}")
@@ -1543,13 +1495,15 @@ def _print_result(
     if result.invoked_by != "direct":
         source = (result.provenance or {}).get("source", "unknown")
         console.print(f"Invoked by: [bold]{result.invoked_by}[/] (source={_rich_escape(source)})")
-    if result.grade:
-        console.print(f"Seed grade: [bold]{result.grade}[/]")
     if result.interview_session_id:
         console.print(f"Interview session: {result.interview_session_id}")
     if result.seed_path:
         console.print(f"Seed: {result.seed_path}")
     console.print(f"Seed origin: {result.seed_origin}")
+    if result.assumed_answers:
+        console.print("Assumed answers (chosen by auto, not confirmed; given to the worker):")
+        for item in result.assumed_answers:
+            console.print(f"  - {_rich_escape(item)}")
     if result.open_questions:
         console.print("Open questions (kept in the Seed, not given to the worker):")
         for item in result.open_questions:
