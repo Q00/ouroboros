@@ -48,7 +48,7 @@ import { Spinner } from "../ui/Mark";
 import { Modal } from "../ui/Modal";
 import { Picker } from "../ui/Picker";
 import { Segmented } from "../ui/Segmented";
-import { AutoInterview, AutoLog, AutoReview, AutoStepper, autoActivity, autoEnding } from "./AutoView";
+import { AutoInterview, AutoLog, AutoStepper, autoActivity, autoEnding } from "./AutoView";
 import { Progress, RunStatus, activityLabel, phaseLabel, runPreparing } from "./Runs";
 import { EASE_OUT, GLIDE, SETTLE } from "../core/motion";
 
@@ -470,7 +470,7 @@ function RunCard({ message }: { message: ChatMessage }) {
   );
 }
 
-function SeedCard({ message, review }: { message: ChatMessage; review?: ReactNode }) {
+function SeedCard({ message }: { message: ChatMessage }) {
   const { t } = useT();
   const [yaml, setYaml] = useState(false);
   const criteria = message.acceptance_criteria ?? [];
@@ -482,7 +482,6 @@ function SeedCard({ message, review }: { message: ChatMessage; review?: ReactNod
         <Sprout size={16} aria-hidden />
         <strong>{t("chat.seed.title")}</strong>
       </div>
-      {review}
       <p className="seed-goal">{message.text}</p>
       {criteria.length > 0 ? (
         <>
@@ -750,7 +749,7 @@ function MessageView({ message, running, questionNumber, onCorrect, auto, onRetr
         );
       break;
     case "seed":
-      body = <SeedCard message={message} review={auto && message.source === "auto" ? <AutoReview view={auto} live={running} /> : undefined} />;
+      body = <SeedCard message={message} />;
       break;
     case "run":
       body = <RunCard message={message} />;

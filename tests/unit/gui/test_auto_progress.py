@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any
 
 import pytest
 
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
     EvaluationPrinciple,
     ExitCondition,
@@ -66,6 +67,11 @@ def _seed(criteria: tuple[str, ...] = ("is_palindrome ignores case", "pytest pas
         ),
         metadata=SeedMetadata(seed_id="seed_test", ambiguity_score=0.1),
     )
+
+
+def _no_review(view: dict[str, Any]) -> None:
+    """The view holds none of the Seed review's fields (#3064)."""
+    assert not set(auto_progress.RETIRED_FIELDS) & set(view)
 
 
 def _record(store: AutoStore, **fields: Any) -> AutoPipelineState:
@@ -304,7 +310,15 @@ def test_the_ambiguity_trend_is_bounded_like_the_rounds() -> None:
     assert view["ambiguity_trend"][0]["round"] == 11
 
 
-def test_phases_grades_and_repairs_are_kept_in_order_with_their_times() -> None:
+def test_the_new_view_has_no_review_fields() -> None:
+    view = auto_progress.new_view()
+
+    assert view["v"] == auto_progress.VIEW_VERSION == 3
+    _no_review(view)
+
+
+def test_an_engine_that_still_reviews_its_seed_folds_to_its_phases_and_nothing_more() -> None:
+    """A progress file from before #3064: its phases are kept, its grades and repairs are not."""
     view = auto_progress.new_view()
     flow = [
         _event("phase", "interview", "interview round 1/12", timestamp="t1"),
@@ -317,7 +331,9 @@ def test_phases_grades_and_repairs_are_kept_in_order_with_their_times() -> None:
         _event("phase", "run", "starting execution", timestamp="t8"),
         _event("phase", "complete", "execution started", timestamp="t9"),
     ]
-    reloads = [auto_progress.fold(view, event) for event in flow]
+    events = [auto_progress.parse_event(json.dumps(event)) for event in flow]
+    assert None not in events  # every line still parses
+    reloads = [auto_progress.fold(view, event) for event in events if event is not None]
 
     assert [(p["phase"], p["at"]) for p in view["phases"]] == [
         ("interview", "t1"),
@@ -329,13 +345,86 @@ def test_phases_grades_and_repairs_are_kept_in_order_with_their_times() -> None:
         ("complete", "t9"),
     ]
     assert view["phase"] == "complete"
-    assert view["grade"] == "A"
-    assert [(g["grade"], g["repair_round"]) for g in view["grades"]] == [("B", 0), ("A", 1)]
-    assert view["repair_round"] == 1
-    assert view["review_message"] == "Seed grade A"
     assert view["auto_session_id"] == SESSION
-    # The record is read for the first event, then only when it has news.
-    assert reloads == [True, False, True, True, True, True, True, True, True]
+    assert set(view) == set(auto_progress.new_view())
+    _no_review(view)
+    # The record is read for the first event, then only when it has news: a
+    # grade brings none, the phases that follow a written Seed do.
+    assert reloads == [True, False, True, True, False, True, True, True, True]
+
+
+def test_a_repair_event_reads_the_record_again_and_a_grade_does_not() -> None:
+    view = auto_progress.new_view()
+    auto_progress.fold(view, _event("phase", "review", "reviewing Seed"))
+    before = {**view, "message": None}
+
+    # Recorded in the review phase, as an engine before #3064 wrote it: no phase change.
+    assert auto_progress.fold(view, _event("grade", "review", "Seed grade B", grade="B")) is False
+    assert auto_progress.fold(view, _event("repair", "review", "repair round 1", round=1)) is True
+    assert auto_progress.fold(view, _event("repair", "review", "repair round 2")) is True
+
+    # Only the latest progress line moved, as it does for any event.
+    assert {**view, "message": None} == before
+    _no_review(view)
+
+
+def test_a_progress_file_with_grade_and_repair_lines_reads_whole(tmp_path: Path) -> None:
+    path = tmp_path / "p.jsonl"
+    path.write_text(
+        _line(_event("phase", "review", "reviewing Seed for required grade A"))
+        + _line(_event("grade", "review", "Seed grade B", grade="B"))
+        + _line(_event("repair", "review", "repair round 1", round=1))
+        + _line(_event("grade", "review", "Seed grade A", grade="A")),
+        encoding="utf-8",
+    )
+    tail = auto_progress.ProgressTail(path)
+
+    events = tail.read(final=True)
+
+    assert [e["kind"] for e in events] == ["phase", "grade", "repair", "grade"]
+    assert tail.skipped == 0  # read, not refused as unknown lines
+
+
+_AUTO_VIEW = Path(__file__).resolve().parents[3] / "gui" / "src" / "pages" / "AutoView.tsx"
+
+
+def test_the_page_puts_every_working_phase_on_one_of_five_steps() -> None:
+    """The stepper's table in ``gui/src/pages/AutoView.tsx`` against the engine's phases.
+
+    ``review`` and ``repair`` are kept in the engine for saved sessions (#3064)
+    and sit on the spec step with ``seed_generation``. The terminal phases end
+    the chat rather than mark a step.
+    """
+    source = _AUTO_VIEW.read_text(encoding="utf-8")
+    steps = re.search(r"const STEP_IDS: AutoStepId\[\] = \[([^\]]*)\];", source)
+    table = re.search(r"const PHASE_STEP: Record<string, number> = \{(.*?)\};", source, re.S)
+    assert steps is not None and table is not None
+    assert re.findall(r'"([a-z]+)"', steps.group(1)) == [
+        "interview",
+        "spec",
+        "run",
+        "verify",
+        "result",
+    ]
+    step = {"0": "interview", "SPEC": "spec", "RUN": "run", "VERIFY": "verify"}
+    mapped = {
+        phase: step[value]
+        for phase, value in re.findall(r"^\s*([a-z_]+): (\w+),$", table.group(1), re.M)
+    }
+
+    terminal = {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}
+    assert set(mapped) == {phase.value for phase in AutoPhase if phase not in terminal}
+    assert mapped == {
+        "created": "interview",
+        "interview": "interview",
+        "seed_generation": "spec",
+        "review": "spec",
+        "repair": "spec",
+        "run": "run",
+        "ralph_handoff": "verify",
+        "evaluate": "verify",
+        "unstuck_lateral": "verify",
+    }
 
 
 def test_the_view_stays_bounded() -> None:
@@ -352,8 +441,8 @@ def test_the_view_stays_bounded() -> None:
             ),
         )
     for index in range(auto_progress.MAX_PHASES + 10):
-        auto_progress.fold(view, _event("phase", "review" if index % 2 else "repair"))
-    for _ in range(auto_progress.MAX_GRADES + 5):
+        auto_progress.fold(view, _event("phase", "run" if index % 2 else "evaluate"))
+    for _ in range(25):
         auto_progress.fold(view, _event("grade", "review", grade="B"))
 
     assert len(view["rounds"]) == auto_progress.MAX_ROUNDS
@@ -363,7 +452,7 @@ def test_the_view_stays_bounded() -> None:
     assert len(first["question"]) == auto_progress.MAX_TEXT and first["question"].endswith("…")
     assert len(first["answer"]) == auto_progress.MAX_TEXT and first["answer"].endswith("…")
     assert len(view["phases"]) == auto_progress.MAX_PHASES
-    assert len(view["grades"]) == auto_progress.MAX_GRADES
+    _no_review(view)
     # A late event for a round already dropped does not come back.
     auto_progress.fold(view, _event("answer", "interview", round=3, answer="late"))
     assert len(view["rounds"]) == auto_progress.MAX_ROUNDS
@@ -393,7 +482,12 @@ def test_the_record_gives_the_seed_execution_and_round_limit(tmp_path: Path) -> 
         EXECUTION,
         "job_0123",
     )
-    assert facts["findings"] == ["Success criteria are vague"]
+    # The record's legacy review fields are not read.
+    assert set(facts) == {"max_rounds", "execution_id", "job_id", "seed", "seed_path"}
+    view = auto_progress.new_view()
+    auto_progress.apply_facts(view, facts)
+    assert (view["max_rounds"], view["execution_id"]) == (12, EXECUTION)
+    _no_review(view)
     fields = auto_progress.seed_fields(facts["seed"], facts["seed_path"])
     assert fields["text"] == "A palindrome checker with tests"
     assert fields["acceptance_criteria"] == ["is_palindrome ignores case", "pytest passes"]
@@ -436,7 +530,14 @@ print("Run handoff status: completed")
 """
 
 
-def _flow() -> list[dict[str, Any]]:
+def _flow(*, review: bool) -> list[dict[str, Any]]:
+    """The events of one Auto job; ``review`` is an engine from before #3064."""
+    reviewed = [
+        _event("phase", "review", "reviewing Seed for required grade A"),
+        _event("grade", "review", "Seed grade B", grade="B"),
+        _event("repair", "repair", "repair round 1", round=1),
+        _event("grade", "review", "Seed grade A", grade="A"),
+    ]
     return [
         _event("phase", "interview", "interview round 1/12"),
         _event(
@@ -462,12 +563,9 @@ def _flow() -> list[dict[str, Any]]:
             answer_source="repo_fact",
         ),
         _event("phase", "seed_generation", "generating Seed from auto interview"),
-        _event("phase", "review", "reviewing Seed for required grade A"),
-        _event("grade", "review", "Seed grade B", grade="B"),
-        _event("repair", "repair", "repair round 1", round=1),
-        _event("grade", "review", "Seed grade A", grade="A"),
-        _event("phase", "run", "starting execution for grade A Seed"),
-        _event("phase", "complete", "execution started for grade A Seed"),
+        *(reviewed if review else []),
+        _event("phase", "run", "starting execution"),
+        _event("phase", "complete", "execution started"),
     ]
 
 
@@ -513,18 +611,31 @@ def no_board(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.usefixtures("no_board")
+@pytest.mark.parametrize(
+    ("review", "phases"),
+    [
+        pytest.param(False, ["interview", "seed_generation", "run", "complete"], id="engine"),
+        pytest.param(
+            True,
+            ["interview", "seed_generation", "review", "repair", "review", "run", "complete"],
+            id="engine-before-3064",
+        ),
+    ],
+)
 def test_an_auto_chat_becomes_a_structured_view_and_survives_a_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, review: bool, phases: list[str]
 ) -> None:
     store = AutoStore()  # the default store, under the isolated HOME
+    # The record of an engine before #3064 also holds its review.
+    legacy = {"last_grade": "A", "findings": [{"message": "vague"}]} if review else {}
     _record(
         store,
         seed_artifact=_seed().to_dict(),
         execution_id=EXECUTION,
         job_id="job_0123",
-        last_grade="A",
+        **legacy,
     )
-    _fake_auto(monkeypatch, [_line(e) for e in _flow()], split=2)
+    _fake_auto(monkeypatch, [_line(e) for e in _flow(review=review)], split=2)
     h = harness.Harness(jobs.JobRegistry())
 
     chat = h.create({"goal": "palindrome", "mode": "auto", "cwd": str(tmp_path)})
@@ -555,17 +666,9 @@ def test_an_auto_chat_becomes_a_structured_view_and_survives_a_restart(
     ]
     assert view["ambiguity_trend"] == [{"round": 2, "value": 0.42}]
     assert view["skipped"] == 0  # the half-written line was read once it was whole
-    assert [p["phase"] for p in view["phases"]] == [
-        "interview",
-        "seed_generation",
-        "review",
-        "repair",
-        "review",
-        "run",
-        "complete",
-    ]
-    assert (view["grade"], view["repair_round"], view["max_rounds"]) == ("A", 1, 12)
-    assert [g["grade"] for g in view["grades"]] == ["B", "A"]
+    assert [p["phase"] for p in view["phases"]] == phases
+    assert view["max_rounds"] == 12
+    _no_review(view)
     assert (view["execution_id"], view["outcome"]) == (EXECUTION, "completed")
 
     kinds = [m["kind"] for m in session["messages"]]
@@ -735,14 +838,18 @@ def test_deleting_an_auto_chat_removes_its_progress_file() -> None:
 
 # ── upgrading a view saved by an older console ───────────────────────
 
-_V1 = json.loads(
-    (Path(__file__).resolve().parents[2] / "fixtures" / "gui_auto_view_v1.json").read_text(
-        encoding="utf-8"
-    )
-)
+
+def _fixture(name: str) -> dict[str, Any]:
+    path = Path(__file__).resolve().parents[2] / "fixtures" / name
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _v1_chat(chat_id: str) -> dict[str, Any]:
+_V1 = _fixture("gui_auto_view_v1.json")
+# Saved while Auto still reviewed its Seed: a grade B, one repair, then A (#3064).
+_V2 = _fixture("gui_auto_view_v2.json")
+
+
+def _v1_chat(chat_id: str, saved: dict[str, Any] = _V1) -> dict[str, Any]:
     return {
         "id": chat_id,
         "title": "word_count",
@@ -751,18 +858,18 @@ def _v1_chat(chat_id: str) -> dict[str, Any]:
         "mode": "auto",
         "status": "done",
         "version": 58,
-        "auto": json.loads(json.dumps(_V1["view"])),
+        "auto": json.loads(json.dumps(saved["view"])),
         "messages": [{"id": "m1", "role": "user", "kind": "text", "text": "w", "ts": 0}],
     }
 
 
-def _write_v1(chat_id: str, *, with_progress: bool) -> Path:
+def _write_v1(chat_id: str, *, with_progress: bool, saved: dict[str, Any] = _V1) -> Path:
     path = harness.chats_dir() / f"{chat_id}.json"
-    path.write_text(json.dumps(_v1_chat(chat_id), ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(_v1_chat(chat_id, saved), ensure_ascii=False), encoding="utf-8")
     if with_progress:
         progress = auto_progress.progress_file(harness.chats_dir(), chat_id)
         progress.parent.mkdir(parents=True, exist_ok=True)
-        progress.write_text("".join(_line(e) for e in _V1["events"]), encoding="utf-8")
+        progress.write_text("".join(_line(e) for e in saved["events"]), encoding="utf-8")
     return path
 
 
@@ -773,12 +880,24 @@ def test_the_fixture_is_a_real_v1_view_with_the_raw_prefix() -> None:
     assert "ambiguity" not in view["rounds"][1]
 
 
+def test_the_v2_fixture_carries_the_seed_review() -> None:
+    view = _V2["view"]
+    assert view["v"] == 2
+    assert set(auto_progress.RETIRED_FIELDS) <= set(view)
+    assert [g["grade"] for g in view["grades"]] == ["B", "A"]
+    assert (view["repair_round"], view["findings"]) == (
+        1,
+        ["Acceptance criteria should name an observable check"],
+    )
+    assert {e["kind"] for e in _V2["events"]} == {"phase", "question", "answer", "grade", "repair"}
+
+
 def test_a_v1_view_is_rebuilt_from_its_progress_file_when_the_console_loads() -> None:
     path = _write_v1("v1chat000001", with_progress=True)
 
     view = (harness.Harness(jobs.JobRegistry()).get("v1chat000001") or {})["auto"]
 
-    assert view["v"] == auto_progress.VIEW_VERSION == 2
+    assert view["v"] == auto_progress.VIEW_VERSION == 3
     assert [(r["round"], r["question"], r["ambiguity"]) for r in view["rounds"]] == [
         (1, "word_count는 어떤 입력을 받나요?", None),
         (2, "세 가지 결정(구두점, 대소문자, 빈 입력)을 이렇게 확정해도 될까요?", 0.43),
@@ -787,14 +906,15 @@ def test_a_v1_view_is_rebuilt_from_its_progress_file_when_the_console_loads() ->
     assert view["ambiguity_trend"] == [{"round": 2, "value": 0.43}, {"round": 3, "value": 0.38}]
     # Folded again from the events…
     assert [p["phase"] for p in view["phases"]] == [p["phase"] for p in _V1["view"]["phases"]]
-    assert (view["grade"], view["repair_round"]) == ("A", 1)
+    _no_review(view)
     # …and what the events never carried is kept from the old view.
     old = _V1["view"]
-    for key in ("max_rounds", "max_repair_rounds", "execution_id", "seed_loaded", "outcome"):
+    for key in ("max_rounds", "execution_id", "seed_loaded", "outcome"):
         assert view[key] == old[key], key
     # Saved once, so the next start finds the current shape.
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["auto"]["v"] == 2 and saved["auto"]["ambiguity_trend"] == view["ambiguity_trend"]
+    assert saved["auto"]["v"] == 3 and saved["auto"]["ambiguity_trend"] == view["ambiguity_trend"]
+    _no_review(saved["auto"])
 
 
 def test_a_v1_view_without_its_progress_file_is_migrated_in_place() -> None:
@@ -802,7 +922,7 @@ def test_a_v1_view_without_its_progress_file_is_migrated_in_place() -> None:
 
     view = (harness.Harness(jobs.JobRegistry()).get("v1chat000002") or {})["auto"]
 
-    assert view["v"] == 2
+    assert view["v"] == 3
     assert [r["question"] for r in view["rounds"]][1:] == [
         "세 가지 결정(구두점, 대소문자, 빈 입력)을 이렇게 확정해도 될까요?",
         "CLI와 패키징은 범위 밖으로 둘까요?",
@@ -810,7 +930,50 @@ def test_a_v1_view_without_its_progress_file_is_migrated_in_place() -> None:
     assert [r["ambiguity"] for r in view["rounds"]] == [None, 0.43, 0.38]
     assert [p["value"] for p in view["ambiguity_trend"]] == [0.43, 0.38]
     rest = {k: v for k, v in view.items() if k not in ("v", "rounds", "ambiguity_trend")}
-    assert rest == {k: v for k, v in _V1["view"].items() if k not in ("v", "rounds")}
+    retired = ("v", "rounds", *auto_progress.RETIRED_FIELDS)
+    assert rest == {k: v for k, v in _V1["view"].items() if k not in retired}
+
+
+def test_a_v2_view_with_the_seed_review_is_rebuilt_without_it() -> None:
+    path = _write_v1("v2review0001", with_progress=True, saved=_V2)
+
+    view = (harness.Harness(jobs.JobRegistry()).get("v2review0001") or {})["auto"]
+
+    assert view["v"] == 3
+    _no_review(view)
+    # Everything else is what was saved: the replay covered it and changed nothing.
+    old = _V2["view"]
+    assert view == {
+        **{k: v for k, v in old.items() if k not in auto_progress.RETIRED_FIELDS},
+        "v": 3,
+    }
+    # The review's phases stay in the history; the page puts them on the spec step.
+    assert [p["phase"] for p in view["phases"]] == [
+        "interview",
+        "seed_generation",
+        "review",
+        "repair",
+        "review",
+        "run",
+        "complete",
+    ]
+    assert json.loads(path.read_text(encoding="utf-8"))["auto"] == view
+
+
+def test_a_v2_view_without_its_progress_file_keeps_every_other_field() -> None:
+    chat = _v1_chat("v2review0002", _V2)
+    # Its first round was dropped from the view, but its trend point was kept.
+    chat["auto"]["rounds"] = chat["auto"]["rounds"][2:]
+    chat["auto"]["rounds_dropped"] = 2
+    path = harness.chats_dir() / "v2review0002.json"
+    path.write_text(json.dumps(chat, ensure_ascii=False), encoding="utf-8")
+
+    view = (harness.Harness(jobs.JobRegistry()).get("v2review0002") or {})["auto"]
+
+    _no_review(view)
+    kept = {k: v for k, v in chat["auto"].items() if k not in auto_progress.RETIRED_FIELDS}
+    assert view == {**kept, "v": 3}
+    assert view["ambiguity_trend"] == [{"round": 2, "value": 0.43}, {"round": 3, "value": 0.38}]
 
 
 _CLEAN_QUESTIONS = {
@@ -820,10 +983,11 @@ _CLEAN_QUESTIONS = {
 }
 
 
-def _assert_nothing_saved_is_lost(view: dict[str, Any]) -> None:
-    """Every round, phase, grade and fact the v1 view held is still there."""
-    old = _V1["view"]
-    assert view["v"] == 2
+def _assert_nothing_saved_is_lost(view: dict[str, Any], saved: dict[str, Any] = _V1) -> None:
+    """Every round, phase and fact the old view held is still there; its review is not."""
+    old = saved["view"]
+    assert view["v"] == 3
+    _no_review(view)
     rounds = {entry["round"]: entry for entry in view["rounds"]}
     for entry in old["rounds"]:
         kept = rounds[entry["round"]]
@@ -833,15 +997,9 @@ def _assert_nothing_saved_is_lost(view: dict[str, Any]) -> None:
     assert [p["phase"] for p in view["phases"]][: len(old["phases"])] == [
         p["phase"] for p in old["phases"]
     ]
-    assert [g["grade"] for g in view["grades"]][: len(old["grades"])] == [
-        g["grade"] for g in old["grades"]
-    ]
     for key in (
         "auto_session_id",
-        "grade",
-        "repair_round",
         "max_rounds",
-        "max_repair_rounds",
         "execution_id",
         "seed_loaded",
         "outcome",
@@ -849,8 +1007,10 @@ def _assert_nothing_saved_is_lost(view: dict[str, Any]) -> None:
         assert view[key] == old[key], key
 
 
-def _load_v1_with(chat_id: str, progress_text: str | None) -> tuple[dict[str, Any], Path]:
-    path = _write_v1(chat_id, with_progress=False)
+def _load_v1_with(
+    chat_id: str, progress_text: str | None, saved: dict[str, Any] = _V1
+) -> tuple[dict[str, Any], Path]:
+    path = _write_v1(chat_id, with_progress=False, saved=saved)
     if progress_text is not None:
         progress = auto_progress.progress_file(harness.chats_dir(), chat_id)
         progress.parent.mkdir(parents=True, exist_ok=True)
@@ -862,33 +1022,43 @@ def _load_v1_with(chat_id: str, progress_text: str | None) -> tuple[dict[str, An
 _FULL = "".join(_line(e) for e in _V1["events"])
 
 
-@pytest.mark.parametrize(
-    "progress_text",
-    [
+def _lossy_files(saved: dict[str, Any]) -> list[Any]:
+    """Progress files that cannot cover the view ``saved`` holds."""
+    events = saved["events"]
+    full = "".join(_line(e) for e in events)
+    return [
         pytest.param("", id="empty"),
         pytest.param(
             '{"auto_session_id": "auto_9495\nnot json at all\n[1, 2]\n{"kind"', id="garbage"
         ),
         pytest.param(
-            _FULL[: _FULL.index("\n") + 1] + _FULL[_FULL.index("\n") + 1 :][:40], id="partial"
+            full[: full.index("\n") + 1] + full[full.index("\n") + 1 :][:40], id="partial"
         ),
-        pytest.param("".join(_line(e) for e in _V1["events"][:4]), id="truncated"),
-        pytest.param("".join(_line(e) for e in _V1["events"][6:]), id="rotated"),
+        pytest.param("".join(_line(e) for e in events[:4]), id="truncated"),
+        pytest.param("".join(_line(e) for e in events[6:]), id="rotated"),
         pytest.param(
-            "".join(_line({**e, "auto_session_id": "auto_other000001"}) for e in _V1["events"]),
+            "".join(_line({**e, "auto_session_id": "auto_other000001"}) for e in events),
             id="another-session",
         ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("saved", "progress_text"),
+    [
+        *[pytest.param(_V1, *case.values, id=f"v1-{case.id}") for case in _lossy_files(_V1)],
+        *[pytest.param(_V2, *case.values, id=f"v2-{case.id}") for case in _lossy_files(_V2)],
     ],
 )
 def test_a_progress_file_that_cannot_cover_the_saved_view_never_replaces_it(
-    progress_text: str,
+    saved: dict[str, Any], progress_text: str
 ) -> None:
-    view, path = _load_v1_with("v1lossy00001", progress_text)
+    view, path = _load_v1_with("v1lossy00001", progress_text, saved)
 
-    _assert_nothing_saved_is_lost(view)
-    # The migrated view is what was saved: nothing more, nothing less.
-    assert len(view["rounds"]) == len(_V1["view"]["rounds"])
-    assert len(view["phases"]) == len(_V1["view"]["phases"])
+    _assert_nothing_saved_is_lost(view, saved)
+    # The migrated view is what was saved, without its review: nothing more, nothing less.
+    assert len(view["rounds"]) == len(saved["view"]["rounds"])
+    assert len(view["phases"]) == len(saved["view"]["phases"])
     assert json.loads(path.read_text(encoding="utf-8"))["auto"] == view
 
 
@@ -905,7 +1075,7 @@ def test_a_full_progress_file_is_replayed_and_only_adds() -> None:
     assert view["ambiguity_trend"] == [{"round": 2, "value": 0.43}, {"round": 3, "value": 0.38}]
 
 
-@pytest.mark.parametrize("version", [3, "1", None, True])
+@pytest.mark.parametrize("version", [4, "1", None, True])
 def test_a_view_this_console_cannot_read_safely_is_kept_exactly_as_saved(version: object) -> None:
     chat = _v1_chat("vnewer000001")
     chat["auto"]["v"] = version
@@ -922,9 +1092,21 @@ def test_a_view_this_console_cannot_read_safely_is_kept_exactly_as_saved(version
     assert path.read_text(encoding="utf-8") == before  # not saved over
 
 
-def test_a_v1_view_with_entries_of_the_wrong_shape_is_kept_as_saved() -> None:
-    chat = _v1_chat("vbroken00001")
-    chat["auto"]["rounds"].append("not a round")
+@pytest.mark.parametrize(
+    ("saved", "name", "bad"),
+    [
+        pytest.param(_V1, "rounds", "not a round", id="v1-round"),
+        pytest.param(_V2, "rounds", {"round": "3"}, id="v2-round"),
+        pytest.param(_V2, "phases", {"phase": None}, id="v2-phase"),
+        pytest.param(_V2, "ambiguity_trend", {"round": 4, "value": "0.3"}, id="v2-trend-value"),
+        pytest.param(_V2, "ambiguity_trend", {"round": True, "value": 0.3}, id="v2-trend-round"),
+    ],
+)
+def test_an_old_view_with_entries_of_the_wrong_shape_is_kept_as_saved(
+    saved: dict[str, Any], name: str, bad: object
+) -> None:
+    chat = _v1_chat("vbroken00001", saved)
+    chat["auto"][name].append(bad)
     path = harness.chats_dir() / "vbroken00001.json"
     path.write_text(json.dumps(chat, ensure_ascii=False), encoding="utf-8")
     before = path.read_text(encoding="utf-8")
@@ -940,7 +1122,7 @@ def test_a_current_view_is_loaded_as_saved_whatever_its_progress_file_holds(
     progress_text: str,
 ) -> None:
     chat = _v1_chat("v2chat000001")
-    chat["auto"] = {**auto_progress.new_view(), "phase": "review", "grade": "B"}
+    chat["auto"] = {**auto_progress.new_view(), "phase": "run", "execution_id": EXECUTION}
     path = harness.chats_dir() / "v2chat000001.json"
     path.write_text(json.dumps(chat), encoding="utf-8")
     before = path.read_text(encoding="utf-8")

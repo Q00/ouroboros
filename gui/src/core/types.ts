@@ -422,7 +422,11 @@ export interface AutoRound {
   ambiguity?: number | null;
 }
 
-/** An Auto chat's structured view, folded from `ouroboros auto --progress-jsonl` (gui/auto_progress.py). */
+/**
+ * An Auto chat's structured view, folded from `ouroboros auto --progress-jsonl` (gui/auto_progress.py).
+ * A view saved before #3064 can still carry the Seed review's fields (grade, grades, findings, …):
+ * nothing reads them.
+ */
 export interface AutoView {
   v: number;
   auto_session_id: string | null;
@@ -435,12 +439,6 @@ export interface AutoView {
   /** One point per round that reported an ambiguity, in round order. */
   ambiguity_trend?: { round: number; value: number }[];
   max_rounds: number | null;
-  max_repair_rounds: number | null;
-  grade: string | null;
-  grades: { grade: string; repair_round: number; at: string | null }[];
-  review_message: string | null;
-  findings: string[];
-  repair_round: number;
   execution_id: string | null;
   seed_loaded: boolean;
   outcome: "completed" | "failed" | "stopped" | "unverified" | null;
