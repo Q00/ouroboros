@@ -12,15 +12,11 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 
-from ouroboros.auto.ledger import SeedDraftLedger
-from ouroboros.auto.pipeline import AutoPipelineResult
-from ouroboros.cli.commands.auto import _run_auto
 from ouroboros.cli.commands.run import _run_orchestrator
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
 from ouroboros.evaluation.verification_artifacts import VerificationArtifacts
 from ouroboros.events.base import BaseEvent
-from ouroboros.mcp.tools.auto_handler import AutoHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.mcp.tools.query_handlers import SessionStatusHandler
 from ouroboros.orchestrator.runner import OrchestratorRunner
@@ -81,44 +77,6 @@ async def assert_owned_verdict(custom, default, sentinel):
         assert status.value.meta["score"] == 0.9
     finally:
         await reopened.close()
-
-
-@pytest.mark.parametrize("caller", ["mcp_auto", "cli_auto"])
-async def test_auto_caller_owns_seed_qa(caller, ownership, monkeypatch, tmp_path):
-    seed, custom, default, sentinel, inference = ownership
-
-    async def grade_seed(pipeline, state):
-        # Keep the caller's actual evaluator and QA; bypass unrelated interview
-        # and repair work at the same stable seam as other auto caller tests.
-        evaluated = await pipeline.seed_qa_evaluator(seed, SeedDraftLedger.from_goal(state.goal))
-        assert evaluated.passed
-        assert evaluated.score == 0.9
-        return AutoPipelineResult(
-            status="complete", auto_session_id=state.auto_session_id, phase="complete"
-        )
-
-    monkeypatch.setattr("ouroboros.auto.pipeline.AutoPipeline.run", grade_seed)
-    if caller == "mcp_auto":
-        result = await AutoHandler(event_store=custom, agent_runtime_backend="codex").handle(
-            {"goal": seed.goal, "cwd": str(tmp_path), "skip_run": True, "worktree_policy": "none"}
-        )
-        assert result.is_ok, result
-    else:
-        monkeypatch.setattr("ouroboros.cli.commands.auto.EventStore", lambda: custom)
-        result = await _run_auto(
-            goal=seed.goal,
-            resume=None,
-            runtime="codex",
-            max_interview_rounds=1,
-            max_repair_rounds=1,
-            skip_run=True,
-            worktree_policy="none",
-        )
-        assert result.status == "complete"
-        # CLI owns and closes this store; reinitialize for the public observer.
-        await custom.initialize()
-    await assert_owned_verdict(custom, default, sentinel)
-    assert inference.complete.await_count == 1
 
 
 @pytest.mark.parametrize("caller", ["execute_seed", "cli_run"])

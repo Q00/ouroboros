@@ -14,6 +14,7 @@ from typing import Literal
 
 from ouroboros.auto.state import utc_now_iso
 
+# ``grade`` and ``repair`` are historical kinds: no longer emitted, still parsed.
 AutoProgressKind = Literal["phase", "grade", "repair", "question", "answer"]
 
 
@@ -32,12 +33,12 @@ class AutoProgressEvent:
       first save of every ``run()`` invocation — including resume paths
       where no fresh transition occurred in this process — so observers
       always learn the current phase without polling the store.
-    - ``grade``: a Seed review produced a new grade since the last
-      observation.
-    - ``repair``: the repair round counter advanced since the last
-      observation.
     - ``question``: the auto interview produced or resumed a question.
     - ``answer``: the auto answerer submitted a source-tagged answer.
+    - ``grade`` / ``repair``: historical. The Seed review stage that emitted
+      them was removed (#3064), so nothing emits them now; they stay in
+      :data:`AutoProgressKind`, with the ``grade`` field, so recorded progress
+      logs keep parsing.
     """
 
     auto_session_id: str

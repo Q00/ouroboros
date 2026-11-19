@@ -12,14 +12,21 @@ _INTERVIEW_TOOLS = frozenset(
         "interview_driver",
     }
 )
-_REVIEW_TOOLS = frozenset(
+# Seed generation owns reading back (``seed_loader``) and writing
+# (``seed_saver``) the Seed. The other names are the tools of the retired Seed
+# review stage (#3064) and its pre-run checks. A session they blocked resumes at
+# Seed generation: a persisted Seed is written and goes straight to the run, and
+# a missing one is generated first.
+_SEED_TOOLS = frozenset(
     {
+        "seed_generator",
+        "seed_loader",
         "seed_saver",
         "grade_gate",
-        "seed_loader",
         "seed_repairer",
-        "seed_qa",
         "seed_reviewer",
+        "seed_qa",
+        "seed_preflight",
     }
 )
 
@@ -27,10 +34,8 @@ _REVIEW_TOOLS = frozenset(
 def recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
     if tool_name in _INTERVIEW_TOOLS:
         return AutoPhase.INTERVIEW
-    if tool_name == "seed_generator":
+    if tool_name in _SEED_TOOLS:
         return AutoPhase.SEED_GENERATION
-    if tool_name in _REVIEW_TOOLS:
-        return AutoPhase.REVIEW
     if tool_name == "run_starter":
         return AutoPhase.RUN
     return None

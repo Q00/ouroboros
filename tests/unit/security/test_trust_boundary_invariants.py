@@ -521,13 +521,6 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         28,
     ): "Requester argv is explicitly operator-selected; OUROBOROS_AUTO_REQUESTER_COMMAND is denied from project .env; no shell.",
     (
-        "src/ouroboros/auto/seed_preflight_repair.py",
-        "_git_listed_files",
-        "subprocess.run",
-        108,
-        20,
-    ): "Fixed git ls-files roster; GIT_* and PATH denied from project .env.",
-    (
         "src/ouroboros/backends/model_catalog.py",
         "refresh_models",
         "subprocess.run",

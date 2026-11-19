@@ -561,6 +561,31 @@ def _without_assumed_answers(ledger: SeedDraftLedger) -> SeedDraftLedger:
     return copy
 
 
+def test_assumed_answers_leave_the_binding_seed_contract_unchanged() -> None:
+    """Only ``sourced_scope.assumptions`` differs; every binding part is the same.
+
+    Moved from the review-stage tests when the Seed review was removed (#3064):
+    the grade comparison there stood in for this contract check.
+    """
+    ledger = _galaxy_ledger()
+    before = _without_assumed_answers(ledger)
+    pairs = (
+        (_generated_seed(KO_GALAXY_GOAL), _generated_seed(KO_GALAXY_GOAL)),
+        (synthesize_seed_from_ledger(ledger), synthesize_seed_from_ledger(before)),
+    )
+    for after_base, before_base in pairs:
+        after = with_ledger_carryover(after_base, ledger)
+        prior = with_ledger_carryover(before_base, before)
+        assert after.sourced_scope is not None and after.sourced_scope.assumptions
+        assert prior.sourced_scope is not None and not prior.sourced_scope.assumptions
+        assert after.goal == prior.goal
+        assert after.constraints == prior.constraints
+        assert after.acceptance_criteria == prior.acceptance_criteria
+        assert after.sourced_scope.goal == prior.sourced_scope.goal
+        assert after.sourced_scope.constraints == prior.sourced_scope.constraints
+        assert after.sourced_scope.acceptance_criteria == prior.sourced_scope.acceptance_criteria
+
+
 # -- the refined mark ------------------------------------------------------------
 
 
@@ -652,6 +677,50 @@ def test_the_record_lists_one_value_once_under_its_first_label() -> None:
 
     assert ledger_assumed_answers(ledger) == (SPEED,)
     assert ledger_assumptions(ledger) == (SPEED,)
+
+
+# -- the straight-to-run pipeline (#3064) ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_written_seed_hands_the_assumed_answers_straight_to_the_run(
+    empty_repo: Path, tmp_path: Path
+) -> None:
+    """Seed generation -> RUN with nothing in between: the run gets the assumptions."""
+    ledger = await _interview(empty_repo, (SPEED_QUESTION,))
+    started: list[Seed] = []
+    phases: list[str] = []
+
+    async def generate_seed(_session_id: str) -> Seed:
+        return _generated_seed()
+
+    async def run_seed(seed: Seed, **_: Any) -> dict[str, str]:
+        started.append(seed)
+        return {"job_id": "job_assumed"}
+
+    state = AutoPipelineState(goal=GOAL, cwd=str(tmp_path))
+    state.ledger = ledger.to_dict()
+    state.interview_session_id = "interview_assumed"
+    state.interview_completed = True
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    pipeline = AutoPipeline(
+        _Unused(),  # type: ignore[arg-type]
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path / "store"),
+        progress_callback=lambda event: phases.append(event.phase),
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert phases == ["seed_generation", "run", "complete"]
+    (seed,) = started
+    assert seed.sourced_scope is not None
+    assert SPEED in seed.sourced_scope.assumptions
+    assert SPEED in result.assumed_answers
+    assert f"- {SPEED}" in _assumptions_part(_worker_input(seed))
 
 
 # -- reports ---------------------------------------------------------------------

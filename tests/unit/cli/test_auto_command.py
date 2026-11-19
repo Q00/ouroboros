@@ -100,7 +100,6 @@ def test_cli_auto_releases_with_result_based_cleanup_eligibility(
                 resume=None,
                 runtime=None,
                 max_interview_rounds=1,
-                max_repair_rounds=1,
                 skip_run=False,
             )
         )
@@ -128,7 +127,6 @@ def test_cli_auto_exception_releases_without_cleanup(tmp_path) -> None:
                 resume=None,
                 runtime=None,
                 max_interview_rounds=1,
-                max_repair_rounds=1,
                 skip_run=False,
             )
         )
@@ -141,7 +139,6 @@ def test_auto_goal_skip_run_does_not_require_subcommand() -> None:
         status="complete",
         auto_session_id="auto_test",
         phase="complete",
-        grade="A",
         seed_path="/tmp/seed.yaml",
         interview_session_id="interview_test",
     )
@@ -165,7 +162,6 @@ def test_auto_public_claude_runtime_selects_sdk(runtime: str) -> None:
         status="complete",
         auto_session_id="auto_claude_cli",
         phase="complete",
-        grade="A",
         seed_path="/tmp/seed.yaml",
         interview_session_id="interview_test",
     )
@@ -189,7 +185,6 @@ def test_auto_detached_start_output_includes_handles_and_wait_retrieve_guidance(
             status="detached",
             auto_session_id="auto_detached_123",
             phase=AutoPhase.RALPH_HANDOFF.value,
-            grade="A",
             seed_path="/tmp/seed.yaml",
             job_id="job_execute_123",
             execution_id="exec_detached_123",
@@ -225,7 +220,6 @@ def test_auto_detached_start_output_includes_handles_and_wait_retrieve_guidance(
         "Product status: not verified complete; background work is still running\n"
         "Authoring backend: in-process (unspecified)\n"
         "Run backend: unspecified\n"
-        "Seed grade: A\n"
         "Seed: /tmp/seed.yaml\n"
         "Seed origin: none\n"
         "Execution started:\n"
@@ -275,7 +269,6 @@ def test_auto_detached_start_output_includes_pollable_cli_job_handle() -> None:
         status="detached",
         auto_session_id="auto_pollable_start",
         phase=AutoPhase.RALPH_HANDOFF.value,
-        grade="A",
         seed_path="/tmp/seed.yaml",
         job_id="job_execute_pollable",
         ralph_job_id="job_ralph_pollable",
@@ -336,7 +329,6 @@ def test_resume_uses_persisted_bounds_when_cli_unspecified(tmp_path) -> None:
             status="complete",
             auto_session_id=session_id,
             phase="complete",
-            grade="A",
         )
 
     with (
@@ -351,7 +343,6 @@ def test_resume_uses_persisted_bounds_when_cli_unspecified(tmp_path) -> None:
                 resume=session_id,
                 runtime=None,
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=False,
             )
         )
@@ -380,7 +371,6 @@ def test_resume_raises_persisted_bound_when_cli_overrides_higher(tmp_path) -> No
             status="complete",
             auto_session_id=session_id,
             phase="complete",
-            grade="A",
         )
 
     with (
@@ -395,7 +385,6 @@ def test_resume_raises_persisted_bound_when_cli_overrides_higher(tmp_path) -> No
                 resume=session_id,
                 runtime=None,
                 max_interview_rounds=6,
-                max_repair_rounds=None,
                 skip_run=False,
             )
         )
@@ -431,7 +420,6 @@ def test_run_auto_passes_state_interview_timeout_to_driver(tmp_path) -> None:
             status="complete",
             auto_session_id=session_id,
             phase="complete",
-            grade="A",
         )
 
     with (
@@ -446,7 +434,6 @@ def test_run_auto_passes_state_interview_timeout_to_driver(tmp_path) -> None:
                 resume=session_id,
                 runtime=None,
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=False,
             )
         )
@@ -470,7 +457,6 @@ def test_run_auto_uses_default_state_interview_timeout_for_new_sessions() -> Non
             status="complete",
             auto_session_id=run_state.auto_session_id,
             phase="complete",
-            grade="A",
         )
 
     with patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run):
@@ -480,7 +466,6 @@ def test_run_auto_uses_default_state_interview_timeout_for_new_sessions() -> Non
                 resume=None,
                 runtime="claude",
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=True,
             )
         )
@@ -507,7 +492,6 @@ def test_run_auto_policy_args_override_detected_coding_defaults(tmp_path, monkey
             status="complete",
             auto_session_id=run_state.auto_session_id,
             phase="complete",
-            grade="A",
         )
 
     with patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run):
@@ -517,7 +501,6 @@ def test_run_auto_policy_args_override_detected_coding_defaults(tmp_path, monkey
                 resume=None,
                 runtime="claude",
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=True,
                 commit_policy="none",
                 worktree_policy="current",
@@ -545,7 +528,6 @@ def test_run_auto_accepts_current_worktree_policy_alias(tmp_path, monkeypatch) -
             status="complete",
             auto_session_id=run_state.auto_session_id,
             phase="complete",
-            grade="A",
         )
 
     with patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run):
@@ -555,7 +537,6 @@ def test_run_auto_accepts_current_worktree_policy_alias(tmp_path, monkeypatch) -
                 resume=None,
                 runtime="claude",
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=True,
                 worktree_policy="reuse_current",
             )
@@ -587,7 +568,6 @@ def test_resume_rejects_lower_bound_override(tmp_path) -> None:
                     resume=session_id,
                     runtime=None,
                     max_interview_rounds=2,
-                    max_repair_rounds=None,
                     skip_run=False,
                 )
             )
@@ -680,7 +660,6 @@ def test_auto_result_pipeline_carries_runtime_labels(tmp_path) -> None:
             status="complete",
             auto_session_id="auto_test",
             phase="complete",
-            grade="A",
             runtime_backend=state.runtime_backend,
             opencode_mode=state.opencode_mode,
         )
@@ -692,7 +671,6 @@ def test_auto_result_pipeline_carries_runtime_labels(tmp_path) -> None:
                 resume=None,
                 runtime="codex",
                 max_interview_rounds=2,
-                max_repair_rounds=1,
                 skip_run=True,
             )
         )
@@ -729,7 +707,6 @@ def test_run_auto_demotes_plugin_to_subprocess_in_state(tmp_path) -> None:
             status="complete",
             auto_session_id=state.auto_session_id,
             phase="complete",
-            grade="A",
             runtime_backend=state.runtime_backend,
             opencode_mode=state.opencode_mode,
         )
@@ -745,7 +722,6 @@ def test_run_auto_demotes_plugin_to_subprocess_in_state(tmp_path) -> None:
                 resume=state.auto_session_id,
                 runtime=None,
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=False,
             )
         )
@@ -796,9 +772,6 @@ def _state_in_phase(phase: AutoPhase) -> AutoPipelineState:
         return state
     state.transition(AutoPhase.SEED_GENERATION, "seed")
     if phase is AutoPhase.SEED_GENERATION:
-        return state
-    state.transition(AutoPhase.REVIEW, "review")
-    if phase is AutoPhase.REVIEW:
         return state
     state.transition(AutoPhase.RUN, "run")
     return state
@@ -926,7 +899,7 @@ def test_print_status_start_fresh_escapes_rich_markup_in_goal() -> None:
 
 def test_print_status_resume_capability_none_complete_emits_no_resume_line() -> None:
     """Critic fix C5: COMPLETE produces no resume/retry/start-fresh hint."""
-    state = _state_in_phase(AutoPhase.REVIEW)
+    state = _state_in_phase(AutoPhase.SEED_GENERATION)
     state.transition(AutoPhase.COMPLETE, "done")
 
     output = _capture_status(state)
@@ -1136,7 +1109,6 @@ def test_run_auto_wires_the_run_successor_stack(tmp_path) -> None:
             status="complete",
             auto_session_id=session_id,
             phase="complete",
-            grade="A",
         )
 
     with (
@@ -1151,7 +1123,6 @@ def test_run_auto_wires_the_run_successor_stack(tmp_path) -> None:
                 resume=session_id,
                 runtime=None,
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=False,
             )
         )
@@ -1213,7 +1184,6 @@ def test_cli_auto_run_handoff_uses_caller_checkout_for_current_policy(
                 resume=None,
                 runtime=None,
                 max_interview_rounds=1,
-                max_repair_rounds=1,
                 skip_run=False,
                 worktree_policy=worktree_policy,
             )
@@ -1246,7 +1216,6 @@ def test_cli_auto_run_handoff_reuses_the_auto_worktree(tmp_path) -> None:
                 resume=None,
                 runtime=None,
                 max_interview_rounds=1,
-                max_repair_rounds=1,
                 skip_run=False,
             )
         )

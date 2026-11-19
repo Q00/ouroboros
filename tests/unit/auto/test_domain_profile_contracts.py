@@ -406,9 +406,9 @@ def test_auto_package_exports_are_lazy() -> None:
     code = (
         "import sys; "
         "import ouroboros.auto as auto; "
-        "assert 'ouroboros.auto.grading' not in sys.modules; "
-        "assert auto.GradeGate.__name__ == 'GradeGate'; "
-        "assert 'ouroboros.auto.grading' in sys.modules"
+        "assert 'ouroboros.auto.ledger' not in sys.modules; "
+        "assert auto.SeedDraftLedger.__name__ == 'SeedDraftLedger'; "
+        "assert 'ouroboros.auto.ledger' in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 

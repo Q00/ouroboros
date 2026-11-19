@@ -902,7 +902,6 @@ async def test_issue_1450_arm_runner_requires_product_and_trace_evidence(
             seed = synthesize_seed_from_ledger(SeedDraftLedger.from_dict(state.ledger))
             state.seed_id = seed.metadata.seed_id
             state.seed_artifact = seed.to_dict()
-            state.transition(AutoPhase.REVIEW, "fake review complete")
             state.transition(AutoPhase.COMPLETE, "fake product verified")
             self.store.save(state)
             (workdir / "habit_tracker.py").write_text(

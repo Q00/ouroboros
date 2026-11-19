@@ -63,7 +63,6 @@ _FAKE_RESULT = AutoPipelineResult(
     status="complete",
     auto_session_id="auto_test123",
     phase="complete",
-    grade="A",
     seed_path=None,
     seed_origin=SeedOrigin.NONE.value,
 )
@@ -141,7 +140,6 @@ def test_domain_flag_overrides_detection(fake_profile, tmp_path) -> None:
                     resume=None,
                     runtime=None,
                     max_interview_rounds=None,
-                    max_repair_rounds=None,
                     skip_run=True,
                     domain="fake-domain",
                 )
@@ -173,7 +171,6 @@ def test_detection_falls_back_to_best_profile(detectable_profile, tmp_path) -> N
                     resume=None,
                     runtime=None,
                     max_interview_rounds=None,
-                    max_repair_rounds=None,
                     skip_run=True,
                     domain=None,
                 )
@@ -206,7 +203,6 @@ def test_no_match_leaves_profile_none(tmp_path) -> None:
                         resume=None,
                         runtime=None,
                         max_interview_rounds=None,
-                        max_repair_rounds=None,
                         skip_run=True,
                         domain=None,
                     )
@@ -245,7 +241,6 @@ def test_detector_exception_leaves_profile_none(tmp_path) -> None:
                     resume=None,
                     runtime=None,
                     max_interview_rounds=None,
-                    max_repair_rounds=None,
                     skip_run=True,
                     domain=None,
                 )
@@ -270,7 +265,6 @@ def test_unknown_domain_value_errors(tmp_path) -> None:
                         resume=None,
                         runtime=None,
                         max_interview_rounds=None,
-                        max_repair_rounds=None,
                         skip_run=True,
                         domain="banana",
                     )
@@ -311,7 +305,6 @@ def test_resume_without_domain_preserves_persisted_profile(tmp_path) -> None:
                 resume=state.auto_session_id,
                 runtime=None,
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=True,
                 domain=None,
             )
@@ -356,7 +349,6 @@ def test_resume_with_explicit_domain_overrides_persisted_profile(tmp_path) -> No
                 resume=state.auto_session_id,
                 runtime=None,
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=True,
                 domain="override-domain",
             )

@@ -373,11 +373,8 @@ def partial_seed_from_evidence(
     )
 
     # Degraded seeds carry a deliberately elevated ambiguity floor so that
-    # downstream grading observers can see the deadline-driven uncertainty
-    # without us having to special-case the gate logic here. The grade gate
-    # (PR-C) decides whether to suppress the high_ambiguity_score blocker
-    # based on ``metadata.degraded`` / ``generation_mode`` — it does not
-    # re-derive uncertainty from the score itself.
+    # downstream observers can see the deadline-driven uncertainty in the
+    # Seed's ``ambiguity_score``.
     floor = deterministic_floor(ledger)
     ambiguity_score = max(0.05, floor)
     if degraded:

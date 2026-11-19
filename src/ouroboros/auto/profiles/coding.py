@@ -22,7 +22,7 @@ DEFAULT_WORKTREE_POLICY = AutoWorktreePolicy.AUTO
 
 # Keep these lightweight constants local so importing/registering the built-in
 # coding profile does not import ``ouroboros.auto.grading`` and its pydantic
-# transitive dependencies. Parity tests pin these values against grading.py.
+# transitive dependencies. The auto answerer reads them through the profile.
 VAGUE_TERMS = (
     "easy",
     "intuitive",
@@ -41,7 +41,7 @@ VAGUE_TERMS = (
 
 
 def _is_observable_criterion(criterion: str) -> bool:
-    """Delegate to the existing grading gate only when predicate matching runs."""
+    """Delegate to the observable-criterion check only when predicate matching runs."""
     from ouroboros.auto.grading import _is_observable  # noqa: PLC2701
 
     return _is_observable(criterion)
@@ -103,7 +103,7 @@ def _with_check(criterion: str, code: str) -> str:
 
 
 def _matches_observable_pattern(criterion: str, *patterns: str) -> bool:
-    """Return True only for criteria accepted by the existing grading contract."""
+    """Return True only for criteria the observable-criterion check accepts."""
     if not _is_observable_criterion(criterion):
         return False
     lowered = criterion.lower()

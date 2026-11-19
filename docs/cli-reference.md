@@ -40,7 +40,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 |---------|-------------|
 | `setup` | Detect runtimes and configure Ouroboros for your environment |
 | `init` / `interview` | Start an interactive interview (`interview` is an alias of `init`) |
-| `auto` | Run bounded goal → A-grade Seed → execution handoff pipeline |
+| `auto` | Run bounded goal → interview → Seed → execution handoff pipeline |
 | `job` | Inspect detached job status, waits, results, and event streams |
 | `run` | Execute Ouroboros workflows |
 | `qa` | Evaluate an artifact against a natural-language quality bar |
@@ -87,17 +87,17 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | Option | Description |
 |--------|-------------|
 | `--resume TEXT` | Resume an existing auto session id |
-| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`. Authoring phases (interview, seed generation, seed repair) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow - see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
+| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`. Authoring phases (interview, seed generation) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow - see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
 | `--max-interview-rounds INTEGER` | Maximum automatic interview rounds; prevents unbounded interview loops |
-| `--max-repair-rounds INTEGER` | Maximum Seed repair rounds; prevents unbounded repair loops |
-| `--skip-run` | Stop after creating an A-grade Seed |
+| `--max-repair-rounds INTEGER` | Deprecated and ignored: auto no longer reviews or repairs the Seed. Prints a warning when passed |
+| `--skip-run` | Stop after the Seed is written |
 | `--show-ledger` | Print assumptions and non-goals captured during auto convergence |
 | `--status` | Print the persisted state for `--resume <id>` without running |
 | `--requester-command CMD` | Ask the requester instead of assuming (off by default; see below). Overrides `OUROBOROS_AUTO_REQUESTER_COMMAND` |
 | `--requester-timeout SECONDS` | Seconds to wait for one requester answer before keeping auto's draft (default 300). Overrides `OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS` |
 | `--progress-jsonl PATH` | Also append every live progress event to `PATH` as one JSON object per line (see [Machine-readable progress](#machine-readable-progress)). The text output is unchanged |
 
-Auto mode starts execution only after the generated Seed reaches A-grade. If a phase times out or hits a hard blocker, the command prints the auto session id and a resume command instead of hanging indefinitely.
+Auto mode writes the generated Seed and starts execution on it directly: there is no Seed review, grade, repair, or pre-run check in between, and the run verifies each acceptance criterion after it executes. A session saved in the old `review` or `repair` phase, or blocked by the old pre-run checks, resumes with `--resume` and goes straight to the run. If a phase times out or hits a hard blocker, the command prints the auto session id and a resume command instead of hanging indefinitely.
 
 ### Machine-readable progress
 
@@ -113,13 +113,15 @@ Each line has every field of an event:
 {"auto_session_id": "auto_8820ee51202b", "phase": "interview", "kind": "answer", "message": "answered round 6/50 from non_goal", "round": 6, "grade": null, "question": "Which parts are out of scope?", "answer": "CLI and packaging are non-goals.", "answer_source": "non_goal", "timestamp": "2026-11-16T23:54:22.448527+00:00"}
 ```
 
-- `kind` is `phase` (the phase or its progress message changed), `grade` (a
-  Seed review produced a new grade), `repair` (the Seed repair round
-  advanced), `question` (the interview asked round `round`) or `answer` (auto
-  answered round `round`).
+- `kind` is `phase` (the phase or its progress message changed), `question`
+  (the interview asked round `round`) or `answer` (auto answered round
+  `round`). Files written before the Seed review was removed may also hold
+  `grade` and `repair` lines, with the `grade` field set; nothing writes them
+  now, and `grade` is `null` on every new line.
 - `phase` is the auto phase at that moment: `created`, `interview`,
-  `seed_generation`, `review`, `repair`, `run`, `ralph_handoff`, `evaluate`,
-  `unstuck_lateral`, `complete`, `blocked` or `failed`.
+  `seed_generation`, `run`, `complete`, `blocked` or `failed`. Older files may
+  also hold the retired `review`, `repair`, `ralph_handoff`, `evaluate` and
+  `unstuck_lateral` phases.
 - `answer_source` says where an answer came from: `user_goal`, `repo_fact`,
   `existing_convention`, `user_preference`, `conservative_default`,
   `assumption`, `non_goal`, `blocker` or `requester`.
@@ -289,8 +291,7 @@ have no receiver outside an active OpenCode bridge plugin session.
 | ---------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1. Interview authoring | `mcp.tools.authoring_handlers.InterviewHandler`        | In-process for every `--runtime` value. `opencode + plugin` is demoted to `subprocess` before the handler is constructed, so authoring never short-circuits to the bridge. |
 | 2. Seed generation     | `mcp.tools.authoring_handlers.GenerateSeedHandler`     | Same rule as interview authoring — always in-process for `ooo auto`.                                                                                                       |
-| 3. Seed repair         | `auto.seed_repairer.SeedRepairer`                      | In-process; never dispatched.                                                                                                                                               |
-| 4. Run handoff         | `mcp.tools.execution_handlers.StartExecuteSeedHandler` | Routed through the runtime adapter selected by `--runtime`. **CLI entry point** (`ouroboros auto`) also demotes `opencode + plugin` to `subprocess` here, because the standalone CLI process is not the OpenCode session that owns the bridge plugin. **MCP entry point** (`mcp/tools/auto_handler.py`) keeps `plugin` for run-handoff because it is invoked from inside the OpenCode session. |
+| 3. Run handoff         | `mcp.tools.execution_handlers.StartExecuteSeedHandler` | Routed through the runtime adapter selected by `--runtime`. **CLI entry point** (`ouroboros auto`) also demotes `opencode + plugin` to `subprocess` here, because the standalone CLI process is not the OpenCode session that owns the bridge plugin. **MCP entry point** (`mcp/tools/auto_handler.py`) keeps `plugin` for run-handoff because it is invoked from inside the OpenCode session. |
 
 > **Why this matters:** `--runtime codex` does **not** mean "Codex performs
 > the interview". The Ouroboros MCP server still owns the first authoring

@@ -94,8 +94,6 @@ ANCHOR_FILES: tuple[str, ...] = (
     "src/ouroboros/auto/state.py",
     "src/ouroboros/auto/adapters.py",
     "src/ouroboros/auto/grading.py",
-    "src/ouroboros/auto/seed_repairer.py",
-    "src/ouroboros/auto/seed_reviewer.py",
     "src/ouroboros/auto/progress.py",
 )
 

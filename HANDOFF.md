@@ -99,7 +99,7 @@ clearly matches these cases.
 
 - interview: 구현 전, 모호함·범위·AC 부족 시 사용. 닫힌 요구사항 상태를 만든다.
 - start_auto: 다단계·마이그레이션·고위험 end-to-end 작업의 기본 진입점.
-  interview → A-grade Seed → execution handoff를 수행한다.
+  interview → Seed → execution handoff를 수행한다.
 - start_execute_seed: 기존 Seed가 있을 때만 사용. raw/모호 요청에는 사용하지 않는다.
 
 내부 아키텍처, polling 방법, 장황한 파라미터 설명은 진입 설명에서 제외하고 기존

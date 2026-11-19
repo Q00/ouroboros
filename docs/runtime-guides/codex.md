@@ -399,24 +399,25 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 > opt-out — the CLI's "Generate Seed anyway" and the MCP `force` parameter. Bypassing it still records
 > the real score in seed metadata and emits the bypass to the audit log.
 >
-> `ouroboros auto` re-checks readiness during a run, but **conditionally**, and the
-> two suppression cases have opposite consequences
-> ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)):
+> `ouroboros auto` does not re-check the score after the Seed is written: there
+> is no Seed review or grade between Seed generation and the run (#3064), and
+> the run verifies each acceptance criterion after it executes. When the
+> interview closed on ledger evidence (`closure_mode` of `ledger_only` or
+> `safe_default`), Seed generation is forced past the 0.2 gate because the
+> ledger's structural completeness is the acceptance signal.
 >
-> - **Ledger closure** (`closure_mode` of `ledger_only` or `safe_default`, not
->   degraded): the ledger's structural completeness is the acceptance signal and
->   the LLM-derived score is stale by design, so a Seed scoring well above 0.2 can
->   grade A and **run**. Other grading axes still apply.
-> - **Degraded Seed** (interview deadline): the blocker is suppressed, and the
->   grade and `may_run` bars are waived, because the unresolved slots are
->   reported as findings and hold the grade below A by construction. A
->   blocker-free degraded Seed that carries the user's goal on record
+> A **degraded Seed** (the interview deadline closed the interview) follows the
+> interview's own closure rules instead
+> ([`auto/degraded_seed.py`](../../src/ouroboros/auto/degraded_seed.py)):
+>
+> - a required ledger section marked `BLOCKED` (an answer only a human can
+>   give) stops the session with stop reason `degraded_seed_safety_blockers`;
+> - otherwise, a degraded Seed that carries the user's goal on record
 >   (`sourced_scope`) **runs** like any auto Seed: the worker is told only that
->   goal, and the unresolved slots stay in the Seed and the result
->   ([`auto/grade_gate_terminals.py`](../../src/ouroboros/auto/grade_gate_terminals.py)).
->   Without a sourced goal it never reaches RUN, so the session stops
+>   goal, and the unresolved slots stay in the Seed and the result;
+> - without a sourced goal it never reaches RUN, so the session stops
 >   `AutoPhase.BLOCKED` with stop reason `degraded_seed_not_executed`, never
->   `COMPLETE`. Remaining blockers are hard safety blockers and still terminate.
+>   `COMPLETE`.
 >
 > In practice: a hand-written seed carrying a high `ambiguity_score` is not blocked by
 > `ouroboros run workflow`. The field is provenance, not an enforcement gate.
