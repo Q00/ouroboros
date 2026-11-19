@@ -561,17 +561,36 @@ def _assumption_lines(ledger: SeedDraftLedger, *, include_unasked: bool) -> tupl
                     keep=lambda entry: not entry.question.strip(),
                 )
             )
-        values.extend(
-            entry.value.strip()
-            for entry in _active_entries(ledger, section_name)
-            if not entry.binds_seed
-            and _is_assumed_answer(entry)
-            and not _is_requester_answer(entry)
-            and not _is_repo_fact(entry)
-        )
+        values.extend(entry.value.strip() for entry in _assumed_entries(ledger, section_name))
         for value in values:
             lines.setdefault(value, f"{prefix}{value}")
     return tuple(lines.values())
+
+
+def _assumed_entries(ledger: SeedDraftLedger, section_name: str) -> tuple[LedgerEntry, ...]:
+    """The active, non-binding entries of a section that hold an answer auto chose."""
+    return tuple(
+        entry
+        for entry in _active_entries(ledger, section_name)
+        if not entry.binds_seed
+        and _is_assumed_answer(entry)
+        and not _is_requester_answer(entry)
+        and not _is_repo_fact(entry)
+    )
+
+
+def _decided_questions(ledger: SeedDraftLedger) -> frozenset[str]:
+    """Interviewer questions auto chose an answer for in at least one section.
+
+    The refiner writes each section of an answer in its own call, and a call
+    that fails leaves that section's template in place. The question is still
+    decided: its chosen answer reaches the worker, so it is not open.
+    """
+    return frozenset(
+        entry.question.strip()
+        for section_name in _ASSUMPTION_SECTIONS
+        for entry in _assumed_entries(ledger, section_name)
+    )
 
 
 def ledger_open_questions(ledger: SeedDraftLedger) -> tuple[str, ...]:
@@ -579,15 +598,17 @@ def ledger_open_questions(ledger: SeedDraftLedger) -> tuple[str, ...]:
 
     The split is by entry provenance, never by text: an active entry that does
     not bind and carries the interviewer's question (``LedgerEntry.question``,
-    stamped where the entry is created) holds a draft nobody confirmed. When
-    auto chose no answer for it (``_is_assumed_answer``), the question is
-    open. That covers the investigator's not-settled entries
-    (``NOT_SETTLED_VALUE``), drafts that kept the answerer's template, and
-    drafts kept because the requester gave no answer
-    (``LedgerEntry.requester_unanswered``). Requester answers, checked
-    repository facts and the answers auto chose are answers, so they are never
-    open questions.
+    stamped where the entry is created) holds a draft nobody confirmed. The
+    question is open unless auto chose an answer for it in at least one
+    section (``_decided_questions``); a section whose refiner call failed and
+    kept the template does not reopen it. Open questions therefore cover the
+    investigator's not-settled entries (``NOT_SETTLED_VALUE``), questions only
+    the answerer's template answered, and drafts kept because the requester
+    gave no answer (``LedgerEntry.requester_unanswered``). Requester answers,
+    checked repository facts and the answers auto chose are answers, so they
+    are never open questions.
     """
+    decided = _decided_questions(ledger)
     questions: list[str] = []
     for section_name in _ASSUMPTION_SECTIONS:
         questions.extend(
@@ -595,9 +616,9 @@ def ledger_open_questions(ledger: SeedDraftLedger) -> tuple[str, ...]:
             for entry in _active_entries(ledger, section_name)
             if not entry.binds_seed
             and entry.question.strip()
+            and entry.question.strip() not in decided
             and not _is_requester_answer(entry)
             and not _is_repo_fact(entry)
-            and not _is_assumed_answer(entry)
         )
     return tuple(dict.fromkeys(questions))
 
@@ -710,12 +731,22 @@ def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
     and exit conditions are written by the Seed generator from the whole
     interview, unanswered questions included, so they stay in the Seed for the
     record and for verification only.
+
+    The Seed's open questions are reconciled with the ledger: a question the
+    Seed already lists stays unless auto has since chosen an answer for it
+    (``_decided_questions``), so a Seed recorded again (repair, resume) never
+    keeps a decided question open.
     """
     seed = with_requester_answers(with_ledger_assumptions(seed, ledger), ledger)
     merged = tuple(dict.fromkeys((*seed.repo_facts, *ledger_repo_facts(ledger))))
     if merged != seed.repo_facts:
         seed = seed.model_copy(update={"repo_facts": merged})
-    questions = tuple(dict.fromkeys((*seed.open_questions, *ledger_open_questions(ledger))))
+    decided = _decided_questions(ledger)
+    questions = tuple(
+        question
+        for question in dict.fromkeys((*seed.open_questions, *ledger_open_questions(ledger)))
+        if question.strip() not in decided
+    )
     if questions != seed.open_questions:
         seed = seed.model_copy(update={"open_questions": questions})
     scope = ledger_sourced_scope(ledger)

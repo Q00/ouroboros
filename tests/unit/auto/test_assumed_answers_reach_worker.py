@@ -52,6 +52,7 @@ from ouroboros.auto.ledger_seed import (
     ledger_assumptions,
     ledger_open_questions,
     ledger_sourced_scope,
+    partial_seed_from_evidence,
     synthesize_seed_from_ledger,
     with_ledger_carryover,
 )
@@ -817,3 +818,111 @@ def test_every_section_label_renders_in_order() -> None:
     section_text = _assumptions_part(_worker_input(seed))
     rendered = [line[2:] for line in section_text.splitlines() if line.startswith("- ")]
     assert tuple(rendered) == expected
+
+
+# -- question-level decision: one chosen section decides the question --------------
+
+OTHER_QUESTION = "Should the demo pause when the tab is hidden?"
+
+
+def _mixed_ledger(*, refined_sections: tuple[str, ...]) -> SeedDraftLedger:
+    """One question answered in two sections; ``refined_sections`` were rewritten."""
+    ledger = SeedDraftLedger.from_goal(GOAL)
+    for section, value in (
+        ("constraints", SPEED),
+        ("failure_modes", "Failure includes unverified behavior or scope expansion."),
+    ):
+        ledger.add_entry(
+            section,
+            _entry(
+                f"{section}.k.investigated.1",
+                value,
+                question=SPEED_QUESTION,
+                refined=section in refined_sections,
+            ),
+        )
+    return _closed(ledger, GOAL)
+
+
+def test_one_refined_section_decides_the_question() -> None:
+    ledger = _mixed_ledger(refined_sections=("constraints",))
+
+    assert SPEED_QUESTION not in ledger_open_questions(ledger)
+    # Only the chosen answer is an assumption; the template that stayed is neither.
+    assert ledger_assumed_answers(ledger) == (SPEED,)
+    for seed in (
+        synthesize_seed_from_ledger(ledger),
+        partial_seed_from_evidence(ledger, reason="test"),
+        with_ledger_carryover(_generated_seed(), ledger),
+    ):
+        assert SPEED_QUESTION not in seed.open_questions
+
+
+def test_a_question_with_no_refined_section_stays_open() -> None:
+    ledger = _mixed_ledger(refined_sections=())
+
+    assert ledger_open_questions(ledger) == (SPEED_QUESTION,)
+    assert ledger_assumed_answers(ledger) == ()
+    seed = with_ledger_carryover(_generated_seed(), ledger)
+    assert seed.open_questions == (SPEED_QUESTION,)
+    assert seed.sourced_scope is not None and seed.sourced_scope.assumptions == ()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refiner_call_for_one_section_does_not_reopen_the_question(
+    empty_repo: Path, tmp_path: Path
+) -> None:
+    async def refiner(goal: str, question: str, section: str, value: str, committed) -> str:  # noqa: ARG001
+        if section == "failure_modes":
+            raise RuntimeError("provider unavailable")
+        return SPEED
+
+    ledger = await _interview(empty_repo, (SPEED_QUESTION,), refiner=refiner)
+    entries = {
+        section: entry
+        for section, ledger_section in ledger.sections.items()
+        for entry in ledger_section.entries
+        if entry.question == SPEED_QUESTION
+    }
+    assert entries["constraints"].refined
+    assert not entries["failure_modes"].refined  # the template stayed
+
+    seed = _recorded_seed(tmp_path, ledger)
+    assert SPEED_QUESTION not in seed.open_questions
+    assert seed.sourced_scope is not None
+    assert seed.sourced_scope.assumptions == (SPEED,)
+    prompt = _worker_input(seed)
+    assert SPEED in _assumptions_part(prompt)
+    assert entries["failure_modes"].value not in prompt
+    assert SPEED_QUESTION not in prompt
+
+
+def test_carryover_drops_a_decided_question_the_seed_already_lists(tmp_path: Path) -> None:
+    """A Seed recorded before the answer was chosen (resume, repair) is reconciled."""
+    ledger = _mixed_ledger(refined_sections=("constraints",))
+    listed = _generated_seed().model_copy(
+        update={"open_questions": (SPEED_QUESTION, OTHER_QUESTION)}
+    )
+
+    carried = with_ledger_carryover(listed, ledger)
+    assert carried.open_questions == (OTHER_QUESTION,)
+    # Recording again changes nothing.
+    assert with_ledger_carryover(carried, ledger).open_questions == (OTHER_QUESTION,)
+
+    state = AutoPipelineState(goal=GOAL, cwd=str(tmp_path))
+    pipeline = AutoPipeline(_Unused(), None)  # type: ignore[arg-type]
+    recorded = pipeline._record_generated_seed(state, ledger, listed)
+    assert recorded.open_questions == (OTHER_QUESTION,)
+    result = pipeline._result(state, ledger)
+    assert result.open_questions == (OTHER_QUESTION,)
+    assert result.assumed_answers == (SPEED,)
+
+
+def test_carryover_keeps_an_undecided_question_the_seed_already_lists() -> None:
+    ledger = _mixed_ledger(refined_sections=())
+    listed = _generated_seed().model_copy(update={"open_questions": (OTHER_QUESTION,)})
+
+    assert with_ledger_carryover(listed, ledger).open_questions == (
+        OTHER_QUESTION,
+        SPEED_QUESTION,
+    )
