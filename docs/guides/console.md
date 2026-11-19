@@ -102,7 +102,10 @@ and Spanish (side rail → language).
     for;
   - the run card with its acceptance-criterion tiles, once the run has an
     execution id. Until the run has planned its tasks, which can take
-    minutes, the card says it is preparing them.
+    minutes, the card says it is preparing them. An Auto Seed runs one
+    worker attempt for all of its criteria, so every tile shows as executing
+    while that attempt runs, and each one settles as its criterion is judged
+    after it; the done count moves then.
 
   The header and side pane name the agent and Execute model the job runs
   on, resolved as `ouroboros auto` resolves them when the chat starts: the

@@ -10,6 +10,8 @@ a Seed runs one worker attempt (root 0, whose task is the sourced objective),
 and every other criterion is judged from that attempt against its own text:
 the typed evidence, the legacy verifier, its own verify command and the check
 package gate, exactly once per criterion (:func:`settle_from_shared_attempt`).
+Progress reports every criterion ``executing`` while root 0's attempt runs,
+and each one's status as soon as it is judged (:func:`report_progress`).
 
 The decision reads structure only: whether the Seed carries ``sourced_scope``,
 how many criteria it has, and whether the binding criteria equal the Seed's
@@ -18,6 +20,7 @@ criteria as lists. Nothing classifies text.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 import os
 from typing import TYPE_CHECKING, Any
@@ -251,8 +254,39 @@ async def settle_from_shared_attempt(
     return result
 
 
+async def report_progress(
+    executor: ParallelACExecutor,
+    session_id: str,
+    execution_id: str,
+    seed: Seed,
+    ac_statuses: Mapping[int, str],
+    progress_state: Mapping[str, int],
+) -> None:
+    """Emit the workflow snapshot before the next criterion is judged from the shared attempt.
+
+    It is the snapshot the periodic ``Monitoring`` emitter sends, from the same
+    inputs, sent now instead of at its next tick. Every criterion judged so far
+    (root 0 and the ones before) shows its status, and the rest stay
+    ``executing``: each tile settles as soon as its criterion is judged, the
+    last one in the level's completion snapshot that follows.
+    """
+    await executor._emit_workflow_progress(
+        session_id=session_id,
+        execution_id=execution_id,
+        seed=seed,
+        ac_statuses=dict(ac_statuses),
+        ac_retry_attempts=None,
+        executing_indices=[i for i, s in ac_statuses.items() if s == "executing"],
+        completed_count=sum(1 for s in ac_statuses.values() if s == "completed"),
+        current_level=progress_state.get("current_level", 0),
+        total_levels=progress_state.get("total_levels", 0),
+        activity="Monitoring",
+    )
+
+
 __all__ = [
     "SHARED_ATTEMPT_ROOT",
+    "report_progress",
     "settle_from_shared_attempt",
     "shared_attempt_graph",
     "shares_one_attempt",
