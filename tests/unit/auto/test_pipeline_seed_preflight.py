@@ -8,6 +8,7 @@ to revise the Seed and start a replacement session.
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 
 import pytest
@@ -19,6 +20,12 @@ from ouroboros.auto.interview_driver import (
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline, _recoverable_phase_for_tool
+from ouroboros.auto.seed_preflight_gate import _repair_progress_message
+from ouroboros.auto.seed_preflight_repair import (
+    DECLARED_ACTION,
+    RELOCATED_ACTION,
+    PreflightRepair,
+)
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
@@ -401,3 +408,174 @@ async def test_preflight_blocker_lists_only_blocking_questions(tmp_path) -> None
     assert result.blocker.startswith("Seed preflight found 1 unexecutable contract claim(s)")
     assert blocking_question in result.blocker
     assert advisory_question not in result.blocker
+
+
+def _galaxy_seed(*extra: AcceptanceCriterionSpec) -> Seed:
+    """The #3058 shape: every criterion runs a ``node --test`` file the run will write."""
+    return Seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="The scene renders 20,000 particles in spiral arms",
+                verify_command="node --test test/galaxy-scene.test.js",
+            ),
+            AcceptanceCriterionSpec(
+                description="Dragging orbits the camera and scrolling zooms",
+                verify_command="node --test test/camera-controls.test.js",
+            ),
+            AcceptanceCriterionSpec(
+                description="Sliders change arm count, twist and color",
+                verify_command="node --test test/controls-panel.test.js",
+            ),
+            *extra,
+        ),
+        **_seed_base(),  # type: ignore[arg-type]
+    )
+
+
+def _empty_repo(path) -> str:
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    return str(path)
+
+
+async def _run_galaxy(tmp_path, workspace: str, event_store: _RecordingEventStore):
+    started: list[Seed] = []
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _galaxy_seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        started.append(seed)
+        return {"job_id": "job_galaxy"}
+
+    state = AutoPipelineState(goal="Build a 3D galaxy", cwd=workspace)
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = AutoPipeline(
+        _driver(tmp_path, event_store),
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+    )
+    return await pipeline.run(state), state, started
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_seed_whose_node_tests_the_run_creates(tmp_path) -> None:
+    """#3058: an empty repo's verify commands name test files; the Seed runs."""
+    event_store = _RecordingEventStore()
+
+    result, state, started = await _run_galaxy(
+        tmp_path / "run", _empty_repo(tmp_path / "galaxy"), event_store
+    )
+
+    assert result.status == "complete"
+    assert result.job_id == "job_galaxy"
+    assert len(started) == 1
+    criteria = [
+        criterion
+        for criterion in started[0].acceptance_criteria
+        if isinstance(criterion, AcceptanceCriterionSpec)
+    ]
+    # The verify commands run as written; the files they run are now part of
+    # the worker-visible contract.
+    assert [criterion.verify_command for criterion in criteria] == [
+        "node --test test/galaxy-scene.test.js",
+        "node --test test/camera-controls.test.js",
+        "node --test test/controls-panel.test.js",
+    ]
+    assert [criterion.expected_artifacts for criterion in criteria] == [
+        ("test/galaxy-scene.test.js",),
+        ("test/camera-controls.test.js",),
+        ("test/controls-panel.test.js",),
+    ]
+    assert not [
+        event for event in event_store.appended if event.type == "auto.seed_preflight.blocked"
+    ]
+    repaired = [
+        event for event in event_store.appended if event.type == "auto.seed_preflight.repaired"
+    ]
+    assert len(repaired) == 1
+    assert [repair["action"] for repair in repaired[0].data["repairs"]] == [DECLARED_ACTION] * 3
+    assert [repair["evidence_path"] for repair in repaired[0].data["repairs"]] == [None] * 3
+
+    # Control: with the test files present preflight passes unrepaired. The
+    # three declarations used exactly one round of the shared repair budget.
+    control_workspace = tmp_path / "control"
+    for name in ("galaxy-scene", "camera-controls", "controls-panel"):
+        test_file = control_workspace / "test" / f"{name}.test.js"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_text("import test from 'node:test';\n", encoding="utf-8")
+    control_store = _RecordingEventStore()
+    control, control_state, _ = await _run_galaxy(
+        tmp_path / "control-run", str(control_workspace), control_store
+    )
+    assert control.status == "complete"
+    assert not [
+        event for event in control_store.appended if event.type == "auto.seed_preflight.repaired"
+    ]
+    assert state.repair_round == control_state.repair_round + 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_invented_program_still_blocks_with_its_reason(tmp_path) -> None:
+    """A missing program that ``node --test`` does not run still stops the session."""
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _galaxy_seed(
+            AcceptanceCriterionSpec(
+                description="The build check passes",
+                verify_command="node scripts/verify-galaxy.js",
+            )
+        )
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("run must not start when Seed preflight blocks")
+
+    event_store = _RecordingEventStore()
+    state = AutoPipelineState(goal="Build a 3D galaxy", cwd=_empty_repo(tmp_path / "galaxy"))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = AutoPipeline(
+        _driver(tmp_path, event_store),
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.stop_reason_code == "seed_preflight_unexecutable"
+    assert result.blocker is not None
+    assert result.blocker.startswith("Seed preflight found 1 unexecutable contract claim(s)")
+    assert "'scripts/verify-galaxy.js'" in result.blocker
+    assert "galaxy-scene.test.js" not in result.blocker
+    blocked = [
+        event for event in event_store.appended if event.type == "auto.seed_preflight.blocked"
+    ]
+    assert len(blocked) == 1
+    assert blocked[0].data["codes"] == ["verify_program_missing"]
+
+
+def test_repair_progress_message_names_each_kind_of_repair() -> None:
+    relocated = PreflightRepair(
+        "verify_program_missing", "runtests.py", "tests/runtests.py", (), ()
+    )
+    declared = PreflightRepair(
+        "verify_program_missing", "test/a.test.js", None, (), (), action=DECLARED_ACTION
+    )
+    assert relocated.action == RELOCATED_ACTION
+
+    assert _repair_progress_message((relocated,)) == (
+        "Seed preflight repaired 1 verify command path(s) from the workspace listing"
+    )
+    assert _repair_progress_message((declared, declared)) == (
+        "Seed preflight declared 2 test file(s) the run will create as expected artifacts"
+    )
+    assert _repair_progress_message((relocated, declared)) == (
+        "Seed preflight repaired 1 verify command path(s) from the workspace listing and "
+        "declared 1 test file(s) the run will create as expected artifacts"
+    )

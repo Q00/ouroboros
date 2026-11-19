@@ -524,7 +524,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/auto/seed_preflight_repair.py",
         "_git_listed_files",
         "subprocess.run",
-        108,
+        136,
         20,
     ): "Fixed git ls-files roster; GIT_* and PATH denied from project .env.",
     (

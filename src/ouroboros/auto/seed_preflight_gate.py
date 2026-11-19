@@ -16,7 +16,11 @@ from ouroboros.auto.grade_gate_terminals import (
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.seed_preflight import run_seed_preflight
-from ouroboros.auto.seed_preflight_repair import repair_seed_preflight
+from ouroboros.auto.seed_preflight_repair import (
+    DECLARED_ACTION,
+    PreflightRepair,
+    repair_seed_preflight,
+)
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPipelineState
 from ouroboros.core.seed import Seed
@@ -71,6 +75,18 @@ async def enforce_seed_preflight(
     return blocker
 
 
+def _repair_progress_message(repairs: tuple[PreflightRepair, ...]) -> str:
+    """Say what the preflight repair changed, by kind."""
+    declared = sum(1 for repair in repairs if repair.action == DECLARED_ACTION)
+    relocated = len(repairs) - declared
+    parts = []
+    if relocated:
+        parts.append(f"repaired {relocated} verify command path(s) from the workspace listing")
+    if declared:
+        parts.append(f"declared {declared} test file(s) the run will create as expected artifacts")
+    return "Seed preflight " + " and ".join(parts)
+
+
 @dataclass(frozen=True, slots=True)
 class AutoPreflightRepair:
     """Seed and review to continue with, plus a blocker when the session stops."""
@@ -96,7 +112,8 @@ async def repair_seed_preflight_in_auto(
 
     Auto mode has no human to answer a preflight question, so a finding the
     repository itself decides (a verifier script that exists at another path
-    in the checkout) is rewritten from the workspace listing and re-checked;
+    in the checkout, or a ``node --test`` file no listed file can be, which the
+    run must create) is rewritten from the workspace listing and re-checked;
     see :mod:`ouroboros.auto.seed_preflight_repair`. The rounds share the
     review repair budget (``max_repair_rounds``). A repaired Seed is
     re-reviewed, persisted, and must still clear the grade gate; whatever
@@ -117,7 +134,7 @@ async def repair_seed_preflight_in_auto(
     )
     state.seed_artifact = repaired_seed.to_dict()
     state.seed_id = repaired_seed.metadata.seed_id
-    state.repair_round += len(outcome.repairs)
+    state.repair_round += outcome.kept_rounds
     state.last_grade = repaired_review.grade_result.grade.value
     state.findings = [asdict(finding) for finding in repaired_review.findings]
     if seed_saver is not None:
@@ -138,6 +155,7 @@ async def repair_seed_preflight_in_auto(
             "repairs": [
                 {
                     "code": repair.code,
+                    "action": repair.action,
                     "subject": repair.subject,
                     "evidence_path": repair.evidence_path,
                     "commands_before": list(repair.commands_before[:8]),
@@ -147,11 +165,7 @@ async def repair_seed_preflight_in_auto(
             ],
         },
     )
-    state.mark_progress(
-        f"Seed preflight repaired {len(outcome.repairs)} verify command path(s) "
-        "from the workspace listing",
-        tool_name="seed_preflight",
-    )
+    state.mark_progress(_repair_progress_message(outcome.repairs), tool_name="seed_preflight")
     if terminal := seed_review_gate_blocker(
         state,
         repaired_review,

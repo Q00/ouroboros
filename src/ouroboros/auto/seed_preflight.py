@@ -1460,12 +1460,18 @@ def _check_verify_commands(
     return findings
 
 
-def _command_program_tokens(command: str) -> frozenset[str]:
+def _command_program_tokens(
+    command: str, *, test_runner_operands: set[str] | None = None
+) -> frozenset[str]:
     """Return file operands that are the executable's verification program.
 
     This deliberately handles only unambiguous shell forms. A missing operand
     after ``python``/``bash``/``node`` or an explicit ``./program`` is a
     decidable fabrication; ordinary command arguments remain advisory.
+
+    When ``test_runner_operands`` is given, the program operand of each
+    ``node --test`` invocation is also added to it (see
+    :func:`_command_test_runner_operands`). The returned set is the same either way.
     """
     runners = frozenset(
         {
@@ -1722,8 +1728,11 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                 continue
             runner = executable
             cursor = 1
+            node_test_runner = False
             while cursor < len(segment) and segment[cursor].startswith("-"):
                 option = segment[cursor]
+                if runner == "node" and option == "--test":
+                    node_test_runner = True
                 if (
                     runner in {"node", "ruby", "perl", "lua", "luajit"}
                     and option in {"-e", "-E", "--eval", "-p", "--print"}
@@ -1748,13 +1757,31 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                     continue
                 cursor += 1
             if cursor < len(segment) and not segment[cursor].startswith("-"):
-                programs.add(_normalize_workspace_path(segment[cursor]))
+                program = _normalize_workspace_path(segment[cursor])
+                programs.add(program)
+                if node_test_runner and test_runner_operands is not None:
+                    test_runner_operands.add(program)
 
     try:
         scan(shell_tokens(command))
     except ValueError:
         return frozenset()
     return frozenset(programs)
+
+
+def _command_test_runner_operands(command: str) -> frozenset[str]:
+    """Return the program operands ``command`` hands to node's built-in test runner.
+
+    ``node --test test/scene.test.js`` names a test file for the runner to
+    execute. Preflight still treats it as the command's program (a missing one
+    blocks), but unlike a harness script it is a file the run itself writes;
+    :mod:`ouroboros.auto.seed_preflight_repair` uses this set to declare such a
+    file in ``expected_artifacts``. Only operands in the program set are
+    returned, so a command the shell lexer rejects yields nothing.
+    """
+    operands: set[str] = set()
+    programs = _command_program_tokens(command, test_runner_operands=operands)
+    return frozenset(operands) & programs
 
 
 def _sourced_program_tokens(command: str) -> frozenset[str]:
