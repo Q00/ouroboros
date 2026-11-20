@@ -185,7 +185,7 @@ block (pipeline, command table, agent catalog) to the project's CLAUDE.md. On
 
 ````markdown
 <!-- ooo:START -->
-<!-- ooo:VERSION:0.62.0 -->
+<!-- ooo:VERSION:0.63.0 -->
 # Ouroboros — Specification-First AI Development
 
 > Before telling AI what to build, define what should be built.
