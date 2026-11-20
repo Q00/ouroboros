@@ -590,6 +590,11 @@ class AutoPipelineState:
     checkpoint_commits: list[dict[str, Any]] = field(default_factory=list)
     checkpoint_attempted_ac_ids: list[str] = field(default_factory=list)
     final_checkpoint_attempted: bool = False
+    # #3074: the expected-experience research (``auto/expectations.py``), kept
+    # with the interview it ran beside, so a session resumed after the
+    # interview still writes it into the Seed. Empty when nothing was found.
+    expected_experience: list[str] = field(default_factory=list)
+    expected_experience_sources: list[str] = field(default_factory=list)
     # L1-d / #1171: active TaskClass (cli / webhook / game_2d / …) derived
     # from the standardized ledger after seed generation. Distinct from
     # ``active_domain_profile_name`` (which is a meta-domain concept —
@@ -1112,6 +1117,8 @@ class AutoPipelineState:
         payload.setdefault("checkpoint_commits", [])
         payload.setdefault("checkpoint_attempted_ac_ids", [])
         payload.setdefault("final_checkpoint_attempted", False)
+        payload.setdefault("expected_experience", [])
+        payload.setdefault("expected_experience_sources", [])
         payload.setdefault("active_task_class", None)
         payload.setdefault("last_error_code", None)
         payload.setdefault("interview_closure_mode", None)
@@ -1324,6 +1331,11 @@ class AutoPipelineState:
         ):
             msg = "checkpoint_attempted_ac_ids must be a list of strings"
             raise ValueError(msg)
+        for field_name in ("expected_experience", "expected_experience_sources"):
+            value = getattr(self, field_name)
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                msg = f"{field_name} must be a list of strings"
+                raise ValueError(msg)
         if not isinstance(self.final_checkpoint_attempted, bool):
             msg = "final_checkpoint_attempted must be a boolean"
             raise ValueError(msg)

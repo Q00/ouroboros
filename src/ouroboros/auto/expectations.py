@@ -337,6 +337,19 @@ class ExpectationsRun:
             self.task.cancel()
 
 
+def keep(state: AutoPipelineState, found: ExpectedExperience) -> None:
+    """Record ``found`` on ``state``, so it is saved with the interview it ran beside."""
+    state.expected_experience = list(found.lines)
+    state.expected_experience_sources = list(found.sources)
+
+
+def kept(state: AutoPipelineState) -> ExpectedExperience:
+    """The research recorded on ``state``; a resumed session reads it from its saved state."""
+    return ExpectedExperience(
+        lines=tuple(state.expected_experience), sources=tuple(state.expected_experience_sources)
+    )
+
+
 def start_expected_experience(
     researcher: ExpectationsResearcher | None,
     state: AutoPipelineState,
@@ -384,6 +397,8 @@ __all__ = [
     "ExpectedExperience",
     "build_expectations_researcher",
     "build_prompt",
+    "keep",
+    "kept",
     "resolve_timeout",
     "sanitize_reply",
     "start_expected_experience",

@@ -439,7 +439,6 @@ class AutoPipeline:
     # itself, so the pipeline does no further side effect on fire.
     watchdog: Watchdog | None = None
     expectations_researcher: auto_expectations.ExpectationsResearcher | None = None
-    _expected: auto_expectations.ExpectedExperience | None = field(default=None, init=False)
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_probe_evidence: tuple[RuntimeEvidence, ...] = field(default=(), init=False, repr=False)
     # Recursive resume paths export the trace exactly once at the outermost
@@ -481,7 +480,6 @@ class AutoPipeline:
         self._last_emitted_phase = None
         # Prevent a reused pipeline from leaking prior runtime-probe evidence.
         self._last_probe_evidence = _runtime_probe_evidence_from_state(state)
-        self._expected = None
         # Share the progress observer with the long-running interview driver.
         self.interview_driver.progress_callback = self.progress_callback
         ledger = (
@@ -704,7 +702,7 @@ class AutoPipeline:
                             self.interview_driver.run(state, ledger), interview_timeout
                         )
                         if interview.status != "blocked":
-                            self._expected = await research.result()
+                            auto_expectations.keep(state, await research.result())
                     except TimeoutError:
                         if self._enforce_deadline(state):
                             return self._result(state, ledger, blocker=state.last_error)
@@ -717,7 +715,7 @@ class AutoPipeline:
                         # product can still surface. ``_enforce_deadline`` above keeps
                         # the global pipeline-deadline contract untouched: only
                         # the per-phase ``interview_phase_deadline`` is rerouted.
-                        self._expected = await research.result()
+                        auto_expectations.keep(state, await research.result())
                         return await self._handle_interview_deadline(
                             state,
                             ledger,
@@ -1799,7 +1797,7 @@ class AutoPipeline:
             seed = seed.model_copy(
                 update={"metadata": seed.metadata.model_copy(update={"ambiguity_score": floor})}
             )
-        seed = with_ledger_carryover(seed, ledger, expected=self._expected)
+        seed = with_ledger_carryover(seed, ledger, expected=auto_expectations.kept(state))
         seed = normalize_execution_acceptance(seed)
         state.seed_id = seed.metadata.seed_id
         state.seed_artifact = seed.to_dict()

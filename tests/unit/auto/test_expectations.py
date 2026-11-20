@@ -685,6 +685,61 @@ async def test_the_generated_seed_carries_the_research(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_research_is_saved_with_the_interview(tmp_path: Path) -> None:
+    driver = _Driver()
+    state = _state(_workspace(tmp_path))
+    pipeline = _pipeline(tmp_path, driver, _Researcher())
+
+    await pipeline.run(state)
+
+    saved = AutoStore(tmp_path / "store").load(state.auto_session_id)
+    assert saved.expected_experience == list(LINES)
+    assert saved.expected_experience_sources == [SOURCE]
+
+
+@pytest.mark.asyncio
+async def test_a_session_resumed_after_its_interview_writes_the_saved_research(
+    tmp_path: Path,
+) -> None:
+    # The process stopped after the interview and before the Seed: the resumed
+    # run does not research again and still writes the saved list.
+    state = _state(_workspace(tmp_path))
+    ledger = SeedDraftLedger.from_goal(GOAL)
+    finalize_safe_defaultable_gaps(ledger, goal=GOAL, provenance="test")
+    state.transition(AutoPhase.INTERVIEW, "starting interview")
+    state.ledger = ledger.to_dict()
+    state.interview_completed = True
+    state.interview_closure_mode = "safe_default_no_backend"
+    state.expected_experience = list(LINES)
+    state.expected_experience_sources = [SOURCE]
+    store = AutoStore(tmp_path / "store")
+    store.save(state)
+    researcher = _Researcher()
+
+    resumed = store.load(state.auto_session_id)
+    await _pipeline(tmp_path, _Driver(), researcher).run(resumed)
+
+    assert researcher.goals == []
+    assert resumed.phase == AutoPhase.COMPLETE
+    scope = (resumed.seed_artifact or {})["sourced_scope"]
+    assert tuple(scope["expected_experience"]) == LINES
+    assert tuple(scope["expected_experience_sources"]) == (SOURCE,)
+
+
+def test_an_old_state_without_the_research_loads_and_a_bad_one_is_refused() -> None:
+    data = AutoPipelineState(goal=GOAL, cwd="/tmp").to_dict()
+    for name in ("expected_experience", "expected_experience_sources"):
+        del data[name]
+
+    loaded = AutoPipelineState.from_dict(data)
+
+    assert loaded.expected_experience == []
+    assert loaded.expected_experience_sources == []
+    with pytest.raises(ValueError, match="expected_experience must be a list of strings"):
+        AutoPipelineState.from_dict({**data, "expected_experience": [1]})
+
+
+@pytest.mark.asyncio
 async def test_a_slow_research_gives_a_seed_without_the_list(tmp_path: Path) -> None:
     driver = _Driver()
     researcher = _Researcher(delay=30.0, timeout_seconds=0.05)

@@ -7,7 +7,7 @@
   "source_tree_hash": "fbf81aec9f68e1a2359f15b0dc0ea4e9412fe617",
   "goal_blob_hash": "620332b67fc7ba87dd92f69d9f2d9b229b94665e",
   "expected_blob_hash": "8ae66d5b4d6327a4b44ece75a9473227b943cc31",
-  "ledger_sha256": "910b6421495a0663d058bd3274e425f08524d2fac2750777ce07cc7e34f58258",
+  "ledger_sha256": "2ec620f7b9c57b0bb74480d96c3a87dce2ffefcac121ee6c92166ad523a0bff9",
   "reproduction": {
     "max_rounds": 1,
     "backend_question": "What else should we know?",
@@ -19,7 +19,7 @@
   "ledger": {
     "question_history": [
       {
-        "answer": "[from-auto][conservative_default] Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria.",
+        "answer": "[from-auto][conservative_default] Build what the request asks for at the level a user expects from a typical current product of its kind, with no limit the request does not state; keep existing behavior the request does not mention unchanged, follow the project's patterns, and make completion verifiable with observable acceptance criteria.",
         "question": "What else should we know?"
       }
     ],
@@ -37,13 +37,13 @@
           {
             "confidence": 0.82,
             "evidence": [],
-            "key": "constraints.conservative_mvp",
+            "key": "constraints.expected_level",
             "question": "What else should we know?",
-            "rationale": "Default auto policy favors safe convergence.",
+            "rationale": "Default auto policy builds what the request asks for, at the expected level.",
             "reversible": true,
             "source": "conservative_default",
             "status": "defaulted",
-            "value": "Keep the implementation to the smallest safe MVP that satisfies the task goal."
+            "value": "Build what the request asks for at the level a user expects from a typical current product of its kind, with no limit the request does not state; keep existing behavior the request does not mention unchanged, follow the project's patterns, and make completion verifiable with observable acceptance criteria."
           }
         ],
         "name": "constraints"
@@ -53,13 +53,13 @@
           {
             "confidence": 0.8,
             "evidence": [],
-            "key": "failure_modes.unverified_or_scope_creep",
+            "key": "failure_modes.unverified_or_unrequested_change",
             "question": "What else should we know?",
             "rationale": "A-grade Seeds need explicit failure boundaries.",
             "reversible": true,
             "source": "conservative_default",
             "status": "defaulted",
-            "value": "Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP."
+            "value": "Failure includes requested behavior that was not checked or does not work as asked, or changes to existing behavior the request does not ask for."
           }
         ],
         "name": "failure_modes"
