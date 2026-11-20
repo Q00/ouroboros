@@ -63,7 +63,7 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 # The read-only sandbox class (see ``auto/investigator.py``).
 PERMISSION_MODE = "default"
 WEB_TOOLS: tuple[str, ...] = ("WebSearch", "WebFetch")
-MAX_LINES = 12
+MAX_LINES = 16
 MAX_LINE_CHARS = 180
 MAX_SOURCES = 6
 EVENT_TYPE = "auto.expectations.researched"
@@ -129,10 +129,13 @@ def build_prompt(goal: str) -> str:
         [
             f"A user asked: {goal.strip()}",
             "",
-            "Describe what a typical, current product of this kind includes today: the "
-            "capabilities a user would expect and how it looks and feels in use (presentation, "
-            "motion, feedback), most expected first, 6–12 short lines starting "
-            "with '- ', each marked (core) or (common).",
+            "Describe what a typical, current product of this kind includes today, at the "
+            "scale the request asks for (a request for something simple gets the typical "
+            "simple version): the capabilities a user would expect and how it looks and feels "
+            "in use (presentation, motion, feedback), most expected first, 6–12 short lines "
+            "starting with '- ', each marked (core) or (common). Then 2–4 lines starting with "
+            "'- ' marked (polish): small finishing details of those same capabilities that make "
+            "the best ones feel complete, adding no feature.",
             "Only include what the product itself can do in a single local install: nothing "
             "that needs a server, network service, account, payment, purchase or personal data.",
             "After the list, one line 'Sources:' with URLs you actually read, if any.",

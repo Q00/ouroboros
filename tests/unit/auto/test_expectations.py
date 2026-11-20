@@ -79,10 +79,15 @@ def test_the_prompt_names_the_goal_the_list_the_local_limit_and_the_language() -
 
     assert prompt.startswith(f"A user asked: {GOAL}\n")
     assert (
-        "Describe what a typical, current product of this kind includes today: the "
-        "capabilities a user would expect and how it looks and feels in use (presentation, "
-        "motion, feedback), most expected first, 6–12 short lines starting "
-        "with '- ', each marked (core) or (common)."
+        "Describe what a typical, current product of this kind includes today, at the "
+        "scale the request asks for (a request for something simple gets the typical "
+        "simple version): the capabilities a user would expect and how it looks and feels "
+        "in use (presentation, motion, feedback), most expected first, 6–12 short lines "
+        "starting with '- ', each marked (core) or (common)."
+    ) in prompt
+    assert (
+        "Then 2–4 lines starting with '- ' marked (polish): small finishing details of those "
+        "same capabilities that make the best ones feel complete, adding no feature."
     ) in prompt
     assert (
         "Only include what the product itself can do in a single local install: nothing "
@@ -151,6 +156,16 @@ def test_the_sanitizer_drops_site_name_citations_but_keeps_code_names() -> None:
         "(core) Built with three.js (three.js) and Node.js",
     )
     assert found.sources == ("https://example.com/how-to-play/",)
+
+
+def test_the_polish_lines_after_a_full_list_are_kept() -> None:
+    lines = [f"- (core) capability {index}" for index in range(12)]
+    polish = [f"- (polish) finishing detail {index}" for index in range(4)]
+
+    found = sanitize_reply("\n".join([*lines, *polish]))
+
+    assert len(found.lines) == 16
+    assert found.lines[-1] == "(polish) finishing detail 3"
 
 
 def test_the_sanitizer_caps_lines_characters_and_sources() -> None:
