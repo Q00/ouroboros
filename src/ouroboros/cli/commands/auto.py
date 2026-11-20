@@ -1465,23 +1465,35 @@ async def _follow_run_successors(
     retry = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
     was_quiet = console.quiet
     console.quiet = was_quiet or quiet
+    # Its own task: the shared follower absorbs cancellation (it stops
+    # following and prints where the jobs went), so the deadline is decided
+    # here, from whether the follower finished in time.
+    follower = asyncio.ensure_future(
+        run_successors._follow_chain(  # noqa: SLF001 - the shared CLI follower
+            evaluate_job_id,
+            job_manager=getattr(start_evaluate_handler, "_job_manager", None),
+            event_store=getattr(start_evaluate_handler, "_event_store", None),
+            retry=retry,
+            ralph_may_follow=True,
+        )
+    )
     try:
-        await asyncio.wait_for(
-            run_successors._follow_chain(  # noqa: SLF001 - the shared CLI follower
-                evaluate_job_id,
-                job_manager=getattr(start_evaluate_handler, "_job_manager", None),
-                event_store=getattr(start_evaluate_handler, "_event_store", None),
-                retry=retry,
-                ralph_may_follow=True,
-            ),
-            timeout=max(0.0, deadline - time.monotonic()),
+        done, _pending = await asyncio.wait(
+            {follower}, timeout=max(0.0, deadline - time.monotonic())
         )
-    except TimeoutError:
-        print_warning(
-            f"Stopped following evaluation job {evaluate_job_id} at the pipeline deadline. "
-            f"Evaluate again with: {retry}"
-        )
+        if follower not in done:
+            follower.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await follower
+            print_warning(
+                f"Stopped following evaluation job {evaluate_job_id} at the pipeline deadline. "
+                f"Evaluate again with: {retry}"
+            )
+        else:
+            await follower
     finally:
+        if not follower.done():
+            follower.cancel()
         console.quiet = was_quiet
 
 

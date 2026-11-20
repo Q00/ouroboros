@@ -1034,30 +1034,53 @@ class AsyncMockFollow:
 
 
 @pytest.mark.asyncio
-async def test_following_stops_at_the_pipeline_deadline(monkeypatch, capsys) -> None:
-    import time as time_module
+async def test_following_stops_at_the_pipeline_deadline(tmp_path, monkeypatch, capsys) -> None:
+    """The real follower absorbs cancellation; the deadline warning still prints.
 
-    from ouroboros.cli.commands import run_successors
+    ``run_successors._follow_chain`` catches the cancellation and returns, so the
+    deadline cannot be read from a ``TimeoutError``. The evaluation job is left
+    running: following never cancels a job.
+    """
+    import time as time_module
+    from types import SimpleNamespace
+
     from ouroboros.cli.formatters import console
 
-    async def _endless(*args, **kwargs) -> None:
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(run_successors, "_follow_chain", _endless)
     monkeypatch.setattr(console, "width", 400)
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    try:
 
-    await asyncio.wait_for(
-        auto_command._follow_run_successors(
-            _handoff_only_result("job_run"),
-            job_manager=_SnapshotManager(_finished_run_snapshot(chained_evaluate_job_id="job_e")),
-            start_evaluate_handler=None,
-            quiet=False,
-            deadline_at=time_module.monotonic() + 0.1,
-        ),
-        timeout=5,
-    )
+        async def _endless_evaluation() -> MCPToolResult:
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
 
-    assert "Stopped following evaluation job job_e at the pipeline deadline" in _plain(
-        capsys.readouterr().out
-    )
-    assert console.quiet is False
+        evaluation = await manager.start_job(
+            job_type="evaluate", initial_message="queued", runner=_endless_evaluation()
+        )
+        await _wait_for_job_status(manager, evaluation.job_id, JobStatus.RUNNING)
+
+        await asyncio.wait_for(
+            auto_command._follow_run_successors(
+                _handoff_only_result("job_run"),
+                job_manager=_SnapshotManager(
+                    _finished_run_snapshot(chained_evaluate_job_id=evaluation.job_id)
+                ),
+                start_evaluate_handler=SimpleNamespace(_job_manager=manager, _event_store=store),
+                quiet=False,
+                deadline_at=time_module.monotonic() + 0.3,
+            ),
+            timeout=10,
+        )
+
+        out = _plain(capsys.readouterr().out)
+        assert f"Waiting for evaluate job {evaluation.job_id}" in out
+        assert (
+            f"Stopped following evaluation job {evaluation.job_id} at the pipeline deadline" in out
+        )
+        assert console.quiet is False
+        snapshot = await manager.get_snapshot(evaluation.job_id)
+        assert snapshot.status is JobStatus.RUNNING
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
