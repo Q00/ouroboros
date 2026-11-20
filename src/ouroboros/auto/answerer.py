@@ -14,6 +14,19 @@ from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedD
 if TYPE_CHECKING:
     from ouroboros.auto.domain_profile import DomainProfile
 
+# The default for a question nothing more specific answers: what the request
+# asks for, at the level users expect, never narrowed by a limit nobody stated.
+EXPECTED_LEVEL_POLICY = (
+    "Build what the request asks for at the level a user expects from a typical current "
+    "product of its kind, with no limit the request does not state; keep existing behavior "
+    "the request does not mention unchanged, follow the project's patterns, and make "
+    "completion verifiable with observable acceptance criteria."
+)
+UNREQUESTED_CHANGE_FAILURE = (
+    "Failure includes unverified requested behavior, non-reproducible output, or changes "
+    "to existing behavior the request does not ask for."
+)
+
 
 class AutoAnswerSource(StrEnum):
     """Source categories for auto answers (``requester``: auto/requester.py asked)."""
@@ -293,7 +306,7 @@ class AutoAnswerer:
                 context,
             )
         if section in {"constraints", "failure_modes"}:
-            gap_question = "What conservative constraints and failure modes should bound this MVP?"
+            gap_question = "What constraints and failure modes apply to this task?"
             return _maybe_apply_user_preference(
                 self._default_answer(gap_question, ledger),
                 (section,),
@@ -638,24 +651,24 @@ class AutoAnswerer:
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.8, updates)
 
     def _default_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:  # noqa: ARG002
-        value = "Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria."
+        value = EXPECTED_LEVEL_POLICY
         updates = [
             (
                 "constraints",
                 LedgerEntry(
-                    key="constraints.conservative_mvp",
-                    value="Keep the implementation to the smallest safe MVP that satisfies the task goal.",
+                    key="constraints.expected_level",
+                    value=EXPECTED_LEVEL_POLICY,
                     source=LedgerSource.CONSERVATIVE_DEFAULT,
                     confidence=0.82,
                     status=LedgerStatus.DEFAULTED,
-                    rationale="Default auto policy favors safe convergence.",
+                    rationale="Default auto policy builds what the request asks for, at the expected level.",
                 ),
             ),
             (
                 "failure_modes",
                 LedgerEntry(
-                    key="failure_modes.unverified_or_scope_creep",
-                    value="Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP.",
+                    key="failure_modes.unverified_or_unrequested_change",
+                    value=UNREQUESTED_CHANGE_FAILURE,
                     source=LedgerSource.CONSERVATIVE_DEFAULT,
                     confidence=0.8,
                     status=LedgerStatus.DEFAULTED,

@@ -105,6 +105,25 @@ for it, is not a failure.
 {assumptions_text}"""
 
 
+QUALITY_BAR_SECTION = """## Quality bar
+Anything this task creates is built at the level a user expects from a typical current product of that kind: the acceptance criteria are the floor, not the ceiling. Existing behavior and code that the goal does not ask to change stay as they are."""
+
+EXPECTED_EXPERIENCE_HEADING = """## Expected experience (typical current products of this kind)
+Research on current products of this kind found that users typically expect the capabilities below. Treat them as the floor of a good result, not a limit. The goal, the constraints and the requester's answers come first, then this list. Do not build a server, network service, account, payment or personal-data feature unless the request asks for it."""
+
+
+def render_expected_experience_section(contract: SeedContract) -> str:
+    """Render the expected-experience research of a sourced contract, or nothing.
+
+    The lines are not acceptance criteria: nothing verifies, decomposes or
+    prices them. The research's sources are never rendered.
+    """
+    if not contract.sourced_only or not contract.expected_experience:
+        return ""
+    lines = "\n".join(f"- {line}" for line in contract.expected_experience)
+    return f"{EXPECTED_EXPERIENCE_HEADING}\n{lines}"
+
+
 def render_brownfield_section(contract: SeedContract) -> str:
     """Render existing-codebase boundaries from the Seed contract."""
     context = contract.brownfield_context
@@ -245,6 +264,12 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
         sourced_assumptions = render_sourced_assumptions_section(contract)
         if sourced_assumptions:
             sections.extend(["", sourced_assumptions])
+        # Auto-authored Seeds only: build anything new at the level users
+        # expect; the acceptance criteria are its floor, not its ceiling.
+        sections.extend(["", QUALITY_BAR_SECTION])
+        expected_experience = render_expected_experience_section(contract)
+        if expected_experience:
+            sections.extend(["", expected_experience])
         return "\n".join(sections)
 
     assumptions = render_assumptions_section(contract)
@@ -313,6 +338,8 @@ specific correction made for this directive."""
 
 __all__ = [
     "AUTO_RECURSION_GUARD",
+    "EXPECTED_EXPERIENCE_HEADING",
+    "QUALITY_BAR_SECTION",
     "render_assumptions_section",
     "render_auto_recursion_guard",
     "render_brownfield_section",
@@ -320,6 +347,7 @@ __all__ = [
     "render_constraints_section",
     "render_evaluation_principles_section",
     "render_exit_conditions_section",
+    "render_expected_experience_section",
     "render_ontology_lens_section",
     "render_repo_facts_section",
     "render_requester_answers_section",

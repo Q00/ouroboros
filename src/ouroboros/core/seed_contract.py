@@ -66,6 +66,9 @@ class SeedContract:
     # True when the contract holds only content with a known source
     # (``Seed.sourced_scope``); the renderer then omits every model-written section.
     sourced_only: bool = False
+    # What a typical current product of the requested kind includes
+    # (``SourcedScope.expected_experience``); only a sourced contract has it.
+    expected_experience: tuple[str, ...] = ()
 
     @classmethod
     def from_seed(cls, seed: Seed) -> SeedContract:
@@ -76,8 +79,9 @@ class SeedContract:
         (or, with no binding criterion, :data:`GOAL_OBJECTIVE_CRITERION`), the
         answers auto chose for its interview questions (``scope.assumptions``,
         never ``Seed.assumptions``, which the generator also writes), the
-        requester answers and the repo facts. Every other field stays in the
-        Seed and is left out of the contract.
+        expected experience its research found (``scope.expected_experience``;
+        never its sources), the requester answers and the repo facts. Every
+        other field stays in the Seed and is left out of the contract.
         """
         scope = seed.sourced_scope
         if scope is not None:
@@ -94,6 +98,7 @@ class SeedContract:
                 requester_answers=seed.requester_answers,
                 repo_facts=seed.repo_facts,
                 sourced_only=True,
+                expected_experience=scope.expected_experience,
             )
         return cls(
             goal=seed.goal,

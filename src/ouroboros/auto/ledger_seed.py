@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from ouroboros.auto.grading import deterministic_floor
@@ -30,6 +30,9 @@ from ouroboros.core.seed import (
     SeedMetadata,
     SourcedScope,
 )
+
+if TYPE_CHECKING:
+    from ouroboros.auto.expectations import ExpectedExperience
 
 _INACTIVE_STATUSES: frozenset[LedgerStatus] = frozenset(
     {
@@ -119,6 +122,11 @@ _ASSUMPTION_PREFIXES = {
     "non_goals": "Non-goal: ",
     "acceptance_criteria": "",
 }
+# Sections whose auto-chosen answers stay in the record but never reach the
+# worker (``SourcedScope.assumptions``). Decided by section only, never by the
+# text: an answer about what counts as failure or how to check the work is a
+# guess that measured to narrow what the worker builds (#3061).
+_RECORD_ONLY_ASSUMPTION_SECTIONS = frozenset({"failure_modes", "verification_plan"})
 
 
 def brownfield_context_from_cwd(cwd: str | Path | None) -> BrownfieldContext:
@@ -145,6 +153,24 @@ def brownfield_context_from_cwd(cwd: str | Path | None) -> BrownfieldContext:
         )
     except Exception:
         return BrownfieldContext()
+
+
+def workspace_has_existing_code(cwd: str | Path | None) -> bool:
+    """Whether the auto workspace already has code, by the same signal as the Seed.
+
+    ``False`` only when ``cwd`` is a directory that
+    :func:`brownfield_context_from_cwd` calls greenfield. A missing ``cwd``, a
+    path that is not a directory, or a failed check is ``True``: a change to
+    existing code is the safe reading when the workspace is unknown.
+    """
+    if not cwd:
+        return True
+    try:
+        if not Path(cwd).expanduser().is_dir():
+            return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return brownfield_context_from_cwd(cwd).project_type == "brownfield"
 
 
 def synthesize_seed_from_ledger(
@@ -523,26 +549,38 @@ def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
 def ledger_assumed_answers(ledger: SeedDraftLedger) -> tuple[str, ...]:
     """The answers auto chose for its interviewer questions, as labelled assumption lines.
 
-    Each line is the section label (``Non-goal: ``, ``Failure modes: ``, none
-    for constraints and criteria) followed by the entry's value exactly as the
+    Each line is the section label (``Non-goal: ``, ``Outputs: ``, none for
+    constraints and criteria) followed by the entry's value exactly as the
     refiner wrote it, outer whitespace aside: no punctuation is stripped and
     nothing is split. In section and ledger order. They never bind; ``ooo
     auto`` gives them to the worker as ``SourcedScope.assumptions``, under a
-    heading that says nobody confirmed them.
+    heading that says nobody confirmed them. Answers in the failure-mode and
+    verification-plan sections are left out (``_RECORD_ONLY_ASSUMPTION_SECTIONS``):
+    they stay in ``Seed.assumptions`` and still decide their question.
     """
-    return _assumption_lines(ledger, include_unasked=False)
+    return _assumption_lines(
+        ledger, include_unasked=False, skip_sections=_RECORD_ONLY_ASSUMPTION_SECTIONS
+    )
 
 
-def _assumption_lines(ledger: SeedDraftLedger, *, include_unasked: bool) -> tuple[str, ...]:
+def _assumption_lines(
+    ledger: SeedDraftLedger,
+    *,
+    include_unasked: bool,
+    skip_sections: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
     """Labelled assumption lines: auto's assumed answers, and optionally its unasked drafts.
 
     An unasked draft is cleaned and split like every ledger line
     (``_lines_from_section``); an assumed answer is kept verbatim. One value
     written for several sections is listed once, under the first section's
-    label, the way the interview answer states it once.
+    label, the way the interview answer states it once. ``skip_sections`` are
+    left out entirely.
     """
     lines: dict[str, str] = {}
     for section_name in _ASSUMPTION_SECTIONS:
+        if section_name in skip_sections:
+            continue
         prefix = _ASSUMPTION_PREFIXES.get(
             section_name, f"{section_name.replace('_', ' ').capitalize()}: "
         )
@@ -720,7 +758,12 @@ def ledger_non_goal_constraints(ledger: SeedDraftLedger) -> tuple[str, ...]:
     return tuple(f"Non-goal: {item}" for item in non_goals)
 
 
-def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
+def with_ledger_carryover(
+    seed: Seed,
+    ledger: SeedDraftLedger,
+    *,
+    expected: ExpectedExperience | None = None,
+) -> Seed:
     """Carry the ledger's assumptions, requester answers, repo facts, open questions and sourced scope.
 
     The sourced scope (``Seed.sourced_scope``) is what the worker is told; the
@@ -733,6 +776,10 @@ def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
     Seed already lists stays unless auto has since chosen an answer for it
     (``_decided_questions``), so a Seed recorded again (repair, resume) never
     keeps a decided question open.
+
+    ``expected`` is the expected-experience research for a new product
+    (``auto/expectations.py``). Its lines and sources go into the sourced scope;
+    without lines, a list the Seed's sourced scope already holds is kept.
     """
     seed = with_requester_answers(with_ledger_assumptions(seed, ledger), ledger)
     merged = tuple(dict.fromkeys((*seed.repo_facts, *ledger_repo_facts(ledger))))
@@ -747,7 +794,24 @@ def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
     if questions != seed.open_questions:
         seed = seed.model_copy(update={"open_questions": questions})
     scope = ledger_sourced_scope(ledger)
-    if scope is None or scope == seed.sourced_scope:
+    if scope is None:
+        return seed
+    previous = seed.sourced_scope
+    if expected is not None and expected.lines:
+        scope = scope.model_copy(
+            update={
+                "expected_experience": expected.lines,
+                "expected_experience_sources": expected.sources,
+            }
+        )
+    elif previous is not None and previous.expected_experience:
+        scope = scope.model_copy(
+            update={
+                "expected_experience": previous.expected_experience,
+                "expected_experience_sources": previous.expected_experience_sources,
+            }
+        )
+    if scope == previous:
         return seed
     return seed.model_copy(update={"sourced_scope": scope})
 
