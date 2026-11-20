@@ -75,6 +75,15 @@ OUTCOME_SKIPPED_BROWNFIELD = "skipped_brownfield"
 OUTCOME_DISABLED = "disabled"
 
 _MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# A bare site name such as ``example.org/path``; a code file name such as
+# ``three.js`` is not one.
+_DOMAIN = (
+    r"(?:[A-Za-z0-9-]+\.)+(?!(?:js|mjs|cjs|ts|py|json|css|html|md|txt)\b)[A-Za-z]{2,24}"
+    r"(?:/[^\s)\]]*)?"
+)
+# A citation: a link whose text is a site name, or site names in parentheses.
+_LINKED_DOMAIN = re.compile(rf"\[\s*{_DOMAIN}\s*\]\([^)]*\)")
+_PARENTHESIZED_DOMAINS = re.compile(rf"\(\s*{_DOMAIN}(?:\s*[,;]\s*{_DOMAIN})*\s*\)")
 _PARENTHESIZED_URL = re.compile(r"\(\s*<?https?://[^\s)]*>?\s*\)")
 _URL = re.compile(r"<?https?://[^\s<>]+>?")
 _SOURCE_URL = re.compile(r"https?://[^\s<>\"'`]+")
@@ -135,7 +144,9 @@ def sanitize_reply(reply: str) -> ExpectedExperience:
     """Keep the ``- `` lines without links or URLs; collect the URLs after ``Sources:``.
 
     Deterministic. A line keeps its text after ``- ``, with a markdown link
-    reduced to its text and any bare URL removed; an empty result is dropped.
+    reduced to its text and any bare URL and site-name citation removed (a
+    source never reaches the worker, by name or by address); an empty result
+    is dropped.
     At most :data:`MAX_LINES` lines are kept, each cut to
     :data:`MAX_LINE_CHARS` characters. Everything from the ``Sources:`` line on
     is the source list: its URLs (at most :data:`MAX_SOURCES`, without
@@ -156,8 +167,9 @@ def sanitize_reply(reply: str) -> ExpectedExperience:
             continue
         if not text.startswith("- ") or len(lines) >= MAX_LINES:
             continue
-        body = _PARENTHESIZED_URL.sub(" ", _MARKDOWN_LINK.sub(r"\1", text[2:]))
-        body = _URL.sub(" ", body)
+        body = _MARKDOWN_LINK.sub(r"\1", _LINKED_DOMAIN.sub(" ", text[2:]))
+        body = _URL.sub(" ", _PARENTHESIZED_URL.sub(" ", body))
+        body = _PARENTHESIZED_DOMAINS.sub(" ", body)
         body = " ".join(_EMPTY_BRACKETS.sub(" ", body).split())
         if body:
             lines.append(body[:MAX_LINE_CHARS].rstrip())

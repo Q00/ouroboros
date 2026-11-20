@@ -93,7 +93,7 @@ _SAFE_DEFAULTS: dict[str, _DefaultSpec] = {
     ),
     "failure_modes": _DefaultSpec(
         "Failure includes unverified behavior, changes the goal does not ask for to existing "
-        "behavior, dependency churn, non-reproducible output, or external side effects not "
+        "behavior, dependency churn, or external side effects not "
         "authorized by the goal.",
         "Generic failure boundaries keep the Seed auditable without domain assumptions.",
     ),

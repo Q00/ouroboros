@@ -22,9 +22,12 @@ EXPECTED_LEVEL_POLICY = (
     "the request does not mention unchanged, follow the project's patterns, and make "
     "completion verifiable with observable acceptance criteria."
 )
+# Failure is about the work, never a demand that the product behave the same on
+# every run: "non-reproducible output" here made the interview ask for identical
+# replays, and the worker then removed the randomness the product needed.
 UNREQUESTED_CHANGE_FAILURE = (
-    "Failure includes unverified requested behavior, non-reproducible output, or changes "
-    "to existing behavior the request does not ask for."
+    "Failure includes requested behavior that was not checked or does not work as asked, "
+    "or changes to existing behavior the request does not ask for."
 )
 
 

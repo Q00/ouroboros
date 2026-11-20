@@ -1180,7 +1180,9 @@ REFINER_LANGUAGE_RULE = "Write the answer in {language} only, and never add a tr
 # assumption; a claim about the current code would be a fabricated repo fact.
 # Which rule applies depends on whether the workspace already has code
 # (``LLMAnswerRefiner.has_existing_code``): a new product is decided as a
-# typical current product of its kind would decide it and never narrowed; a
+# typical current product of its kind would decide it and never narrowed (no
+# "first version", no "that is enough", and no identical-replay demand that
+# strips the randomness or animation such products have); a
 # change to existing code builds what the request names, completely, and
 # nothing else. Unknown counts as existing code.
 REFINER_GREENFIELD_RULE = (
@@ -1188,8 +1190,10 @@ REFINER_GREENFIELD_RULE = (
     "For what the request newly builds, decide as a typical current product of this kind "
     "would and never narrow it: when an option includes more of what such products have, "
     "choose it or combine the options, unless it needs a server, network service, account, "
-    "payment or personal data. Existing behavior and code the request does not mention stay "
-    "unchanged."
+    "payment or personal data. Never answer that less is enough or call anything a first "
+    "version, and keep the variety such products have, such as randomness and animation, "
+    "instead of requiring the same result on every run. Existing behavior and code the "
+    "request does not mention stay unchanged."
 )
 REFINER_BROWNFIELD_RULE = (
     "You have not read the repository: never state what the existing code does or contains. "

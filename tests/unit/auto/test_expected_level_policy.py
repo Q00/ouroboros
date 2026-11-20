@@ -83,6 +83,14 @@ def test_the_policy_says_what_it_keeps_and_what_it_never_limits() -> None:
     )
 
 
+def test_no_failure_text_asks_the_product_to_behave_the_same_on_every_run() -> None:
+    # "non-reproducible output" made the interview ask for identical replays, and
+    # the worker replaced random item boxes with a fixed cycle.
+    for text in (UNREQUESTED_CHANGE_FAILURE, _SAFE_DEFAULTS["failure_modes"].value):
+        assert "reproduc" not in text.lower()
+        assert "repeat" not in text.lower()
+
+
 @pytest.mark.parametrize("section", ["constraints", "failure_modes"])
 def test_a_constraint_or_failure_gap_gets_the_same_policy(section: str) -> None:
     answer = AutoAnswerer().answer_gap(section, SeedDraftLedger.from_goal("Build a kart game"))
@@ -193,6 +201,13 @@ def test_the_two_rules_say_what_the_probes_measured() -> None:
     assert "never narrow it" in REFINER_GREENFIELD_RULE
     assert "choose it or combine the options" in REFINER_GREENFIELD_RULE
     assert "server, network service, account, payment or personal data" in (REFINER_GREENFIELD_RULE)
+    assert "Never answer that less is enough or call anything a first version" in (
+        REFINER_GREENFIELD_RULE
+    )
+    assert "keep the variety such products have, such as randomness and animation" in (
+        REFINER_GREENFIELD_RULE
+    )
+    assert "variety" not in REFINER_BROWNFIELD_RULE
     assert "add no other feature, option or behavior the request does not name" in (
         REFINER_BROWNFIELD_RULE
     )

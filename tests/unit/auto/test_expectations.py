@@ -128,6 +128,30 @@ def test_the_sanitizer_keeps_dash_lines_without_links_and_splits_the_sources() -
         assert "](" not in line
 
 
+def test_the_sanitizer_drops_site_name_citations_but_keeps_code_names() -> None:
+    reply = "\n".join(
+        [
+            "- (core) Steer around the track. ([example.com](https://example.com/how-to-play/))",
+            "- (core) Zoom with the wheel (docs.example.org)",
+            "- (common) Change the star count (example.com, www.example.net/docs)",
+            "- (common) Read the manual ([www.example.org](https://example.org/m.pdf)) first",
+            "- (core) Built with three.js (three.js) and Node.js",
+            "Sources: https://example.com/how-to-play/",
+        ]
+    )
+
+    found = sanitize_reply(reply)
+
+    assert found.lines == (
+        "(core) Steer around the track.",
+        "(core) Zoom with the wheel",
+        "(common) Change the star count",
+        "(common) Read the manual first",
+        "(core) Built with three.js (three.js) and Node.js",
+    )
+    assert found.sources == ("https://example.com/how-to-play/",)
+
+
 def test_the_sanitizer_caps_lines_characters_and_sources() -> None:
     lines = [f"- capability {index} " + "x" * 300 for index in range(20)]
     urls = " ".join(f"https://example.com/{index}" for index in range(10))
