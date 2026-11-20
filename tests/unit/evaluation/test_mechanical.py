@@ -2,7 +2,12 @@
 
 import asyncio
 import json
+import os
+from pathlib import Path
+import signal
+import subprocess
 import sys
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -10,6 +15,7 @@ import pytest
 from ouroboros.core.acceptance import AcceptanceState
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
+from ouroboros.evaluation import mechanical as mechanical_module
 from ouroboros.evaluation.mechanical import (
     CommandResult,
     MechanicalConfig,
@@ -202,14 +208,26 @@ class TestRunCommand:
         assert result.timed_out is False
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "windows",
+        [
+            False,
+            True,
+        ],
+        ids=["posix-process-group", "windows-direct-child"],
+    )
     async def test_cancelled_command_kills_child_process(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        windows: bool,
     ) -> None:
         """Outer evaluation deadlines must not leave mechanical subprocesses alive."""
+        if not windows and sys.platform == "win32":
+            pytest.skip("POSIX process groups are not available on Windows")
 
         class FakeProcess:
             returncode: int | None = None
+            pid = 424242
 
             def __init__(self) -> None:
                 self.killed = False
@@ -227,11 +245,20 @@ class TestRunCommand:
                 return self.returncode or 0
 
         fake_process = FakeProcess()
+        spawn_kwargs: dict[str, object] = {}
+        group_kills: list[tuple[int, int]] = []
 
-        async def fake_create_subprocess_exec(*_args, **_kwargs):
+        async def fake_create_subprocess_exec(*_args, **kwargs):
+            spawn_kwargs.update(kwargs)
             return fake_process
 
+        def fake_killpg(pgid: int, sig: int) -> None:
+            group_kills.append((pgid, sig))
+            fake_process.returncode = -9
+
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(mechanical_module, "_running_on_windows", lambda: windows)
+        monkeypatch.setattr(mechanical_module.os, "killpg", fake_killpg, raising=False)
 
         task = asyncio.create_task(run_command(("long-running",), timeout=999))
         await asyncio.sleep(0)
@@ -239,8 +266,81 @@ class TestRunCommand:
 
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert fake_process.killed is True
         assert fake_process.waited is True
+        if windows:
+            assert "start_new_session" not in spawn_kwargs
+            assert fake_process.killed is True
+            assert group_kills == []
+        else:
+            assert spawn_kwargs["start_new_session"] is True
+            assert group_kills == [(FakeProcess.pid, signal.SIGKILL)]
+            assert fake_process.killed is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("windows", "expected_kills"),
+        [
+            (False, 1),
+            (True, 2),
+        ],
+        ids=["posix-process-group", "windows-direct-child"],
+    )
+    async def test_kill_reap_wait_is_bounded_and_falls_back_to_direct_kill(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        windows: bool,
+        expected_kills: int,
+    ) -> None:
+        """A wait that never resolves (a pipe held elsewhere) must not hang cleanup."""
+        if not windows and sys.platform == "win32":
+            pytest.skip("POSIX process groups are not available on Windows")
+
+        class StuckProcess:
+            returncode: int | None = None
+            pid = 424243
+
+            def __init__(self) -> None:
+                self.kills = 0
+                self.wait_calls = 0
+
+            async def communicate(self):
+                await asyncio.Event().wait()
+
+            def kill(self) -> None:
+                self.kills += 1
+
+            async def wait(self) -> int:
+                self.wait_calls += 1
+                await asyncio.Event().wait()
+                return 0
+
+        stuck = StuckProcess()
+        group_kills: list[tuple[int, int]] = []
+
+        async def fake_create_subprocess_exec(*_args, **_kwargs):
+            return stuck
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(mechanical_module, "_running_on_windows", lambda: windows)
+        monkeypatch.setattr(
+            mechanical_module.os,
+            "killpg",
+            lambda pgid, sig: group_kills.append((pgid, sig)),
+            raising=False,
+        )
+        monkeypatch.setattr(mechanical_module, "_KILL_REAP_SECONDS", 0.05)
+
+        result = await asyncio.wait_for(run_command(("stuck",), timeout=1), timeout=10)
+
+        assert result.return_code == -1
+        assert result.timed_out is True
+        assert result.stderr == "Command timed out"
+        # The bounded reap wait ran, then the fallback wait ran and was abandoned.
+        assert stuck.wait_calls == 2
+        # POSIX signals the group first, so only the fallback kills the child
+        # directly; Windows kills the child both times.
+        assert stuck.kills == expected_kills
+        assert group_kills == ([] if windows else [(StuckProcess.pid, signal.SIGKILL)])
 
     @pytest.mark.asyncio
     async def test_failed_command(self) -> None:
@@ -273,6 +373,154 @@ class TestRunCommand:
 
         assert result.return_code == 0
         assert result.stdout.strip() == "missing"
+
+
+# Outer guard for the real-subprocess cleanup tests: a regression must fail the
+# test, not hang the suite the way it hung the caller.
+_CLEANUP_GUARD_SECONDS = 20.0
+
+
+def _process_is_running(pid: int) -> bool:
+    """Whether ``pid`` is alive. A zombie has exited and released its pipes."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+async def _wait_until_gone(pid: int, seconds: float = 5.0) -> bool:
+    # SIGKILL delivery and re-parenting are asynchronous; allow a short window.
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _process_is_running(pid):
+            return True
+        await asyncio.sleep(0.05)
+    return not _process_is_running(pid)
+
+
+async def _read_pid(path: Path, seconds: float = 10.0) -> int:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text().strip():
+            return int(path.read_text().strip())
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"descendant never wrote its pid to {path}")
+
+
+def _kill_recorded(pid_file: Path) -> None:
+    """Do not leak the test's descendant, even when the assertion under test failed."""
+    text = pid_file.read_text().strip() if pid_file.exists() else ""
+    if text and _process_is_running(int(text)):
+        try:
+            os.kill(int(text), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _grandchild_holding_output(parent_tail: str) -> tuple[str, ...]:
+    """A shell whose background ``sleep`` inherits, and keeps, its stdout/stderr."""
+    return ("sh", "-c", f'sleep 60 & echo $! > "$1"; {parent_tail}', "sh")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups and sessions")
+class TestRunCommandDescendantCleanup:
+    """A command's descendants must not outlive cleanup or hang the caller.
+
+    Reproduces a test runner that leaves a server running: the descendant keeps
+    the command's stdout/stderr pipes open, so asyncio never sees EOF.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "parent_tail",
+        ["sleep 60", "exit 0"],
+        ids=["parent-still-running", "parent-exited-first"],
+    )
+    async def test_timeout_kills_descendant_holding_the_output_pipes(
+        self, tmp_path: Path, parent_tail: str
+    ) -> None:
+        pid_file = tmp_path / "grandchild.pid"
+        try:
+            started = time.monotonic()
+            result = await asyncio.wait_for(
+                run_command((*_grandchild_holding_output(parent_tail), str(pid_file)), timeout=1),
+                timeout=_CLEANUP_GUARD_SECONDS,
+            )
+            elapsed = time.monotonic() - started
+            grandchild = await _read_pid(pid_file)
+
+            assert result.timed_out is True
+            assert result.return_code == -1
+            assert result.stderr == "Command timed out"
+            assert elapsed < 5, f"run_command returned after {elapsed:.1f}s"
+            assert await _wait_until_gone(grandchild), "descendant outlived the timeout"
+        finally:
+            _kill_recorded(pid_file)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_kills_descendant_holding_the_output_pipes(
+        self, tmp_path: Path
+    ) -> None:
+        pid_file = tmp_path / "grandchild.pid"
+        try:
+            task = asyncio.create_task(
+                run_command((*_grandchild_holding_output("sleep 60"), str(pid_file)), timeout=60)
+            )
+            grandchild = await _read_pid(pid_file)
+            task.cancel()
+
+            started = time.monotonic()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=_CLEANUP_GUARD_SECONDS)
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 5, f"cancellation cleanup took {elapsed:.1f}s"
+            assert await _wait_until_gone(grandchild), "descendant outlived cancellation"
+        finally:
+            _kill_recorded(pid_file)
+
+    @pytest.mark.asyncio
+    async def test_descendant_that_left_the_group_cannot_hang_the_caller(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The group kill cannot reach a descendant that called setsid; the wait is bounded."""
+        monkeypatch.setattr(mechanical_module, "_KILL_REAP_SECONDS", 0.5)
+        pid_file = tmp_path / "escaped.pid"
+        escape = (
+            "import os, sys, time; os.setsid(); "
+            "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)"
+        )
+        # The shell waits for the escape to finish before it sleeps, so the
+        # timeout always fires with the descendant outside the group.
+        script = '"$1" -S -c "$2" "$3" & while [ ! -s "$3" ]; do sleep 0.05; done; sleep 60'
+        try:
+            started = time.monotonic()
+            result = await asyncio.wait_for(
+                run_command(
+                    ("sh", "-c", script, "sh", sys.executable, escape, str(pid_file)),
+                    timeout=3,
+                ),
+                timeout=_CLEANUP_GUARD_SECONDS,
+            )
+            elapsed = time.monotonic() - started
+            escaped = await _read_pid(pid_file)
+
+            assert result.timed_out is True
+            assert result.stderr == "Command timed out"
+            # 3s timeout + 0.5s bounded reap; never the escaped sleep's 60s.
+            assert elapsed < 8, f"run_command returned after {elapsed:.1f}s"
+            assert _process_is_running(escaped), "the escaped descendant should be out of reach"
+        finally:
+            _kill_recorded(pid_file)
+            # Let the event loop observe the pipes closing before it is torn down.
+            await asyncio.sleep(0.2)
 
 
 class TestMechanicalVerifier:
