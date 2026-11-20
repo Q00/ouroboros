@@ -275,7 +275,9 @@ async def test_a_refined_default_reaches_the_worker_as_a_labelled_assumption(
     assumed = seed.sourced_scope.assumptions
     assert SPEED in assumed
     assert COUNT in assumed
-    assert f"Failure modes: {SPEED_FAILURE}" in assumed
+    # A failure-mode answer stays in the record but never reaches the worker.
+    assert not any(SPEED_FAILURE in line for line in assumed)
+    assert f"Failure modes: {SPEED_FAILURE}" in seed.assumptions
     # Decided, so the questions are no longer open.
     assert SPEED_QUESTION not in seed.open_questions
     assert COUNT_QUESTION not in seed.open_questions
@@ -480,12 +482,13 @@ async def test_a_korean_goal_keeps_its_assumptions_in_korean(
     seed = _recorded_seed(tmp_path, ledger, goal=KO_GOAL)
 
     assert seed.sourced_scope is not None
-    assert seed.sourced_scope.assumptions == (KO_SPEED, f"Failure modes: {KO_SPEED_FAILURE}")
+    assert seed.sourced_scope.assumptions == (KO_SPEED,)
     for line in seed.sourced_scope.assumptions:
         assert _HANGUL.search(line)
     section = _assumptions_part(_worker_input(seed))
-    assert f"- {KO_SPEED}\n" in section
-    assert f"- Failure modes: {KO_SPEED_FAILURE}" in section
+    assert f"- {KO_SPEED}" in section
+    assert KO_SPEED_FAILURE not in _worker_input(seed)
+    assert f"Failure modes: {KO_SPEED_FAILURE}" in seed.assumptions
 
 
 @pytest.mark.asyncio
@@ -530,11 +533,9 @@ def test_a_scope_shrinking_default_never_binds() -> None:
     seed = with_ledger_carryover(_generated_seed(KO_GALAXY_GOAL), ledger)
 
     assert seed.sourced_scope is not None
-    assert seed.sourced_scope.assumptions == (
-        SHRINKING,
-        f"Non-goal: {NO_NEBULAE}",
-        f"Failure modes: {EXTRA_FEATURES_FAIL}",
-    )
+    # The "extra features are failures" answer stays in the record only.
+    assert seed.sourced_scope.assumptions == (SHRINKING, f"Non-goal: {NO_NEBULAE}")
+    assert f"Failure modes: {EXTRA_FEATURES_FAIL}" in seed.assumptions
     bound = [*seed.sourced_scope.constraints, *seed.sourced_scope.acceptance_criteria]
     bound += [*synthesized.constraints, *(str(item) for item in synthesized.acceptance_criteria)]
     bound += [condition.description for condition in synthesized.exit_conditions]
@@ -545,9 +546,10 @@ def test_a_scope_shrinking_default_never_binds() -> None:
     prompt = _worker_input(seed)
     assert "## Constraints\nNone" in prompt
     section = _assumptions_part(prompt)
-    for text in (SHRINKING, EXTRA_FEATURES_FAIL, NO_NEBULAE):
+    for text in (SHRINKING, NO_NEBULAE):
         assert text in section
         assert prompt.index(text) > prompt.index(HEADING)
+    assert EXTRA_FEATURES_FAIL not in prompt
     assert "doing more than an assumption describes" in section
     assert "is not a failure" in section
 
@@ -832,7 +834,14 @@ def _assumed_ledger(answers: tuple[tuple[str, str], ...]) -> SeedDraftLedger:
     return _closed(ledger, GOAL)
 
 
-@pytest.mark.parametrize(("section", "value"), VERBATIM_ANSWERS)
+# Auto's answers in these sections stay in the record and never reach the worker.
+_RECORD_ONLY = ("failure_modes", "verification_plan")
+
+
+@pytest.mark.parametrize(
+    ("section", "value"),
+    [(section, value) for section, value in VERBATIM_ANSWERS if section not in _RECORD_ONLY],
+)
 def test_an_assumed_answer_reaches_every_surface_verbatim(
     section: str, value: str, tmp_path: Path
 ) -> None:
@@ -877,11 +886,36 @@ def test_the_cli_result_prints_an_assumed_answer_unchanged(tmp_path: Path) -> No
     assert f"- {value}" in re.sub(r"\x1b\[[0-9;]*m", "", capture.get())
 
 
+@pytest.mark.parametrize(
+    ("section", "value"),
+    [(section, value) for section, value in VERBATIM_ANSWERS if section in _RECORD_ONLY],
+)
+def test_a_failure_mode_or_verification_answer_stays_in_the_record_only(
+    section: str, value: str, tmp_path: Path
+) -> None:
+    line = f"{_LABELS[section]}{value}"
+    ledger = _assumed_ledger(((section, value),))
+
+    assert ledger_assumed_answers(ledger) == ()
+    seed = _recorded_seed(tmp_path, ledger)
+    assert seed.sourced_scope is not None
+    assert seed.sourced_scope.assumptions == ()
+    assert line in seed.assumptions
+    # Decided all the same: the question is not open.
+    assert "Question 1?" not in seed.open_questions
+    assert "Question 1?" not in ledger_open_questions(ledger)
+    assert value.strip() not in _worker_input(seed)
+
+
 def test_every_section_label_renders_in_order() -> None:
     answers = tuple((section, f"Answer for {section}.") for section in _LABELS)
     seed = with_ledger_carryover(_generated_seed(), _assumed_ledger(answers))
 
-    expected = tuple(f"{label}Answer for {section}." for section, label in _LABELS.items())
+    expected = tuple(
+        f"{label}Answer for {section}."
+        for section, label in _LABELS.items()
+        if section not in _RECORD_ONLY
+    )
     assert seed.sourced_scope is not None
     assert seed.sourced_scope.assumptions == expected
     section_text = _assumptions_part(_worker_input(seed))

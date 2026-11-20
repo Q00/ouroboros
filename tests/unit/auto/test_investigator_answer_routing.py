@@ -34,8 +34,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ouroboros.auto.adapters import (
+    REFINER_BROWNFIELD_RULE,
+    REFINER_GREENFIELD_RULE,
     REFINER_LANGUAGE_RULE,
-    REFINER_NO_REPO_FACTS_RULE,
     LLMAnswerRefiner,
 )
 from ouroboros.auto.answerer import AutoAnswerer, answer_language
@@ -499,11 +500,17 @@ def test_answer_language_reads_the_script(text: str, language: str) -> None:
 
 
 def test_refiner_prompt_asks_for_the_users_language_and_no_repo_facts() -> None:
-    system = LLMAnswerRefiner._SYSTEM
-
-    assert REFINER_LANGUAGE_RULE in system
+    assert REFINER_LANGUAGE_RULE in LLMAnswerRefiner._SYSTEM
     assert "{language}" in REFINER_LANGUAGE_RULE
-    assert REFINER_NO_REPO_FACTS_RULE in system
+    for has_existing_code, rule in (
+        (True, REFINER_BROWNFIELD_RULE),
+        (False, REFINER_GREENFIELD_RULE),
+    ):
+        refiner = LLMAnswerRefiner(AsyncMock(), has_existing_code=has_existing_code)
+        system = refiner.system_prompt("en")
+        assert "Write the answer in English only" in system
+        assert system.endswith(rule)
+        assert "never state what the existing code does or contains" in rule
 
 
 # -- the non-goal template ---------------------------------------------------------

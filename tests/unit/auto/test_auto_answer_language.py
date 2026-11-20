@@ -532,8 +532,8 @@ class _SeededLoopModel:
         user = messages[1].content
         lines = "\n".join(f"- Print `{message}`." for message in self.earlier)
         if "Earlier answers" not in user:
-            head, tail = user.split("\n\nA conservative", 1)
-            user = f"{head}\nEarlier answers in this interview, oldest first:\n{lines}\n\nA conservative{tail}"
+            head, tail = user.split("\n\nA starting point", 1)
+            user = f"{head}\nEarlier answers in this interview, oldest first:\n{lines}\n\nA starting point{tail}"
         seeded = [
             messages[0],
             type(messages[1])(role=messages[1].role, content=user),

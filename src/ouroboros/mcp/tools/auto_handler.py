@@ -33,6 +33,7 @@ from ouroboros.auto.execution_acceptance import (
     is_auto_reporting_acceptance_criterion,
     normalize_observation_execution_criteria,
 )
+from ouroboros.auto.expectations import build_expectations_researcher
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.investigator import build_repo_investigator
@@ -562,9 +563,9 @@ class AutoHandler:
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
             context_provider=context_provider,
             lateral_thinker=lateral_thinker,
-            # AI answer refiner: concrete goal-specific answers so interview
-            # ambiguity converges. Best-effort; None falls back to deterministic.
-            answer_refiner=build_answer_refiner(),
+            # AI answer refiner: concrete goal-specific answers so interview ambiguity
+            # converges; its scope rule follows the workspace. None: deterministic.
+            answer_refiner=build_answer_refiner(state.cwd),
             # The self-answer reads the repository first (auto/investigator.py).
             investigator=build_repo_investigator(
                 runtime_plan.interview.runtime_backend, runtime_plan.interview.opencode_mode
@@ -606,6 +607,10 @@ class AutoHandler:
             reconcile_source=reconcile_source,
             ralph_resumer=ralph_resumer,
             watchdog=watchdog,
+            # What a typical current product of the kind includes (new projects only).
+            expectations_researcher=build_expectations_researcher(
+                runtime_plan.interview.runtime_backend, runtime_plan.interview.opencode_mode
+            ),
         )
         result: AutoPipelineResult | None = None
         try:

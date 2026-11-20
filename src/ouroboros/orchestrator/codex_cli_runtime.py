@@ -314,10 +314,12 @@ class CodexCliRuntime:
         runtime_profile: str | None = None,
         startup_output_timeout_seconds: float | None = None,
         stdout_idle_timeout_seconds: float | None = None,
+        web_search: bool = False,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._permission_mode = self._resolve_permission_mode(permission_mode)
         self._model = model
+        self._web_search = web_search
         self._cwd = resolve_worker_cwd(cwd)
         self._skills_dir = self._resolve_skills_dir(skills_dir)
         self._skill_dispatcher = skill_dispatcher
@@ -2078,19 +2080,16 @@ class CodexCliRuntime:
             ]
         )
 
-        # Effort-first investment dial (RFC #1405). ``codex exec`` honors a
-        # per-invocation config override, so the orchestrator's chosen level is
-        # ENFORCED (not advised) by overriding ``model_reasoning_effort``. Only
-        # a known-safe token is forwarded, so an unexpected value can never be
-        # injected into the ``key=value`` override.
+        # Effort-first investment dial (RFC #1405): a per-invocation override ENFORCES
+        # the chosen level; only a known-safe token is forwarded into ``key=value``.
         effective_effort = reasoning_effort or runtime_effort
         if effective_effort and effective_effort in _CODEX_REASONING_EFFORT_LEVELS:
             command.extend(["-c", f"model_reasoning_effort={effective_effort}"])
+        if self._web_search:  # opt-in per runtime (``web_search=True``); off by default
+            command.extend(["-c", 'web_search="live"'])
 
-        # Per-call model-tier override (RFC #1405 sibling) wins over the
-        # constructor pin; ``model is None`` falls back to ``self._model`` so
-        # existing call sites are byte-identical. Only when neither yields a model
-        # do we consult the runtime profile below (unchanged fallback order).
+        # Per-call model tier (RFC #1405) wins over the constructor pin; with neither,
+        # the runtime profile below decides (unchanged fallback order).
         if normalized_model:
             command.extend(["--model", normalized_model])
         else:

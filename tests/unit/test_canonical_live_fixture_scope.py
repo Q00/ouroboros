@@ -34,6 +34,7 @@ def pytest_runtest_call(item):
     import ouroboros.providers.factory as factory
     import ouroboros.auto.adapters as adapters
     import ouroboros.auto.investigator as investigator
+    import ouroboros.auto.expectations as expectations
     import ouroboros.mcp.tools.auto_handler as handler
     import ouroboros.cli.commands.auto as cli
     expected = os.environ["EXPECT_LIVE"]
@@ -43,6 +44,8 @@ def pytest_runtest_call(item):
     assert (handler.build_repo_investigator is investigator.build_repo_investigator) == live
     assert (cli.build_answer_refiner is adapters.build_answer_refiner) == live
     assert (cli.build_repo_investigator is investigator.build_repo_investigator) == live
+    assert (handler.build_expectations_researcher is expectations.build_expectations_researcher) == live
+    assert (cli.build_expectations_researcher is expectations.build_expectations_researcher) == live
     assert Path.home() != Path(os.environ["OUTER_HOME"])
     assert os.environ["OUROBOROS_TELEMETRY"] == "0"
     assert os.environ["OUROBOROS_DASHBOARD"] == "0"

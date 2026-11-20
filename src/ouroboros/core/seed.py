@@ -309,12 +309,21 @@ class SourcedScope(BaseModel, frozen=True):
             hold the answer refiner's value), verbatim. They never bind: the
             worker sees them in their own section, labelled as unconfirmed,
             never as constraints or criteria.
+        expected_experience: What a typical current product of the requested
+            kind includes, from auto's research for a new product
+            (``auto/expectations.py``), one capability per line. The worker
+            sees it as the floor of a good result, never as acceptance
+            criteria: nothing verifies, decomposes or prices it.
+        expected_experience_sources: URLs the research reported reading, kept
+            for the record and never rendered.
     """
 
     goal: str = Field(..., min_length=1)
     constraints: tuple[str, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = ()
+    expected_experience: tuple[str, ...] = ()
+    expected_experience_sources: tuple[str, ...] = ()
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -1191,9 +1200,15 @@ class Seed(BaseModel, frozen=True):
         exclude: dict[str, Any] = dict.fromkeys(excluded, True)
         if self.sourced_scope is None:
             exclude["sourced_scope"] = True
-        elif not self.sourced_scope.assumptions:
-            # Likewise a sourced scope without assumptions serializes as before.
-            exclude["sourced_scope"] = {"assumptions"}
+        else:
+            # Likewise a sourced scope without these optional lists serializes as before.
+            empty = {
+                name
+                for name in ("assumptions", "expected_experience", "expected_experience_sources")
+                if not getattr(self.sourced_scope, name)
+            }
+            if empty:
+                exclude["sourced_scope"] = empty
         data = self.model_dump(mode="json", by_alias=True, exclude=exclude)
         data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
         return data

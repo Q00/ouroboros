@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 import structlog
 
+from ouroboros.auto import expectations as auto_expectations
 from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.artifact_state import artifact_state_for_result as _artifact_state_for_result
@@ -437,6 +438,7 @@ class AutoPipeline:
     # event has already been appended to the EventStore by the watchdog
     # itself, so the pipeline does no further side effect on fire.
     watchdog: Watchdog | None = None
+    expectations_researcher: auto_expectations.ExpectationsResearcher | None = None
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_probe_evidence: tuple[RuntimeEvidence, ...] = field(default=(), init=False, repr=False)
     # Recursive resume paths export the trace exactly once at the outermost
@@ -690,12 +692,17 @@ class AutoPipeline:
                         return self._result(state, ledger, blocker=state.last_error)
                 interview_phase_timeout = state.phase_timeout_seconds(AutoPhase.INTERVIEW)
                 interview_timeout = self._deadline_capped_timeout(state, interview_phase_timeout)
+                research = auto_expectations.start_expected_experience(
+                    self.expectations_researcher, state, interview_timeout, self._emit_runtime_event
+                )
                 try:
                     try:
                         # Repository investigation pauses this clock (auto/phase_clock.py).
                         interview = await wait_for_pausable(
                             self.interview_driver.run(state, ledger), interview_timeout
                         )
+                        if interview.status != "blocked":
+                            auto_expectations.keep(state, await research.result())
                     except TimeoutError:
                         if self._enforce_deadline(state):
                             return self._result(state, ledger, blocker=state.last_error)
@@ -708,43 +715,22 @@ class AutoPipeline:
                         # product can still surface. ``_enforce_deadline`` above keeps
                         # the global pipeline-deadline contract untouched: only
                         # the per-phase ``interview_phase_deadline`` is rerouted.
+                        auto_expectations.keep(state, await research.result())
                         return await self._handle_interview_deadline(
                             state,
                             ledger,
                             timeout_seconds=interview_phase_timeout,
                         )
                 finally:
-                    # RFC #1256 §I4 — composition-root drain on EVERY
-                    # exit path: clean completion, ``TimeoutError``
-                    # translated to BLOCKED above, AND any other
-                    # exception propagating out of
-                    # ``self.interview_driver.run``. The driver
-                    # schedules ``auto.interview.opened`` before the
-                    # inner loop and ``auto.interview.failed``
-                    # immediately before re-raising on ordinary
-                    # exceptions; without a drain on the exception
-                    # path those background tasks would die when the
-                    # composition root unwinds, silently losing the
-                    # failed lifecycle evidence (bot review on commit
-                    # ``34fd7ee8``, ``supersede-requeue-pr:1260-34fd7ee``,
-                    # reproduced this with ``_run_inner`` patched to
-                    # raise: after ``pipeline.run()`` raised,
-                    # ``store.appended == []`` and
-                    # ``driver._pending_emit_tasks`` still held both
-                    # tasks). ``finally`` runs before any return /
-                    # propagating raise inside the inner ``try``, so
-                    # the drain fires consistently for the three
-                    # documented paths. The drain is bounded by
-                    # ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS`` and
-                    # cannot turn a phase outcome into a different
-                    # outcome — the interview ``wait_for`` has already
-                    # returned, been translated to BLOCKED, or raised.
-                    # ``state`` is passed so the drain can refund its
-                    # elapsed time to ``state.deadline_at`` and prevent
-                    # observability latency from converting a completed
-                    # interview into a ``pipeline_timeout`` BLOCKED at
-                    # the next ``_enforce_deadline`` gate (bot review
-                    # on commit ``769cdfeb``, req_1779940568_155).
+                    research.cancel()  # a path that did not await the research stops it
+                    # RFC #1256 §I4: drain the driver's background emit tasks on EVERY exit
+                    # path (completion, deadline, any exception out of ``interview_driver.run``)
+                    # so ``auto.interview.opened``/``failed`` evidence is not lost when the
+                    # composition root unwinds (bot review on ``34fd7ee8``). The drain is
+                    # bounded by ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS``, cannot change
+                    # the phase outcome, and refunds its elapsed time to ``state.deadline_at``
+                    # so observability latency never turns a completed interview into a
+                    # ``pipeline_timeout`` BLOCKED (bot review on ``769cdfeb``).
                     await self._drain_interview_observer_events(state)
                 if interview.status == "blocked":
                     return self._result(state, ledger, blocker=interview.blocker)
@@ -1811,7 +1797,7 @@ class AutoPipeline:
             seed = seed.model_copy(
                 update={"metadata": seed.metadata.model_copy(update={"ambiguity_score": floor})}
             )
-        seed = with_ledger_carryover(seed, ledger)
+        seed = with_ledger_carryover(seed, ledger, expected=auto_expectations.kept(state))
         seed = normalize_execution_acceptance(seed)
         state.seed_id = seed.metadata.seed_id
         state.seed_artifact = seed.to_dict()

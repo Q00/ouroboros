@@ -21,6 +21,7 @@ from ouroboros.auto.answer_text import (
     normalize_answer,
 )
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
+from ouroboros.auto.ledger_seed import workspace_has_existing_code
 from ouroboros.bigbang.answer_provenance import ANSWER_PROVENANCE_ARGUMENT, AnswerProvenance
 from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.requirement_candidate import RequirementDistillation
@@ -1177,9 +1178,28 @@ def _artifact_text(value: object) -> str | None:
 REFINER_LANGUAGE_RULE = "Write the answer in {language} only, and never add a translation."
 # The refiner reads no files. A product decision it writes is a non-binding
 # assumption; a claim about the current code would be a fabricated repo fact.
-REFINER_NO_REPO_FACTS_RULE = (
-    "You have not read the repository: never state what the existing code does "
-    "or contains; state the most conservative reasonable decision instead."
+# Which rule applies depends on whether the workspace already has code
+# (``LLMAnswerRefiner.has_existing_code``): a new product is decided as a
+# typical current product of its kind would decide it and never narrowed (no
+# "first version", no "that is enough", and no identical-replay demand that
+# strips the randomness or animation such products have); a
+# change to existing code builds what the request names, completely, and
+# nothing else. Unknown counts as existing code.
+REFINER_GREENFIELD_RULE = (
+    "You have not read the repository: never state what the existing code does or contains. "
+    "For what the request newly builds, decide as a typical current product of this kind "
+    "would and never narrow it: when an option includes more of what such products have, "
+    "choose it or combine the options, unless it needs a server, network service, account, "
+    "payment or personal data. Never answer that less is enough or call anything a first "
+    "version, and keep the variety such products have, such as randomness and animation, "
+    "instead of requiring the same result on every run. Existing behavior and code the "
+    "request does not mention stay unchanged."
+)
+REFINER_BROWNFIELD_RULE = (
+    "You have not read the repository: never state what the existing code does or contains. "
+    "The project already has code: build what the request names completely and at the level "
+    "a user expects, but add no other feature, option or behavior the request does not name, "
+    "and keep existing behavior and code the request does not mention unchanged."
 )
 # What one answer part covers, in plain words. The model never sees the field
 # names, so it cannot repeat them to the user.
@@ -1215,10 +1235,14 @@ class LLMAnswerRefiner:
     consistent with the earlier answers, which the prompt lists oldest first.
     A reply that breaks a rule (``answer_text.answer_problems``) gets one retry
     that names the problem; if that fails too, the part gets the short
-    conservative answer in the goal's language (``FALLBACK_ANSWERS``). A
+    default answer in the goal's language (``FALLBACK_ANSWERS``). A
     provider failure returns ``None`` for an English goal, so the driver keeps
     its deterministic English answer, and the same short answer otherwise,
     because the deterministic answer is English.
+
+    ``has_existing_code`` picks the scope rule (``REFINER_GREENFIELD_RULE`` or
+    ``REFINER_BROWNFIELD_RULE``). Whoever builds the refiner knows the
+    workspace and sets it; it defaults to ``True``, the brownfield rule.
     """
 
     _SYSTEM = (
@@ -1233,12 +1257,24 @@ class LLMAnswerRefiner:
         "repeating them. If two earlier answers disagree, the most recent one "
         "stands; when the question asks which one holds, answer with the most "
         "recent one and say it replaces the other. "
-        f"{REFINER_LANGUAGE_RULE} {REFINER_NO_REPO_FACTS_RULE}"
+        f"{REFINER_LANGUAGE_RULE}"
     )
 
-    def __init__(self, llm_adapter: LLMAdapter, *, model: str | None = None) -> None:
+    def __init__(
+        self,
+        llm_adapter: LLMAdapter,
+        *,
+        model: str | None = None,
+        has_existing_code: bool = True,
+    ) -> None:
         self.llm_adapter = llm_adapter
         self.model = model
+        self.has_existing_code = has_existing_code
+
+    def system_prompt(self, language: str) -> str:
+        """The system prompt for an answer in ``language`` (a ``LANGUAGE_NAMES`` code)."""
+        rule = REFINER_BROWNFIELD_RULE if self.has_existing_code else REFINER_GREENFIELD_RULE
+        return f"{self._SYSTEM.format(language=LANGUAGE_NAMES[language])} {rule}"
 
     async def __call__(
         self,
@@ -1260,9 +1296,9 @@ class LLMAnswerRefiner:
             f"Interview question: {question}\n\n"
             f"Answer only this part of it: {concern}.\n"
             f"{earlier_block}\n"
-            f"A conservative starting point, to rewrite in your own words: {generic_text}"
+            f"A starting point, to rewrite in your own words: {generic_text}"
         )
-        system = self._SYSTEM.format(language=LANGUAGE_NAMES[language])
+        system = self.system_prompt(language)
         messages = [
             Message(role=MessageRole.SYSTEM, content=system),
             Message(role=MessageRole.USER, content=prompt),
@@ -1316,16 +1352,22 @@ class LLMAnswerRefiner:
         return normalize_answer(result.value.content or "") or None
 
 
-def build_answer_refiner() -> LLMAnswerRefiner | None:
+def build_answer_refiner(cwd: str | Path | None = None) -> LLMAnswerRefiner | None:
     """Best-effort AI answer refiner from the configured interview LLM backend.
 
-    Returns ``None`` (deterministic-only answering) if the provider/config is
-    unavailable so auto never fails to start just because the refiner could not
-    be constructed.
+    ``cwd`` is the auto session's workspace: the refiner uses the greenfield
+    rule only when it is a directory with no existing code
+    (``workspace_has_existing_code``); otherwise, unknown included, the
+    brownfield rule. Returns ``None`` (deterministic-only answering) if the
+    provider/config is unavailable so auto never fails to start just because
+    the refiner could not be constructed.
     """
     try:
         from ouroboros.providers import create_llm_adapter
 
-        return LLMAnswerRefiner(create_llm_adapter(use_case="interview"))
+        return LLMAnswerRefiner(
+            create_llm_adapter(use_case="interview"),
+            has_existing_code=workspace_has_existing_code(cwd),
+        )
     except Exception:  # noqa: BLE001 - refiner is optional; never block auto on it
         return None

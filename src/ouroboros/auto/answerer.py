@@ -14,6 +14,22 @@ from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedD
 if TYPE_CHECKING:
     from ouroboros.auto.domain_profile import DomainProfile
 
+# The default for a question nothing more specific answers: what the request
+# asks for, at the level users expect, never narrowed by a limit nobody stated.
+EXPECTED_LEVEL_POLICY = (
+    "Build what the request asks for at the level a user expects from a typical current "
+    "product of its kind, with no limit the request does not state; keep existing behavior "
+    "the request does not mention unchanged, follow the project's patterns, and make "
+    "completion verifiable with observable acceptance criteria."
+)
+# Failure is about the work, never a demand that the product behave the same on
+# every run: "non-reproducible output" here made the interview ask for identical
+# replays, and the worker then removed the randomness the product needed.
+UNREQUESTED_CHANGE_FAILURE = (
+    "Failure includes requested behavior that was not checked or does not work as asked, "
+    "or changes to existing behavior the request does not ask for."
+)
+
 
 class AutoAnswerSource(StrEnum):
     """Source categories for auto answers (``requester``: auto/requester.py asked)."""
@@ -293,7 +309,7 @@ class AutoAnswerer:
                 context,
             )
         if section in {"constraints", "failure_modes"}:
-            gap_question = "What conservative constraints and failure modes should bound this MVP?"
+            gap_question = "What constraints and failure modes apply to this task?"
             return _maybe_apply_user_preference(
                 self._default_answer(gap_question, ledger),
                 (section,),
@@ -607,7 +623,7 @@ class AutoAnswerer:
     def _product_behavior_answer(self, question: str) -> AutoAnswer:
         subject = _acceptance_subject(question)
         value = (
-            f"Treat this requested product behavior as in scope for the MVP: {subject}. "
+            f"Treat this requested product behavior as in scope: {subject}. "
             "Implement it directly and make the resulting state, output, or API response observable."
         )
         key = _slug_key(subject)
@@ -638,24 +654,24 @@ class AutoAnswerer:
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.8, updates)
 
     def _default_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:  # noqa: ARG002
-        value = "Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria."
+        value = EXPECTED_LEVEL_POLICY
         updates = [
             (
                 "constraints",
                 LedgerEntry(
-                    key="constraints.conservative_mvp",
-                    value="Keep the implementation to the smallest safe MVP that satisfies the task goal.",
+                    key="constraints.expected_level",
+                    value=EXPECTED_LEVEL_POLICY,
                     source=LedgerSource.CONSERVATIVE_DEFAULT,
                     confidence=0.82,
                     status=LedgerStatus.DEFAULTED,
-                    rationale="Default auto policy favors safe convergence.",
+                    rationale="Default auto policy builds what the request asks for, at the expected level.",
                 ),
             ),
             (
                 "failure_modes",
                 LedgerEntry(
-                    key="failure_modes.unverified_or_scope_creep",
-                    value="Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP.",
+                    key="failure_modes.unverified_or_unrequested_change",
+                    value=UNREQUESTED_CHANGE_FAILURE,
                     source=LedgerSource.CONSERVATIVE_DEFAULT,
                     confidence=0.8,
                     status=LedgerStatus.DEFAULTED,

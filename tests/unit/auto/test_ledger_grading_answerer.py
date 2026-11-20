@@ -1013,8 +1013,8 @@ def test_auto_answerer_unknown_multilingual_question_uses_safe_default() -> None
     assert answer.blocker is None
     assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT
     assert [entry.key for _section, entry in answer.ledger_updates] == [
-        "constraints.conservative_mvp",
-        "failure_modes.unverified_or_scope_creep",
+        "constraints.expected_level",
+        "failure_modes.unverified_or_unrequested_change",
     ]
 
 
@@ -1599,7 +1599,7 @@ def test_auto_answerer_routes_safe_regulated_product_questions_to_product_behavi
     Assertions:
     1. answer.blocker is None  (gate passes)
     2. answer.source == CONSERVATIVE_DEFAULT  (product-behavior, not BLOCKER)
-    3. ledger_updates contain a subject-specific key (not the generic conservative_mvp key
+    3. ledger_updates contain a subject-specific key (not the generic expected_level key
        from _default_answer), confirming the regulated-product feature is preserved.
     4. The ledger entry value or the answer text includes the regulated noun
        (gdpr / pii) so the subject is not silently stripped.
@@ -1631,14 +1631,14 @@ def test_auto_answerer_routes_safe_regulated_product_questions_to_product_behavi
         assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT, question
 
         # Routed to _product_behavior_answer() — ledger has subject-specific keys,
-        # not the generic "constraints.conservative_mvp" key from _default_answer().
+        # not the generic "constraints.expected_level" key from _default_answer().
         update_keys = [u[1].key for u in answer.ledger_updates]
         assert any("behavior." in k for k in update_keys), (
             f"Expected subject-specific behavior key in ledger updates for {question!r}, "
             f"got {update_keys}"
         )
-        assert not any(k == "constraints.conservative_mvp" for k in update_keys), (
-            f"Question {question!r} fell through to _default_answer() (conservative_mvp key found)"
+        assert not any(k == "constraints.expected_level" for k in update_keys), (
+            f"Question {question!r} fell through to _default_answer() (expected_level key found)"
         )
 
         # Regulated noun preserved in the answer text or a ledger entry value

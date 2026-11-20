@@ -7,6 +7,7 @@ import pytest
 
 from ouroboros.auto import interview_recovery
 from ouroboros.auto.adapters import PartialInterviewStartError
+from ouroboros.auto.answerer import EXPECTED_LEVEL_POLICY
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -2257,7 +2258,7 @@ async def test_interview_driver_uses_gap_answers_when_generic_defaults_repeat(tm
 
     assert result.status == "seed_ready"
     assert ledger.open_gaps() == []
-    assert sum("conservative mvp" in item.lower() for item in answers) == 1
+    assert sum(EXPECTED_LEVEL_POLICY in item for item in answers) == 1
     assert any("single local user" in item.lower() for item in answers)
     assert any("non-goals" in item.lower() or "non-goal" in item.lower() for item in answers)
     assert any("runtime" in item.lower() for item in answers)

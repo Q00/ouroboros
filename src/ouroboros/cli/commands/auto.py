@@ -25,6 +25,7 @@ from ouroboros.auto.adapters import (
     save_seed,
 )
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
+from ouroboros.auto.expectations import build_expectations_researcher
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.intent_guard import diagnose_auto_pipeline_state
 from ouroboros.auto.interview_driver import AutoInterviewDriver
@@ -647,9 +648,10 @@ async def _run_auto(
     watchdog_event_store = EventStore()
     await watchdog_event_store.initialize()
     # AI answer refiner: upgrades generic deterministic auto-answers to concrete,
-    # goal-specific ones so interview ambiguity actually converges. Best-effort —
-    # any construction failure leaves the deterministic answerer untouched.
-    answer_refiner = build_answer_refiner()
+    # goal-specific ones so interview ambiguity actually converges; its scope rule
+    # follows the workspace. Best-effort — any construction failure leaves the
+    # deterministic answerer untouched.
+    answer_refiner = build_answer_refiner(state.cwd)
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         store=store,
@@ -694,6 +696,10 @@ async def _run_auto(
         reconcile_source=reconcile_source,
         progress_callback=progress_callback,
         watchdog=watchdog,
+        # What a typical current product of the kind includes (new projects only).
+        expectations_researcher=build_expectations_researcher(
+            runtime_plan.interview.runtime_backend, runtime_plan.interview.opencode_mode
+        ),
     )
     result: AutoPipelineResult | None = None
     try:

@@ -276,7 +276,25 @@ def block_interview_answer_refiner_cli_spawn(monkeypatch, request):
     for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "build_answer_refiner"):
-            monkeypatch.setattr(mod, "build_answer_refiner", lambda: None)
+            monkeypatch.setattr(mod, "build_answer_refiner", lambda *_a, **_k: None)
+
+
+@pytest.fixture(autouse=True)
+def block_expectations_research_cli_spawn(monkeypatch, request):
+    """Stop the auto expected-experience research from spawning real agent CLIs.
+
+    ``build_expectations_researcher()`` returns an ``AgentExpectationsResearcher``
+    that builds an agent runtime (claude, codex, ...) with web search for a new
+    project's goal. Its own fallback, ``None``, runs no research and records no
+    event, which matches a machine without any agent CLI. Tests that exercise the
+    research inject a fake researcher directly or re-patch after this fixture.
+    """
+    if _is_explicit_live_canonical_test(request):
+        return
+    for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "build_expectations_researcher"):
+            monkeypatch.setattr(mod, "build_expectations_researcher", lambda *_a, **_k: None)
 
 
 @pytest.fixture(autouse=True)
