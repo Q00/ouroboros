@@ -31,7 +31,11 @@ from ouroboros.auto.answerer import (
 )
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.ledger_seed import workspace_has_existing_code
-from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS
+from ouroboros.auto.safe_defaults import (
+    _SAFE_DEFAULTS,
+    SafeDefaultFinalization,
+    build_safe_default_synthesis,
+)
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionResponse, Message, MessageRole, UsageInfo
 
@@ -103,6 +107,26 @@ def test_the_safe_defaults_no_longer_narrow_outputs_constraints_or_failures() ->
     for spec in (outputs, constraints, failures):
         _assert_not_narrowing(spec.value)
         _assert_not_narrowing(spec.rationale)
+
+
+def test_the_safe_default_synthesis_header_is_neutral() -> None:
+    text = build_safe_default_synthesis(
+        SafeDefaultFinalization(("outputs",), (), (("outputs", _SAFE_DEFAULTS["outputs"]),))
+    )
+
+    header = text.splitlines()[0]
+    assert "The following safe default assumptions close the remaining required" in header
+    _assert_not_narrowing(text)
+
+
+def test_a_product_behavior_answer_is_in_scope_without_an_mvp() -> None:
+    answer = AutoAnswerer().answer(
+        "Should users be able to export their reports as PDF?",
+        SeedDraftLedger.from_goal("Build a report app"),
+    )
+
+    assert answer.text.startswith("Treat this requested product behavior as in scope: ")
+    _assert_not_narrowing(answer.text)
 
 
 def test_the_safety_non_goals_are_unchanged() -> None:

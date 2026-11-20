@@ -167,7 +167,7 @@ def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
         f"{_AUTO_ANSWER_PREFIX}{_SAFE_DEFAULT_SYNTHESIS_TAG} "
         "Mark the interview complete and hand off for seed generation. "
         "Auto safe-default synthesis (max interview rounds reached). "
-        "The following conservative assumptions close the remaining required "
+        "The following safe default assumptions close the remaining required "
         "Seed sections; treat them as auditable defaults that may be revised "
         "if a stricter answer is required.",
     ]

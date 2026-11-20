@@ -620,7 +620,7 @@ class AutoAnswerer:
     def _product_behavior_answer(self, question: str) -> AutoAnswer:
         subject = _acceptance_subject(question)
         value = (
-            f"Treat this requested product behavior as in scope for the MVP: {subject}. "
+            f"Treat this requested product behavior as in scope: {subject}. "
             "Implement it directly and make the resulting state, output, or API response observable."
         )
         key = _slug_key(subject)

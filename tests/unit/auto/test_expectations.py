@@ -44,6 +44,7 @@ from ouroboros.auto.ledger_seed import with_ledger_carryover
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.safe_defaults import finalize_safe_defaultable_gaps
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.seed import Seed, SourcedScope
 from ouroboros.core.seed_contract import GOAL_OBJECTIVE_CRITERION, SeedContract
@@ -160,6 +161,11 @@ def test_the_timeout_comes_from_the_environment(raw: str | None, expected: float
 def test_an_invalid_timeout_is_refused(raw: str) -> None:
     with pytest.raises(ValueError, match=TIMEOUT_ENV):
         resolve_timeout({TIMEOUT_ENV: raw})
+
+
+def test_the_timeout_env_is_denied_from_untrusted_project_env() -> None:
+    assert is_untrusted_env_denied_key(TIMEOUT_ENV)
+    assert is_untrusted_env_denied_key(TIMEOUT_ENV.lower())
 
 
 # -- gating, timing and the event --------------------------------------------------
