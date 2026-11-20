@@ -218,6 +218,7 @@ def _workspace(tmp_path: Path, *, code: bool = False) -> Path:
     root.mkdir()
     if code:
         subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+        (root / "main.py").write_text("print('existing')\n", encoding="utf-8")
     return root
 
 
@@ -715,3 +716,15 @@ async def test_an_interview_deadline_seed_carries_the_research(tmp_path: Path) -
     assert state.seed_artifact["metadata"]["degraded"] is True
     assert tuple(state.seed_artifact["sourced_scope"]["expected_experience"]) == LINES
     assert [event["outcome"] for event in _events(driver)] == ["ok"]
+
+
+def test_an_empty_git_checkout_is_a_new_project_and_gets_the_research(tmp_path: Path) -> None:
+    """``git init`` alone is not existing code (#3074): the research gate opens."""
+    from ouroboros.auto.ledger_seed import workspace_has_existing_code
+
+    root = tmp_path / "fresh"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    (root / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+
+    assert workspace_has_existing_code(root) is False

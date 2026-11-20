@@ -42,8 +42,19 @@ class TestDetectBrownfield:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (tmp_path / "main.py").write_text("print('hi')\n", encoding="utf-8")
 
         assert detect_brownfield(tmp_path) is True
+
+    def test_detect_brownfield_empty_git_repository_is_new_project(self, tmp_path: Path) -> None:
+        """A just-initialised checkout with only dot entries is not existing code (#3074)."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+        (tmp_path / ".ouroboros").mkdir()
+
+        assert detect_brownfield(tmp_path) is False
 
     def test_detect_brownfield_linked_worktree_without_manifest(self, tmp_path: Path) -> None:
         git_dir = tmp_path / "git-metadata"
@@ -52,18 +63,21 @@ class TestDetectBrownfield:
         worktree = tmp_path / "linked"
         worktree.mkdir()
         (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+        (worktree / "src").mkdir()
 
         assert detect_brownfield(worktree) is True
 
     def test_detect_brownfield_rejects_malformed_git_pointer(self, tmp_path: Path) -> None:
         (tmp_path / ".git").write_text("not-a-gitdir\n", encoding="utf-8")
 
+        (tmp_path / "main.py").write_text("print(1)\n", encoding="utf-8")
         assert detect_brownfield(tmp_path) is False
 
     def test_detect_brownfield_rejects_empty_git_pointer(self, tmp_path: Path) -> None:
         (tmp_path / ".git").write_text("gitdir:\n", encoding="utf-8")
         (tmp_path / "HEAD").write_text("ref: refs/heads/not-git\n", encoding="utf-8")
 
+        (tmp_path / "main.py").write_text("print(1)\n", encoding="utf-8")
         assert detect_brownfield(tmp_path) is False
 
     def test_detect_brownfield_rejects_multiline_git_pointer(self, tmp_path: Path) -> None:
@@ -75,11 +89,13 @@ class TestDetectBrownfield:
             encoding="utf-8",
         )
 
+        (tmp_path / "main.py").write_text("print(1)\n", encoding="utf-8")
         assert detect_brownfield(tmp_path) is False
 
     def test_detect_brownfield_rejects_nul_git_pointer(self, tmp_path: Path) -> None:
         (tmp_path / ".git").write_bytes(b"gitdir: bad\x00path\n")
 
+        (tmp_path / "main.py").write_text("print(1)\n", encoding="utf-8")
         assert detect_brownfield(tmp_path) is False
 
     def test_detect_brownfield_rejects_wrong_case_git_pointer(self, tmp_path: Path) -> None:
@@ -88,6 +104,7 @@ class TestDetectBrownfield:
         (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
         (tmp_path / ".git").write_text(f"GITDIR: {git_dir}\n", encoding="utf-8")
 
+        (tmp_path / "main.py").write_text("print(1)\n", encoding="utf-8")
         assert detect_brownfield(tmp_path) is False
 
     @pytest.mark.parametrize(
@@ -114,6 +131,7 @@ class TestDetectBrownfield:
             encoding="utf-8",
         )
 
+        (tmp_path / "main.py").write_text("print(1)\n", encoding="utf-8")
         assert detect_brownfield(tmp_path) is False
 
     @pytest.mark.parametrize("line_ending", ("", "\n", "\r\n", "\r"))
@@ -127,4 +145,5 @@ class TestDetectBrownfield:
         (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
         (tmp_path / ".git").write_bytes(f"gitdir: {git_dir}".encode() + line_ending.encode())
 
+        (tmp_path / "main.py").write_text("print(1)\n", encoding="utf-8")
         assert detect_brownfield(tmp_path) is True

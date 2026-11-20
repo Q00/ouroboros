@@ -206,6 +206,7 @@ def test_the_two_rules_say_what_the_probes_measured() -> None:
 def _git_repo(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    (root / "main.py").write_text("print('existing')\n", encoding="utf-8")
     return root
 
 
