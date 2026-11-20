@@ -64,7 +64,7 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 PERMISSION_MODE = "default"
 WEB_TOOLS: tuple[str, ...] = ("WebSearch", "WebFetch")
 MAX_LINES = 12
-MAX_LINE_CHARS = 140
+MAX_LINE_CHARS = 180
 MAX_SOURCES = 6
 EVENT_TYPE = "auto.expectations.researched"
 
@@ -130,7 +130,8 @@ def build_prompt(goal: str) -> str:
             f"A user asked: {goal.strip()}",
             "",
             "Describe what a typical, current product of this kind includes today: the "
-            "capabilities a user would expect, most expected first, 6–12 short lines starting "
+            "capabilities a user would expect and how it looks and feels in use (presentation, "
+            "motion, feedback), most expected first, 6–12 short lines starting "
             "with '- ', each marked (core) or (common).",
             "Only include what the product itself can do in a single local install: nothing "
             "that needs a server, network service, account, payment, purchase or personal data.",

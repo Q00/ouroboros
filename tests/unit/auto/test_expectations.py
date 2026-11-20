@@ -80,7 +80,8 @@ def test_the_prompt_names_the_goal_the_list_the_local_limit_and_the_language() -
     assert prompt.startswith(f"A user asked: {GOAL}\n")
     assert (
         "Describe what a typical, current product of this kind includes today: the "
-        "capabilities a user would expect, most expected first, 6–12 short lines starting "
+        "capabilities a user would expect and how it looks and feels in use (presentation, "
+        "motion, feedback), most expected first, 6–12 short lines starting "
         "with '- ', each marked (core) or (common)."
     ) in prompt
     assert (
