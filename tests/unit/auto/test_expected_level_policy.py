@@ -199,9 +199,23 @@ async def test_the_refiner_uses_the_scope_rule_for_the_workspace(
 
 def test_the_two_rules_say_what_the_probes_measured() -> None:
     assert "never narrow it" in REFINER_GREENFIELD_RULE
-    assert "choose it or combine the options" in REFINER_GREENFIELD_RULE
+    assert "include what such products have from every option" in REFINER_GREENFIELD_RULE
     assert "server, network service, account, payment or personal data" in (REFINER_GREENFIELD_RULE)
-    assert "Never answer that less is enough or call anything a first version" in (
+    assert "(sharing or syncing between people or devices does)" in REFINER_GREENFIELD_RULE
+    assert "Name counts and contents concretely, as many as such products have" in (
+        REFINER_GREENFIELD_RULE
+    )
+    assert "even where the question names a smaller one: never one track" in (
+        REFINER_GREENFIELD_RULE
+    )
+    assert 'never only "no limit", "every" or "the full variety"' in REFINER_GREENFIELD_RULE
+    assert "from every part of the answer, including what the result shows" in (
+        REFINER_GREENFIELD_RULE
+    )
+    assert "an earlier answer included it, or the question asks to bring it back" in (
+        REFINER_GREENFIELD_RULE
+    )
+    assert "Never answer that less is enough or call anything a first version or release" in (
         REFINER_GREENFIELD_RULE
     )
     assert "keep the variety such products have, such as randomness and animation" in (

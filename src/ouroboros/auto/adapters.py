@@ -1182,18 +1182,35 @@ REFINER_LANGUAGE_RULE = "Write the answer in {language} only, and never add a tr
 # (``LLMAnswerRefiner.has_existing_code``): a new product is decided as a
 # typical current product of its kind would decide it and never narrowed (no
 # "first version", no "that is enough", and no identical-replay demand that
-# strips the randomness or animation such products have); a
-# change to existing code builds what the request names, completely, and
-# nothing else. Unknown counts as existing code.
+# strips the randomness or animation such products have). Offered options are
+# merged, not picked from: told only to "choose or combine", the model took
+# the smaller option whenever the larger one also named something local-only
+# play cannot have (multiplayer), and kart Seeds said "one track". Told only
+# not to go below such products, the model named no count at all ("no
+# arbitrary limit", "the full variety"), the interview could not converge and
+# ran nine rounds, so counts are named. The parts of one answer are written
+# concurrently and none sees the others: one left online play out while another
+# made "local and online multiplayer working" the visible result, and the next
+# round's "the most recent answer stands" made online play required. So the
+# exclusion holds in every part and over earlier answers. A change to existing
+# code builds what the request names, completely, and nothing else. Unknown
+# counts as existing code.
 REFINER_GREENFIELD_RULE = (
     "You have not read the repository: never state what the existing code does or contains. "
     "For what the request newly builds, decide as a typical current product of this kind "
-    "would and never narrow it: when an option includes more of what such products have, "
-    "choose it or combine the options, unless it needs a server, network service, account, "
-    "payment or personal data. Never answer that less is enough or call anything a first "
-    "version, and keep the variety such products have, such as randomness and animation, "
-    "instead of requiring the same result on every run. Existing behavior and code the "
-    "request does not mention stay unchanged."
+    "would and never narrow it. When the question offers options or asks what to "
+    "prioritize, include what such products have from every option. Name counts and "
+    "contents concretely, as many as such products have, such as how many tracks and "
+    "racers, even where the question names a smaller one: never one track, level or mode, "
+    'and never only "no limit", "every" or "the full variety", even when the question or an '
+    "earlier answer uses those words. Leave out any part that needs a server, network "
+    "service, account, payment or personal data (sharing or syncing between people or "
+    "devices does) from every part of the answer, including what the result shows and how "
+    "it is checked, even when the question offers it, an earlier answer included it, or the "
+    "question asks to bring it back. Never answer that less is enough or call anything a "
+    "first version or release, and keep the variety such products have, such as randomness "
+    "and animation, instead of requiring the same result on every run. Existing behavior "
+    "and code the request does not mention stay unchanged."
 )
 REFINER_BROWNFIELD_RULE = (
     "You have not read the repository: never state what the existing code does or contains. "
