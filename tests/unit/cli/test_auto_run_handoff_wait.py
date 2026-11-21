@@ -953,6 +953,204 @@ async def test_wait_trusts_the_execution_terminal_after_the_post_run_window(
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_wait_covers_each_stage_the_completion_pass_announces(tmp_path, monkeypatch) -> None:
+    """The window runs past the bound the run job's completion pass declared.
+
+    The pass runs after ``execution.terminal``; ending the wait after the bare
+    window ended the process and cancelled the pass's fix session.
+    """
+    import time as time_module
+
+    from ouroboros.orchestrator.completion_pass import STAGE_EVENT
+
+    monkeypatch.setattr(auto_command, "_POST_RUN_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(auto_command, "_RUN_HANDOFF_WAIT_POLL_SECONDS", 1)
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+
+    async def _stage(stage: str, bound_seconds: float) -> None:
+        await store.append(
+            BaseEvent(
+                type=STAGE_EVENT,
+                aggregate_type="execution",
+                aggregate_id="exec_wait",
+                data={"stage": stage, "bound_seconds": bound_seconds},
+            )
+        )
+
+    try:
+
+        async def _runner() -> MCPToolResult:
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait",
+                    data={"status": "completed", "session_id": "orch_wait"},
+                )
+            )
+            await _stage("review", 3.0)
+            await asyncio.sleep(1.5)
+            await _stage("fix", 3.0)
+            await asyncio.sleep(1.5)
+            await _stage("done", 0.0)
+            await asyncio.sleep(0.1)
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="run receipt"),),
+                is_error=False,
+                meta={"status": "completed", "success": True, "chained_evaluate_job_id": "job_e"},
+            )
+
+        started = await manager.start_job(
+            job_type="execute",
+            initial_message="queued",
+            runner=_runner(),
+            # As a run job with post-terminal work (evaluation) declares.
+            links=JobLinks(
+                session_id="orch_wait", execution_id="exec_wait", preserve_runner_result=True
+            ),
+        )
+
+        reconciled = await asyncio.wait_for(
+            _await_run_handoff_terminal(
+                _handoff_only_result(started.job_id),
+                job_manager=manager,
+                event_store=store,
+                quiet=True,
+                deadline_at=time_module.monotonic() + 60,
+            ),
+            timeout=20,
+        )
+
+        assert reconciled.status == "complete"
+        snapshot = await manager.get_snapshot(started.job_id)
+        assert snapshot.status is JobStatus.COMPLETED
+        assert snapshot.result_meta["chained_evaluate_job_id"] == "job_e"
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_job_ends_the_wait_after_its_last_stage_bound(tmp_path, monkeypatch) -> None:
+    """A declared stage extends the window only by its own bound."""
+    import time as time_module
+
+    from ouroboros.orchestrator.completion_pass import STAGE_EVENT
+
+    monkeypatch.setattr(auto_command, "_POST_RUN_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(auto_command, "_RUN_HANDOFF_WAIT_POLL_SECONDS", 1)
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    try:
+
+        async def _wedged_runner() -> MCPToolResult:
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
+
+        started = await manager.start_job(
+            job_type="execute",
+            initial_message="queued",
+            runner=_wedged_runner(),
+            links=JobLinks(
+                session_id="orch_wait", execution_id="exec_wait", preserve_runner_result=True
+            ),
+        )
+        await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
+        for event_type, data in (
+            ("execution.terminal", {"status": "completed", "session_id": "orch_wait"}),
+            (STAGE_EVENT, {"stage": "fix", "bound_seconds": 2.0}),
+        ):
+            await store.append(
+                BaseEvent(
+                    type=event_type,
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait",
+                    data=data,
+                )
+            )
+
+        wait_started = time_module.monotonic()
+        reconciled = await asyncio.wait_for(
+            _await_run_handoff_terminal(
+                _handoff_only_result(started.job_id),
+                job_manager=manager,
+                event_store=store,
+                quiet=True,
+                deadline_at=time_module.monotonic() + 3600,
+            ),
+            timeout=30,
+        )
+
+        assert reconciled.status == "complete"
+        assert time_module.monotonic() - wait_started >= 2.0
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_pipeline_deadline_still_ends_the_wait_during_a_stage(
+    tmp_path, monkeypatch
+) -> None:
+    """``--timeout`` bounds the whole run-handoff wait; a stage never extends it."""
+    import time as time_module
+
+    from ouroboros.orchestrator.completion_pass import STAGE_EVENT
+
+    monkeypatch.setattr(auto_command, "_POST_RUN_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(auto_command, "_RUN_HANDOFF_WAIT_POLL_SECONDS", 1)
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    try:
+
+        async def _wedged_runner() -> MCPToolResult:
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
+
+        started = await manager.start_job(
+            job_type="execute",
+            initial_message="queued",
+            runner=_wedged_runner(),
+            links=JobLinks(
+                session_id="orch_wait", execution_id="exec_wait", preserve_runner_result=True
+            ),
+        )
+        await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
+        for event_type, data in (
+            ("execution.terminal", {"status": "completed", "session_id": "orch_wait"}),
+            (STAGE_EVENT, {"stage": "fix", "bound_seconds": 1800.0}),
+        ):
+            await store.append(
+                BaseEvent(
+                    type=event_type,
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait",
+                    data=data,
+                )
+            )
+
+        wait_started = time_module.monotonic()
+        reconciled = await asyncio.wait_for(
+            _await_run_handoff_terminal(
+                _handoff_only_result(started.job_id),
+                job_manager=manager,
+                event_store=store,
+                quiet=True,
+                deadline_at=time_module.monotonic() + 1.0,
+            ),
+            timeout=30,
+        )
+
+        # The durable completed terminal is the verdict, as at any deadline.
+        assert reconciled.status == "complete"
+        assert time_module.monotonic() - wait_started < 10.0
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
+
+
 class _SnapshotManager:
     def __init__(self, snapshot) -> None:
         self.snapshot = snapshot
