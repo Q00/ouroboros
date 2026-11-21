@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import contextlib
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import sys
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -408,9 +411,19 @@ class _Player:
     shots: int = 2
     errors: tuple[str, ...] = ("TypeError: lap is undefined",)
     fail: bool = False
+    # A page that never ends: shots keep coming until the play is told to stop.
+    endless: bool = False
     calls: list[tuple[Path, Any, Path, str]] = field(default_factory=list)
+    stopped: list[float] = field(default_factory=list)
 
-    def __call__(self, site: Path, script: Any, out_dir: Path, browser: str) -> Any:
+    def __call__(
+        self,
+        site: Path,
+        script: Any,
+        out_dir: Path,
+        browser: str,
+        stop: threading.Event | None = None,
+    ) -> Any:
         from ouroboros.orchestrator.playtest import PlayReport
 
         self.calls.append((site, script, out_dir, browser))
@@ -418,10 +431,17 @@ class _Player:
             raise RuntimeError("browser closed the pipe")
         out_dir.mkdir(parents=True, exist_ok=True)
         shots = []
-        for n in range(self.shots):
+        n = 0
+        while n < self.shots or self.endless:
+            if stop is not None and stop.is_set():
+                self.stopped.append(time.monotonic())
+                break
             shot = out_dir / f"{n + 1:02d}-shot.png"
             shot.write_bytes(b"png")
             shots.append(shot)
+            n += 1
+            if self.endless:
+                time.sleep(0.01)
         return PlayReport(shots=shots, errors=list(self.errors))
 
 
@@ -572,6 +592,50 @@ async def test_a_playtest_directory_that_leads_outside_the_app_is_never_written(
     assert result.meta["completion_pass"]["playtest"] == "play_failed"
     # no replay command without a saved script
     assert completion_pass.check_command() not in factory.calls[2]["prompt"]
+
+
+def _files(path: Path) -> set[Path]:
+    return {p for p in path.rglob("*") if p.is_file()}
+
+
+@pytest.mark.asyncio
+async def test_a_play_past_its_bound_is_stopped_before_the_pass_goes_on(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(completion_pass, "PLAY_BOUND_SECONDS", 0.2)
+    app = _app(tmp_path)
+    player = _Player(endless=True)
+    factory = _Factory(["- app.js: no lap count", PLAN, "done", "NONE"])
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=player
+    )
+
+    assert result.meta["completion_pass"]["playtest"] == "play_failed"
+    assert len(player.stopped) == 2  # both plays, each stopped at its bound
+    written = _files(app / completion_pass.PLAYTEST_DIR)
+    await asyncio.sleep(0.1)
+    assert _files(app / completion_pass.PLAYTEST_DIR) == written  # nothing after
+
+
+@pytest.mark.asyncio
+async def test_a_replay_is_stopped_when_its_server_is_cancelled(tmp_path) -> None:
+    app = _app(tmp_path)
+    player = _Player(endless=True)
+    task, _ = await _serve(app, player)
+    asking = asyncio.create_task(asyncio.to_thread(playtest.request_play, app / CHECK_DIR, 1.0))
+    while not player.calls:
+        await asyncio.sleep(0.01)
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert len(player.stopped) == 1
+    written = _files(app / CHECK_DIR)
+    await asyncio.sleep(0.1)
+    assert _files(app / CHECK_DIR) == written
+    assert await asyncio.wait_for(asking, 5) is None  # no answer after the worker's turn
 
 
 async def _serve(app: Path, player: _Player, **kwargs: Any) -> tuple[asyncio.Task, list[str]]:

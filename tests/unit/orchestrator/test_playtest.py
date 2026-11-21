@@ -390,18 +390,29 @@ def test_a_dialog_is_accepted_as_a_user_would_and_noted() -> None:
 
 
 class _FakePipe:
-    """A browser that answers every call at once, or never for ``hang_on``."""
+    """A browser that answers every call at once, never for ``hang_on``, and for
+    ``block_on`` only once it is killed."""
 
     hang_on = ""
+    block_on = ""
+    made: list[_FakePipe] = []
 
     def __init__(self, browser: str, profile: str) -> None:
         self.events: list[dict] = []
         self.dialogs: list[str] = []
+        self.killed = threading.Event()
+        self.made.append(self)
 
     def call(self, method: str, params: dict | None = None, session: str | None = None) -> dict:
         if method == self.hang_on:
             raise TimeoutError("browser did not answer")
+        if method == self.block_on:
+            self.killed.wait(10)
+            raise RuntimeError("browser closed the pipe")
         return {"targetId": "t", "sessionId": "s", "data": base64.b64encode(b"png").decode()}
+
+    def kill(self) -> None:
+        self.killed.set()
 
     def close(self) -> None:
         return None
@@ -447,3 +458,47 @@ def test_the_module_imports_where_the_platform_lacks_posix_open_flags() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("block_on", ["", "Input.dispatchMouseEvent"])
+def test_a_stopped_play_kills_the_browser_and_saves_nothing_after(
+    tmp_path, monkeypatch, block_on
+) -> None:
+    site = _site(tmp_path)
+    pipe = type("P", (_FakePipe,), {"block_on": block_on, "made": []})
+    monkeypatch.setattr(playtest, "_Pipe", pipe)
+    monkeypatch.setattr(playtest, "LOAD_SETTLE_SECONDS", 0.0)
+    middle = {"click": [1, 1]} if block_on else {"wait": 5000}
+    script = PlayScript(page="index.html", steps=({"shot": "a"}, middle, {"shot": "b"}))
+    stop = threading.Event()
+    threading.Timer(0.2, stop.set).start()
+    started = time.monotonic()
+
+    report = playtest.play(site, script, site / "shots", "/bin/chrome", stop)
+
+    assert time.monotonic() - started < 2
+    assert [p.name for p in report.shots] == ["01-a.png"]
+    assert sorted(p.name for p in (site / "shots").iterdir()) == ["01-a.png"]
+    assert pipe.made[0].killed.is_set()
+    assert report.notes == [playtest.STOPPED_NOTE]
+
+
+@pytest.mark.skipif(
+    os.environ.get("OUROBOROS_PLAYTEST_LIVE") != "1",
+    reason="starts a real headless browser; set OUROBOROS_PLAYTEST_LIVE=1",
+)
+def test_a_real_browser_stops_when_told(tmp_path) -> None:
+    browser = playtest.installed_browser()
+    if browser is None:
+        pytest.skip("no Chromium-family browser installed")
+    site = _site(tmp_path)
+    script = PlayScript(page="index.html", steps=({"shot": "a"}, {"wait": 5000}, {"shot": "b"}))
+    stop = threading.Event()
+    threading.Timer(2.5, stop.set).start()
+    started = time.monotonic()
+
+    report = playtest.play(site, script, site / "shots", browser, stop)
+
+    assert time.monotonic() - started < 8
+    assert [p.name for p in report.shots] == ["01-a.png"]
+    assert report.notes == [playtest.STOPPED_NOTE]

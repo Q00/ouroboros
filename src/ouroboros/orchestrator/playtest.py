@@ -401,11 +401,17 @@ class _Pipe:
         self._out.write(json.dumps(request).encode() + b"\0")
         return self._next_id
 
+    def kill(self) -> None:
+        """End the browser now; a call waiting on it fails at once."""
+        with contextlib.suppress(OSError):
+            self.proc.kill()
+
     def close(self) -> None:
-        try:
-            self.call("Browser.close")
-        except Exception:  # noqa: BLE001 - the process is killed below anyway
-            pass
+        if self.proc.poll() is None:
+            try:
+                self.call("Browser.close")
+            except Exception:  # noqa: BLE001 - the process is killed below anyway
+                pass
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -561,14 +567,38 @@ def _errors(events: list[dict[str, Any]]) -> list[str]:
     return unique[:MAX_ERRORS]
 
 
-def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayReport:
-    """Run ``script`` against ``site`` and save its shots in ``out_dir``, a directory under it. Blocking."""
+class PlayStopped(Exception):
+    """The caller asked the play to stop."""
+
+
+STOPPED_NOTE = "the play was stopped at its time limit"
+
+
+def play(
+    site: Path,
+    script: PlayScript,
+    out_dir: Path,
+    browser: str,
+    stop: threading.Event | None = None,
+) -> PlayReport:
+    """Run ``script`` against ``site`` and save its shots in ``out_dir``, a directory under it. Blocking.
+
+    Setting ``stop`` ends the play early: the browser is killed at once, no
+    screenshot is saved after it, and the play returns once it has cleaned up.
+    """
+    stop = stop or threading.Event()
     out_fd = open_dir_inside(site, out_dir, create=True)
     report = PlayReport()
 
     def shoot(name: str, data: bytes) -> Path:
+        if stop.is_set():
+            raise PlayStopped
         save_in(out_fd, name, data)
         return out_dir / name
+
+    def pause(seconds: float) -> None:
+        if stop.wait(seconds):
+            raise PlayStopped
 
     try:
         server = http.server.ThreadingHTTPServer(
@@ -580,9 +610,18 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
     threading.Thread(target=server.serve_forever, daemon=True).start()
     profile = tempfile.mkdtemp(prefix="ouroboros-playtest-")
     pipe: _Pipe | None = None
+    finished = threading.Event()
     try:
         pipe_ = _Pipe(browser, profile)
         pipe = pipe_
+
+        def stopper() -> None:
+            while not finished.is_set():
+                if stop.wait(0.05):
+                    pipe_.kill()
+                    return
+
+        threading.Thread(target=stopper, daemon=True).start()
         target = pipe_.call("Target.createTarget", {"url": "about:blank"})["targetId"]
         session = pipe_.call("Target.attachToTarget", {"targetId": target, "flatten": True})[
             "sessionId"
@@ -607,7 +646,7 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
             {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False},
         )
         cdp("Page.navigate", {"url": f"http://127.0.0.1:{server.server_address[1]}/{script.page}"})
-        time.sleep(LOAD_SETTLE_SECONDS)
+        pause(LOAD_SETTLE_SECONDS)
 
         def key(name: str, down: bool) -> None:
             info = _key_info(name)
@@ -644,8 +683,13 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
                 )
                 break
             try:
-                _run_step(step, cdp, key, mouse, click, shoot, report)
-            except TimeoutError:
+                _run_step(step, cdp, key, mouse, click, shoot, pause, report)
+            except Exception as exc:
+                if stop.is_set():  # the killed browser fails whatever call was waiting
+                    report.notes.append(STOPPED_NOTE)
+                    break
+                if not isinstance(exc, TimeoutError):
+                    raise
                 report.notes.append(
                     f"the page stopped answering at step {number} ({_describe(step)})"
                 )
@@ -653,6 +697,7 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
         report.errors = _errors(pipe_.events)
         report.notes = [*pipe_.dialogs, *report.notes][:MAX_NOTES]
     finally:
+        finished.set()
         if pipe is not None:
             pipe.close()
         server.shutdown()
@@ -669,11 +714,12 @@ def _run_step(
     mouse: Callable[..., None],
     click: Callable[[float, float], None],
     shoot: Callable[[str, bytes], Path],
+    pause: Callable[[float], None],
     report: PlayReport,
 ) -> None:
     """Run one step of a play script against the attached page."""
     if "wait" in step:
-        time.sleep(step["wait"] / 1000)
+        pause(step["wait"] / 1000)
     elif "shot" in step:
         data = cdp("Page.captureScreenshot", {"format": "png"})["data"]
         name = f"{len(report.shots) + 1:02d}-{step['shot']}.png"
@@ -682,7 +728,7 @@ def _run_step(
         keys = step.get("keys") or [step["key"]]
         for name in keys:
             key(name, True)
-        time.sleep(step["hold"] / 1000)
+        pause(step["hold"] / 1000)
         for name in reversed(keys):
             key(name, False)
     elif "press" in step:
@@ -711,14 +757,14 @@ def _run_step(
         mouse("mousePressed", x0, y0, True, clickCount=1)
         for i in range(1, moves + 1):
             mouse("mouseMoved", x0 + (x1 - x0) * i / moves, y0 + (y1 - y0) * i / moves, True)
-            time.sleep(ms / moves / 1000)
+            pause(ms / moves / 1000)
         mouse("mouseReleased", x1, y1, clickCount=1)
     elif "wheel" in step:
         x, y, dy = step["wheel"]
         mouse("mouseWheel", x, y, deltaX=0, deltaY=dy)
     elif "reload" in step:
         cdp("Page.reload")
-        time.sleep(LOAD_SETTLE_SECONDS)
+        pause(LOAD_SETTLE_SECONDS)
 
 
 def write_answer(check_fd: int, nonce: str, answer: dict[str, Any]) -> None:
@@ -793,8 +839,10 @@ __all__ = [
     "CHECK_WAIT_SECONDS",
     "MAX_SHOTS",
     "MAX_STEPS",
+    "STOPPED_NOTE",
     "PlayReport",
     "PlayScript",
+    "PlayStopped",
     "find_browser",
     "installed_browser",
     "main",

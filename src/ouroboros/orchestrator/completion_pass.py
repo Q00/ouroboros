@@ -64,6 +64,7 @@ from pathlib import Path
 import re
 import shlex
 import sys
+import threading
 from typing import Any
 
 import structlog
@@ -106,6 +107,9 @@ STAGE_EVENT = "execution.completion_pass.updated"
 # The play script itself: at most 60 s of waits and holds, plus page loads and
 # browser start-up. Its own protocol calls time out well inside this.
 PLAY_BOUND_SECONDS = 180.0
+# After the bound, the play is told to stop: its browser is killed and it cleans
+# up within seconds. The pass waits at most this long for that before going on.
+PLAY_STOP_GRACE_SECONDS = 30.0
 PLAYTEST_DIR = Path(".ouroboros") / "playtest"
 CHECK_DIR = PLAYTEST_DIR / "check"
 # Plays one fix or repair session may ask for; each is a bounded browser run on the host.
@@ -265,6 +269,34 @@ def check_command(check_dir: Path = CHECK_DIR) -> str:
     )
 
 
+Player = Callable[[Path, PlayScript, Path, str, threading.Event], PlayReport]
+
+
+async def _bounded_play(
+    player: Player, working_dir: Path, script: PlayScript, out: Path, browser: str
+) -> PlayReport:
+    """One play, for at most :data:`PLAY_BOUND_SECONDS`.
+
+    At the bound, or when the caller is cancelled, the play is told to stop, and
+    this returns or raises only once it has: its browser is gone and it writes
+    nothing more.
+    """
+    stop = threading.Event()
+    running = asyncio.ensure_future(
+        asyncio.to_thread(player, working_dir, script, out, browser, stop)
+    )
+    try:
+        return await asyncio.wait_for(asyncio.shield(running), timeout=PLAY_BOUND_SECONDS)
+    except BaseException:
+        stop.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(running), timeout=PLAY_STOP_GRACE_SECONDS)
+        except Exception:  # noqa: BLE001 - the play's own outcome no longer matters
+            if not running.done():
+                log.warning("execution.completion_pass.play_not_stopped", out=str(out))
+        raise
+
+
 def _make_dir(working_dir: Path, sub: Path) -> None:
     """Make ``sub`` under ``working_dir``; a symlink on the way raises :class:`OSError`."""
     os.close(open_dir_inside(working_dir, sub, create=True))
@@ -274,7 +306,7 @@ async def serve_checks(
     working_dir: Path,
     script: PlayScript,
     browser: str,
-    player: Callable[[Path, PlayScript, Path, str], PlayReport],
+    player: Player,
     served: list[str],
     *,
     limit: int = MAX_CHECKS,
@@ -313,15 +345,8 @@ async def serve_checks(
                     served.append(nonce)
                     try:
                         os.mkdir(nonce, 0o755, dir_fd=check_fd)
-                        report = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                player,
-                                working_dir,
-                                script,
-                                working_dir / CHECK_DIR / nonce,
-                                browser,
-                            ),
-                            timeout=PLAY_BOUND_SECONDS,
+                        report = await _bounded_play(
+                            player, working_dir, script, working_dir / CHECK_DIR / nonce, browser
                         )
                         answer = {
                             "shots": [p.relative_to(working_dir).as_posix() for p in report.shots],
@@ -499,7 +524,7 @@ async def complete_after_run(
     runtime_factory: Callable[..., Any] | None = None,
     timeout_seconds: float = SESSION_TIMEOUT_SECONDS,
     browser_finder: Callable[[], str | None] | None = None,
-    player: Callable[[Path, PlayScript, Path, str], PlayReport] | None = None,
+    player: Player | None = None,
 ) -> MCPToolResult:
     """Review the finished product against its expected experience and fix what is missing."""
     if run_result.is_error or run_result.meta.get("status") != "completed":
@@ -579,11 +604,8 @@ async def complete_after_run(
         out = working_dir / PLAYTEST_DIR / f"round-{round_no}"
         try:
             _make_dir(working_dir, out)
-            report = await asyncio.wait_for(
-                asyncio.to_thread(
-                    player or playtest_module.play, working_dir, script, out, browser
-                ),
-                timeout=PLAY_BOUND_SECONDS,
+            report = await _bounded_play(
+                player or playtest_module.play, working_dir, script, out, browser
             )
         except Exception as exc:  # noqa: BLE001 - a play that fails leaves the product as it is
             log.warning(
@@ -685,6 +707,7 @@ __all__ = [
     "MAX_CHECKS",
     "NO_DEFECTS",
     "PLAY_BOUND_SECONDS",
+    "PLAY_STOP_GRACE_SECONDS",
     "PLAY_LOOK_PROMPT",
     "PLAY_PLAN_PROMPT",
     "PLAYTEST_DIR",
