@@ -873,6 +873,7 @@ def test_the_play_prompts_say_what_to_write_and_what_to_look_for() -> None:
     assert GOAL in plan
     assert "Do not modify any file." in plan
     assert "the controls the code really listens to" in plan
+    assert "submit it by pressing Enter, as most people do" in plan
     assert "at most 8." in plan
     assert '{"page": "<page path in this directory>", "steps": [...]}' in plan
     assert plan.endswith("If the app does not run that way, reply with the single word NONE.")
