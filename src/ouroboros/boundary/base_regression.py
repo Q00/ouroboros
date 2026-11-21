@@ -1327,7 +1327,8 @@ async def _throwaway(prefix: str) -> AsyncIterator[str]:
     finally:
         cleanup = asyncio.create_task(asyncio.to_thread(work.cleanup))
         try:
-            await asyncio.shield(cleanup)
+            await asyncio.wait((cleanup,))
+            cleanup.result()
         except asyncio.CancelledError:
             error = await _outlived(cleanup)
             if error is not None:
@@ -1347,7 +1348,8 @@ async def _in_thread[**P, T](function: Callable[P, T], /, *args: P.args, **kwarg
     """
     task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
     try:
-        return await asyncio.shield(task)
+        await asyncio.wait((task,))
+        return task.result()
     except asyncio.CancelledError:
         await _outlived(task)
         raise
