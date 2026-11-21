@@ -14,3 +14,11 @@ export function toggleSidebar(): void {
 }
 
 export const paletteOpen = createStore<boolean>(false);
+
+export interface NewChatDraft {
+  goal: string;
+  cwd: string;
+}
+
+/** Keeps an unsent New Chat draft while the console page changes. */
+export const newChatDraft = createStore<NewChatDraft>({ goal: "", cwd: "" });
