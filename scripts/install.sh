@@ -1877,6 +1877,13 @@ _console_start() {
     _info "It opens in your browser. Stop it with \"Stop console\" at the bottom of its sidebar."
     _info "Reopen it any time with: ouroboros gui"
     _console_log_hint "$log"
+  elif [ -z "$py" ]; then
+    # Without a JSON parser, a clean launcher exit still does not prove that
+    # the state file is valid. Keep the non-failing background-start message
+    # deterministic instead of racing the launcher's final exit.
+    _info "The Ouroboros console is still starting in the background; it opens in your browser when ready."
+    _info "Stop it with \"Stop console\" at the bottom of its sidebar. Reopen it any time with: ouroboros gui"
+    _console_log_hint "$log"
   elif [ "$status" = 0 ]; then
     url=$(_console_state_url "$py" "$state" || true)
     if [ -n "$url" ]; then
