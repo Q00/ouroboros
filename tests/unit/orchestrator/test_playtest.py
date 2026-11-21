@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 from pathlib import Path
 import threading
 import time
+from typing import Any
 
 import pytest
 
@@ -176,6 +179,7 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
     site.mkdir()
     (site / "index.html").write_text(
         "<button id=b onclick=\"this.textContent='Started'\">Start</button><p id=k></p>"
+        "<button onclick=\"this.textContent = confirm('Delete it?') ? 'Gone' : 'Kept'\">Del</button>"
         "<script>addEventListener('keydown', e => k.textContent = e.key);"
         "setTimeout(() => { throw new Error('late failure') }, 10);</script>"
     )
@@ -186,6 +190,7 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
                 {"click_text": "start"},
                 {"key": "ArrowUp", "hold": 50},
                 {"click_text": "missing"},
+                {"click_text": "del"},
                 {"shot": "after"},
             ]
         ),
@@ -198,7 +203,10 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
     assert [p.name for p in report.shots] == ["01-before.png", "02-after.png"]
     assert all(p.read_bytes().startswith(b"\x89PNG") for p in report.shots)
     assert any("late failure" in line for line in report.errors)
-    assert report.notes == ["no visible control labelled 'missing'"]
+    assert report.notes == [
+        "the page opened a confirm dialog 'Delete it?'; it was accepted",
+        "no visible control labelled 'missing'",
+    ]
 
 
 def _answer_next_request(check_dir: Path, answer: dict) -> threading.Thread:
@@ -273,3 +281,80 @@ def test_a_shot_or_an_answer_replaces_a_planted_symlink_instead_of_writing_throu
     assert outside.read_text() == "keep"
     assert (check_dir / "01-a.png").read_bytes() == b"png"
     assert json.loads((check_dir / "result-n.json").read_text()) == {"shots": []}
+
+
+def _pipe_with(incoming: list[dict]) -> Any:
+    """A ``_Pipe`` whose browser sends ``incoming`` and records what it was sent."""
+    pipe = object.__new__(playtest._Pipe)
+    pipe._next_id, pipe.events, pipe.dialogs, pipe._out = 0, [], [], io.BytesIO()
+    pipe._message = lambda _deadline: incoming.pop(0)
+    return pipe
+
+
+def test_a_dialog_is_accepted_as_a_user_would_and_noted() -> None:
+    pipe = _pipe_with(
+        [
+            {
+                "method": "Page.javascriptDialogOpening",
+                "sessionId": "s1",
+                "params": {"type": "prompt", "message": "Name?", "defaultPrompt": "x"},
+            },
+            {"id": 2, "result": {}},  # the answer to the dialog
+            {"id": 1, "result": {"ok": True}},
+        ]
+    )
+
+    assert pipe.call("Input.dispatchMouseEvent", {"type": "mouseReleased"}, "s1") == {"ok": True}
+
+    sent = [json.loads(raw) for raw in pipe._out.getvalue().split(b"\0") if raw]
+    assert sent[1] == {
+        "id": 2,
+        "method": "Page.handleJavaScriptDialog",
+        "params": {"accept": True, "promptText": "x"},
+        "sessionId": "s1",
+    }
+    assert pipe.dialogs == ["the page opened a prompt dialog 'Name?'; it was accepted"]
+    assert pipe.events == []
+
+
+class _FakePipe:
+    """A browser that answers every call at once, or never for ``hang_on``."""
+
+    hang_on = ""
+
+    def __init__(self, browser: str, profile: str) -> None:
+        self.events: list[dict] = []
+        self.dialogs: list[str] = []
+
+    def call(self, method: str, params: dict | None = None, session: str | None = None) -> dict:
+        if method == self.hang_on:
+            raise TimeoutError("browser did not answer")
+        return {"targetId": "t", "sessionId": "s", "data": base64.b64encode(b"png").decode()}
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("hang_on", "limit", "shots", "note"),
+    [
+        ("", 0.05, ["01-a.png"], "the play stopped before step 3 of 3: its 0 s ran out"),
+        ("Input.dispatchMouseEvent", 60.0, ["01-a.png"], "stopped answering at step 2 (click"),
+    ],
+)
+def test_a_slow_or_hung_page_ends_the_play_with_the_shots_it_took(
+    tmp_path, monkeypatch, hang_on, limit, shots, note
+) -> None:
+    site = _site(tmp_path)
+    monkeypatch.setattr(playtest, "_Pipe", type("P", (_FakePipe,), {"hang_on": hang_on}))
+    monkeypatch.setattr(playtest, "MAX_PLAY_SECONDS", limit)
+    monkeypatch.setattr(playtest, "LOAD_SETTLE_SECONDS", 0.0)
+    script = PlayScript(
+        page="index.html",
+        steps=({"shot": "a"}, {"click": [1, 1]} if hang_on else {"wait": 100}, {"shot": "b"}),
+    )
+
+    report = playtest.play(site, script, tmp_path / "shots", "/bin/chrome")
+
+    assert [p.name for p in report.shots] == shots
+    assert len(report.notes) == 1 and note in report.notes[0]

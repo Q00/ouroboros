@@ -32,6 +32,7 @@ A play script is JSON written by a read-only reviewer that read the code:
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import functools
 import http.server
@@ -57,6 +58,12 @@ MAX_TEXT_CHARS = 200
 MAX_ERRORS = 20
 LOAD_SETTLE_SECONDS = 1.5
 CDP_CALL_TIMEOUT_SECONDS = 20.0
+# The steps of one play; past this the play stops and keeps the shots it took, so
+# browser start-up, the page load and the close still fit in the caller's bound.
+MAX_PLAY_SECONDS = 120.0
+# Mouse moves one drag sends: each waits for the page, which a heavy page answers slowly.
+MAX_DRAG_MOVES = 15
+MAX_NOTES = 20
 # A worker's replay request: the host plays the script (at most PLAY_BOUND_SECONDS in
 # the completion pass) and answers in the same directory.
 REQUEST_PREFIX = "request-"
@@ -323,6 +330,7 @@ class _Pipe:
         self._buffer = b""
         self._next_id = 0
         self.events: list[dict[str, Any]] = []
+        self.dialogs: list[str] = []
 
     def _message(self, deadline: float) -> dict[str, Any]:
         import select
@@ -345,21 +353,38 @@ class _Pipe:
     def call(
         self, method: str, params: dict[str, Any] | None = None, session: str | None = None
     ) -> dict[str, Any]:
+        call_id = self._send(method, params, session)
+        deadline = time.monotonic() + CDP_CALL_TIMEOUT_SECONDS
+        while True:
+            message = self._message(deadline)
+            if message.get("id") == call_id:
+                if "error" in message:
+                    raise RuntimeError(f"{method}: {message['error'].get('message')}")
+                result: dict[str, Any] = message.get("result", {})
+                return result
+            if message.get("method") == "Page.javascriptDialogOpening":
+                # An alert, confirm or prompt blocks the page, and every call after
+                # it, until it is answered; a user would click OK.
+                dialog = message.get("params") or {}
+                self.dialogs.append(
+                    f"the page opened a {dialog.get('type', 'dialog')} dialog"
+                    f" {str(dialog.get('message', ''))[:MAX_TEXT_CHARS]!r}; it was accepted"
+                )
+                self._send(
+                    "Page.handleJavaScriptDialog",
+                    {"accept": True, "promptText": str(dialog.get("defaultPrompt", ""))},
+                    message.get("sessionId"),
+                )
+            elif len(self.events) < 2000 and "method" in message:
+                self.events.append(message)
+
+    def _send(self, method: str, params: dict[str, Any] | None, session: str | None) -> int:
         self._next_id += 1
         request: dict[str, Any] = {"id": self._next_id, "method": method, "params": params or {}}
         if session:
             request["sessionId"] = session
         self._out.write(json.dumps(request).encode() + b"\0")
-        deadline = time.monotonic() + CDP_CALL_TIMEOUT_SECONDS
-        while True:
-            message = self._message(deadline)
-            if message.get("id") == self._next_id:
-                if "error" in message:
-                    raise RuntimeError(f"{method}: {message['error'].get('message')}")
-                result: dict[str, Any] = message.get("result", {})
-                return result
-            if len(self.events) < 2000:
-                self.events.append(message)
+        return self._next_id
 
     def close(self) -> None:
         try:
@@ -479,58 +504,23 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
             mouse("mousePressed", x, y, True, clickCount=1)
             mouse("mouseReleased", x, y, clickCount=1)
 
-        for step in script.steps:
-            if "wait" in step:
-                time.sleep(step["wait"] / 1000)
-            elif "shot" in step:
-                data = cdp("Page.captureScreenshot", {"format": "png"})["data"]
-                path = out_dir / f"{len(report.shots) + 1:02d}-{step['shot']}.png"
-                _save(path, base64.b64decode(data))
-                report.shots.append(path)
-            elif "key" in step or "keys" in step:
-                keys = step.get("keys") or [step["key"]]
-                for name in keys:
-                    key(name, True)
-                time.sleep(step["hold"] / 1000)
-                for name in reversed(keys):
-                    key(name, False)
-            elif "press" in step:
-                key(step["press"], True)
-                key(step["press"], False)
-            elif "type" in step:
-                cdp("Input.insertText", {"text": step["type"]})
-            elif "click" in step:
-                click(*step["click"])
-            elif "click_text" in step:
-                found = cdp(
-                    "Runtime.evaluate",
-                    {
-                        "expression": _CLICK_TEXT_JS % json.dumps(step["click_text"]),
-                        "returnByValue": True,
-                    },
-                )["result"].get("value")
-                if isinstance(found, list) and len(found) == 2:
-                    click(float(found[0]), float(found[1]))
-                else:
-                    report.notes.append(f"no visible control labelled {step['click_text']!r}")
-            elif "drag" in step:
-                x0, y0, x1, y1, ms = step["drag"]
-                moves = max(2, ms // 30)
-                mouse("mouseMoved", x0, y0)
-                mouse("mousePressed", x0, y0, True, clickCount=1)
-                for i in range(1, moves + 1):
-                    mouse(
-                        "mouseMoved", x0 + (x1 - x0) * i / moves, y0 + (y1 - y0) * i / moves, True
-                    )
-                    time.sleep(ms / moves / 1000)
-                mouse("mouseReleased", x1, y1, clickCount=1)
-            elif "wheel" in step:
-                x, y, dy = step["wheel"]
-                mouse("mouseWheel", x, y, deltaX=0, deltaY=dy)
-            elif "reload" in step:
-                cdp("Page.reload")
-                time.sleep(LOAD_SETTLE_SECONDS)
+        started = time.monotonic()
+        for number, step in enumerate(script.steps, 1):
+            if time.monotonic() - started > MAX_PLAY_SECONDS:
+                report.notes.append(
+                    f"the play stopped before step {number} of {len(script.steps)}:"
+                    f" its {MAX_PLAY_SECONDS:.0f} s ran out because the page answered slowly"
+                )
+                break
+            try:
+                _run_step(step, cdp, key, mouse, click, out_dir, report)
+            except TimeoutError:
+                report.notes.append(
+                    f"the page stopped answering at step {number} ({_describe(step)})"
+                )
+                break
         report.errors = _errors(pipe_.events)
+        report.notes = [*pipe_.dialogs, *report.notes][:MAX_NOTES]
     finally:
         if pipe is not None:
             pipe.close()
@@ -538,6 +528,66 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
         server.server_close()
         shutil.rmtree(profile, ignore_errors=True)
     return report
+
+
+def _run_step(
+    step: dict[str, Any],
+    cdp: Callable[..., dict[str, Any]],
+    key: Callable[[str, bool], None],
+    mouse: Callable[..., None],
+    click: Callable[[float, float], None],
+    out_dir: Path,
+    report: PlayReport,
+) -> None:
+    """Run one step of a play script against the attached page."""
+    if "wait" in step:
+        time.sleep(step["wait"] / 1000)
+    elif "shot" in step:
+        data = cdp("Page.captureScreenshot", {"format": "png"})["data"]
+        path = out_dir / f"{len(report.shots) + 1:02d}-{step['shot']}.png"
+        _save(path, base64.b64decode(data))
+        report.shots.append(path)
+    elif "key" in step or "keys" in step:
+        keys = step.get("keys") or [step["key"]]
+        for name in keys:
+            key(name, True)
+        time.sleep(step["hold"] / 1000)
+        for name in reversed(keys):
+            key(name, False)
+    elif "press" in step:
+        key(step["press"], True)
+        key(step["press"], False)
+    elif "type" in step:
+        cdp("Input.insertText", {"text": step["type"]})
+    elif "click" in step:
+        click(*step["click"])
+    elif "click_text" in step:
+        found = cdp(
+            "Runtime.evaluate",
+            {
+                "expression": _CLICK_TEXT_JS % json.dumps(step["click_text"]),
+                "returnByValue": True,
+            },
+        )["result"].get("value")
+        if isinstance(found, list) and len(found) == 2:
+            click(float(found[0]), float(found[1]))
+        else:
+            report.notes.append(f"no visible control labelled {step['click_text']!r}")
+    elif "drag" in step:
+        x0, y0, x1, y1, ms = step["drag"]
+        moves = max(2, min(MAX_DRAG_MOVES, ms // 30))
+        mouse("mouseMoved", x0, y0)
+        mouse("mousePressed", x0, y0, True, clickCount=1)
+        for i in range(1, moves + 1):
+            mouse("mouseMoved", x0 + (x1 - x0) * i / moves, y0 + (y1 - y0) * i / moves, True)
+            time.sleep(ms / moves / 1000)
+        mouse("mouseReleased", x1, y1, clickCount=1)
+    elif "wheel" in step:
+        x, y, dy = step["wheel"]
+        mouse("mouseWheel", x, y, deltaX=0, deltaY=dy)
+    elif "reload" in step:
+        cdp("Page.reload")
+        time.sleep(LOAD_SETTLE_SECONDS)
 
 
 def write_answer(check_dir: Path, nonce: str, answer: dict[str, Any]) -> None:

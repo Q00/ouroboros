@@ -568,7 +568,9 @@ async def complete_after_run(
                 timeout=PLAY_BOUND_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 - a play that fails leaves the product as it is
-            log.warning("execution.completion_pass.play_failed", error=str(exc))
+            log.warning(
+                "execution.completion_pass.play_failed", error=str(exc) or type(exc).__name__
+            )
             return "play_failed", (), ()
         if not report.shots:
             return "play_failed", (), ()
