@@ -10,6 +10,6 @@
 - 블로커: 없음
 
 ## 🤖 AI 실행 맥락
-- 마지막 커밋: ooo/auto/cc5ddc15e49a
+- 마지막 커밋: c70db9a (audit change; documentation follow-up pending)
 - 지금 손댄 파일: src/ouroboros/boundary/base_regression.py
 - 다음 할 일: Run final quality gates, commit, and record the SHA

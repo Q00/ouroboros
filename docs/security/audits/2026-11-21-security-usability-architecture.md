@@ -86,7 +86,7 @@ Required repository gates from `AGENTS.md` were run. Ruff format/check and mypy 
 
 ## Commit and publication status
 
-The final commit SHA is recorded after the required gates complete. No external publication was performed. The supplied worktree branch remains unchanged.
+The audit change commit is `c70db9a`. A follow-up documentation commit records this SHA in the report. No external publication was performed. The supplied worktree branch remains unchanged.
 
 ## Rollback steps
 
