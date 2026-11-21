@@ -34,7 +34,7 @@ def test_reads_installed_release_versions(version: str) -> None:
 
 def test_disabled_plugin_still_counts_as_installed() -> None:
     result = _inspect_inventory({"installed": [{**_ENTRY, "enabled": False}]})
-    assert result == CodexPluginVersion("installed", version="0.55.6")
+    assert result == CodexPluginVersion("installed", version="0.55.6", enabled=False)
 
 
 def test_available_versions_and_other_plugin_identities_are_not_installed_evidence() -> None:
@@ -253,6 +253,7 @@ def test_query_is_bounded_noninteractive_and_creates_no_windows(
         capture_output=True,
         timeout=5,
         check=False,
+        env=None,
         creationflags=0x08000000 if platform == "win32" else 0,
     )
 
@@ -281,7 +282,31 @@ def test_utf8_inventory_inherits_codex_home_and_preserves_config(
     )
 
     assert inspect_codex_plugin(sys.executable) == CodexPluginVersion("installed", version="0.52.0")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "wrong-profile"))
+    assert inspect_codex_plugin(sys.executable, codex_home=codex_home) == CodexPluginVersion(
+        "installed", version="0.52.0"
+    )
     assert config.read_bytes() == original
+
+
+def test_explicit_codex_home_overrides_inherited_home_only_in_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    monkeypatch.setenv("CODEX_HOME", "inherited-home")
+    completed = subprocess.CompletedProcess(_COMMAND, 0, b'{"installed": []}', b"")
+    with patch("ouroboros.cli.codex_plugin.subprocess.run", return_value=completed) as run:
+        inspect_codex_plugin(_COMMAND[0], codex_home=tmp_path)
+    assert run.call_args.kwargs["env"]["CODEX_HOME"] == str(tmp_path)
+    assert os.environ["CODEX_HOME"] == "inherited-home"
+
+
+@pytest.mark.parametrize("enabled", [None, 1, "false", [], {}])
+def test_malformed_enabled_flag_is_unknown(enabled: object) -> None:
+    result = _inspect_inventory({"installed": [{**_ENTRY, "enabled": enabled}]})
+    assert result.status == "unknown"
+    assert result.reason == "Codex returned an invalid enabled flag"
 
 
 @pytest.mark.parametrize(
