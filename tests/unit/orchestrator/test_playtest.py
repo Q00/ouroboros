@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import base64
+import functools
+import http.client
+import http.server
 import io
 import json
 import os
@@ -200,7 +203,7 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
     )
     assert script is not None
 
-    report = playtest.play(site, script, tmp_path / "shots", browser)
+    report = playtest.play(site, script, site / "shots", browser)
 
     assert [p.name for p in report.shots] == ["01-before.png", "02-after.png"]
     assert all(p.read_bytes().startswith(b"\x89PNG") for p in report.shots)
@@ -221,7 +224,11 @@ def _answer_next_request(check_dir: Path, answer: dict) -> threading.Thread:
             if requests:
                 nonce = requests[0].name.removeprefix("request-")
                 requests[0].unlink()
-                playtest.write_answer(check_dir, nonce, answer)
+                fd = os.open(check_dir, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    playtest.write_answer(fd, nonce, answer)
+                finally:
+                    os.close(fd)
                 return
             time.sleep(0.02)
 
@@ -278,12 +285,72 @@ def test_a_shot_or_an_answer_replaces_a_planted_symlink_instead_of_writing_throu
     (check_dir / "01-a.png").symlink_to(outside)
     (check_dir / "result-n.json").symlink_to(outside)
 
-    playtest._save(check_dir / "01-a.png", b"png")
-    playtest.write_answer(check_dir, "n", {"shots": []})
+    fd = playtest.open_dir_inside(tmp_path, check_dir)
+    try:
+        playtest.save_in(fd, "01-a.png", b"png")
+        playtest.write_answer(fd, "n", {"shots": []})
+    finally:
+        os.close(fd)
 
     assert outside.read_text() == "keep"
     assert (check_dir / "01-a.png").read_bytes() == b"png"
     assert json.loads((check_dir / "result-n.json").read_text()) == {"shots": []}
+    assert [p.name for p in check_dir.iterdir() if p.name.startswith(".")] == []
+
+
+def test_a_host_directory_is_reached_without_following_a_link(tmp_path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "a").symlink_to(outside)
+
+    for sub in (Path("a"), Path("a/b"), Path("../outside"), outside, root / "a" / "b"):
+        with pytest.raises(OSError):
+            playtest.open_dir_inside(root, sub, create=True)
+    fd = playtest.open_dir_inside(root, root / "x" / "y", create=True)
+    try:
+        playtest.save_in(fd, "f.txt", b"hi")
+    finally:
+        os.close(fd)
+
+    assert list(outside.iterdir()) == []
+    assert (root / "x" / "y" / "f.txt").read_bytes() == b"hi"
+
+
+def _get(site: Path, path: str) -> tuple[int, bytes, str | None]:
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), functools.partial(playtest._SiteHandler, directory=str(site))
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection.request("GET", path)
+        response = connection.getresponse()
+        return response.status, response.read(), response.getheader("Location")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_app_is_served_only_from_its_own_directory(tmp_path) -> None:
+    site = tmp_path / "app"
+    (site / "js").mkdir(parents=True)
+    (site / "index.html").write_text("<p>app</p>")
+    (site / "js" / "main.js").write_text("ok()")
+    (tmp_path / "secret.txt").write_text("secret")
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "x.js").write_text("secret")
+    (site / "leak.txt").symlink_to(tmp_path / "secret.txt")
+    (site / "linked").symlink_to(tmp_path / "elsewhere")
+    os.mkfifo(site / "pipe.js")
+
+    assert _get(site, "/")[:2] == (200, b"<p>app</p>")
+    assert _get(site, "/js/main.js?v=1")[:2] == (200, b"ok()")
+    assert _get(site, "/js") == (301, b"", "/js/")
+    for path in ("/leak.txt", "/linked/x.js", "/../secret.txt", "/js/..", "/js/", "/pipe.js"):
+        status, body, _ = _get(site, path)
+        assert status == 404 and b"secret" not in body, path
 
 
 def _pipe_with(incoming: list[dict]) -> Any:

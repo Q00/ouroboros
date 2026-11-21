@@ -11,6 +11,9 @@ No dependency is added: the browser is driven over ``--remote-debugging-pipe``
 (Chrome DevTools Protocol on two file descriptors), and the app is served
 read-only by :mod:`http.server` on a random loopback port for the duration of the
 play. The browser gets a fresh temporary profile that is removed afterwards.
+Every file the host serves, and every file it writes in the working directory,
+is reached from that directory without following a symlink: the app's code, and
+a worker running beside the host, may have planted one.
 When no such browser is found, or on Windows (where the pipe needs handles,
 not descriptors), nothing runs.
 
@@ -33,20 +36,25 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
+import contextlib
 from dataclasses import dataclass, field
+import errno
 import functools
+from http import HTTPStatus
 import http.server
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from typing import Any
+from typing import IO, Any
+import urllib.parse
 import uuid
 
 VIEWPORT = (1280, 800)
@@ -405,9 +413,105 @@ class _Pipe:
                 pass
 
 
-class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def open_dir_inside(root: Path, sub: Path, *, create: bool = False) -> int:
+    """A descriptor for the directory ``sub`` under ``root``, reached without following a symlink.
+
+    ``sub`` is relative to ``root`` or a path under it. With ``create``, each
+    missing directory on the way is made. A symlink, a file or ``..`` on the way
+    raises :class:`OSError`, so a planted link cannot steer a host read or write
+    outside ``root``. The caller closes the descriptor.
+    """
+    try:
+        parts = (sub.relative_to(root) if sub.is_absolute() else sub).parts
+    except ValueError as exc:
+        raise OSError(errno.EINVAL, "not under the app's directory", str(sub)) from exc
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            if part in (".", ".."):
+                raise OSError(errno.EINVAL, "not a plain path", str(sub))
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o755, dir_fd=fd)
+            inner = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = inner
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def save_in(dir_fd: int, name: str, data: bytes) -> None:
+    """Write ``data`` as ``name`` in the directory ``dir_fd``, whole or not at all.
+
+    A symlink planted at ``name`` is replaced, never written through.
+    """
+    part = f".part-{uuid.uuid4().hex}"
+    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.rename(part, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(part, dir_fd=dir_fd)
+        raise
+
+
+class _SiteHandler(http.server.SimpleHTTPRequestHandler):
+    """Serves the app's directory read-only.
+
+    A file reached through a symlink, anything but a regular file, and a
+    directory listing are not found.
+    """
+
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
         return
+
+    def send_head(self) -> IO[bytes] | None:
+        url = urllib.parse.urlsplit(self.path)
+        path = urllib.parse.unquote(url.path)
+        parts = [part for part in path.split("/") if part]
+        if not parts or path.endswith("/"):
+            parts.append("index.html")
+        dir_fd = None
+        if not any(part in (".", "..") for part in parts):
+            try:
+                dir_fd = open_dir_inside(Path(self.directory), Path(*parts[:-1]))
+            except (OSError, ValueError):
+                dir_fd = None
+        fd = None
+        if dir_fd is not None:
+            try:
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                fd = os.open(parts[-1], flags, dir_fd=dir_fd)
+            except (OSError, ValueError):
+                fd = None
+            finally:
+                os.close(dir_fd)
+        info = os.fstat(fd) if fd is not None else None
+        if fd is not None and info is not None and stat.S_ISDIR(info.st_mode):
+            os.close(fd)
+            self.send_response(HTTPStatus.MOVED_PERMANENTLY)
+            self.send_header("Location", urllib.parse.urlunsplit(url._replace(path=url.path + "/")))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        if fd is None or info is None or not stat.S_ISREG(info.st_mode):
+            if fd is not None:
+                os.close(fd)
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+            return None
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-type", self.guess_type(parts[-1]))
+        self.send_header("Content-Length", str(info.st_size))
+        self.send_header("Last-Modified", self.date_time_string(int(info.st_mtime)))
+        self.end_headers()
+        return os.fdopen(fd, "rb")
 
 
 _CLICK_TEXT_JS = """(() => {
@@ -441,21 +545,22 @@ def _errors(events: list[dict[str, Any]]) -> list[str]:
     return unique[:MAX_ERRORS]
 
 
-def _save(path: Path, data: bytes) -> None:
-    """Write ``data`` to ``path``; a symlink planted there is replaced, never followed."""
-    fd, tmp = tempfile.mkstemp(prefix=".shot-", dir=path.parent)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
-    os.replace(tmp, path)
-
-
 def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayReport:
-    """Run ``script`` against ``site`` and save its shots in ``out_dir``. Blocking."""
-    out_dir.mkdir(parents=True, exist_ok=True)
+    """Run ``script`` against ``site`` and save its shots in ``out_dir``, a directory under it. Blocking."""
+    out_fd = open_dir_inside(site, out_dir, create=True)
     report = PlayReport()
-    server = http.server.ThreadingHTTPServer(
-        ("127.0.0.1", 0), functools.partial(_QuietHandler, directory=str(site))
-    )
+
+    def shoot(name: str, data: bytes) -> Path:
+        save_in(out_fd, name, data)
+        return out_dir / name
+
+    try:
+        server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), functools.partial(_SiteHandler, directory=str(site))
+        )
+    except BaseException:
+        os.close(out_fd)
+        raise
     threading.Thread(target=server.serve_forever, daemon=True).start()
     profile = tempfile.mkdtemp(prefix="ouroboros-playtest-")
     pipe: _Pipe | None = None
@@ -523,7 +628,7 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
                 )
                 break
             try:
-                _run_step(step, cdp, key, mouse, click, out_dir, report)
+                _run_step(step, cdp, key, mouse, click, shoot, report)
             except TimeoutError:
                 report.notes.append(
                     f"the page stopped answering at step {number} ({_describe(step)})"
@@ -537,6 +642,7 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
         server.shutdown()
         server.server_close()
         shutil.rmtree(profile, ignore_errors=True)
+        os.close(out_fd)
     return report
 
 
@@ -546,7 +652,7 @@ def _run_step(
     key: Callable[[str, bool], None],
     mouse: Callable[..., None],
     click: Callable[[float, float], None],
-    out_dir: Path,
+    shoot: Callable[[str, bytes], Path],
     report: PlayReport,
 ) -> None:
     """Run one step of a play script against the attached page."""
@@ -554,9 +660,8 @@ def _run_step(
         time.sleep(step["wait"] / 1000)
     elif "shot" in step:
         data = cdp("Page.captureScreenshot", {"format": "png"})["data"]
-        path = out_dir / f"{len(report.shots) + 1:02d}-{step['shot']}.png"
-        _save(path, base64.b64decode(data))
-        report.shots.append(path)
+        name = f"{len(report.shots) + 1:02d}-{step['shot']}.png"
+        report.shots.append(shoot(name, base64.b64decode(data)))
     elif "key" in step or "keys" in step:
         keys = step.get("keys") or [step["key"]]
         for name in keys:
@@ -600,13 +705,12 @@ def _run_step(
         time.sleep(LOAD_SETTLE_SECONDS)
 
 
-def write_answer(check_dir: Path, nonce: str, answer: dict[str, Any]) -> None:
-    """Write the answer to play request ``nonce`` so its reader never sees half of it."""
-    fd, tmp = tempfile.mkstemp(prefix=".answer-", dir=check_dir)
-    with os.fdopen(fd, "w") as handle:
-        json.dump(answer, handle)
-    # A rename replaces a planted symlink instead of writing through it.
-    os.replace(tmp, check_dir / f"{RESULT_PREFIX}{nonce}.json")
+def write_answer(check_fd: int, nonce: str, answer: dict[str, Any]) -> None:
+    """Write the answer to play request ``nonce`` in the check directory ``check_fd``.
+
+    Its reader never sees half of it, and a symlink planted there is replaced.
+    """
+    save_in(check_fd, f"{RESULT_PREFIX}{nonce}.json", json.dumps(answer).encode())
 
 
 def request_play(check_dir: Path, wait_seconds: float | None = None) -> dict[str, Any] | None:
@@ -678,8 +782,10 @@ __all__ = [
     "find_browser",
     "installed_browser",
     "main",
+    "open_dir_inside",
     "parse_play_script",
     "play",
     "request_play",
+    "save_in",
     "write_answer",
 ]

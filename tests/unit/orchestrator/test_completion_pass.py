@@ -533,6 +533,47 @@ async def test_the_host_plays_the_page_whenever_the_worker_asks_while_it_fixes(t
     assert await asyncio.to_thread(playtest.request_play, app / CHECK_DIR, 0.6) is None
 
 
+@pytest.mark.asyncio
+async def test_a_planted_link_never_carries_the_saved_script_outside_the_app(tmp_path) -> None:
+    (tmp_path / "app").mkdir()
+    app = _app(tmp_path / "app")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    saved = app / completion_pass.PLAYTEST_DIR / "script.json"
+    saved.parent.mkdir(parents=True)
+    saved.symlink_to(outside)
+    factory = _Factory(["NONE", PLAN, "- app.js: not drawn", "done", "NONE", "NONE"])
+
+    await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=_Player()
+    )
+
+    assert outside.read_text() == "keep"
+    assert not saved.is_symlink()
+    assert json.loads(saved.read_text())["page"] == "index.html"
+
+
+@pytest.mark.asyncio
+async def test_a_playtest_directory_that_leads_outside_the_app_is_never_written(tmp_path) -> None:
+    (tmp_path / "app").mkdir()
+    app = _app(tmp_path / "app")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (app / ".ouroboros").mkdir()
+    (app / completion_pass.PLAYTEST_DIR).symlink_to(outside)
+    player = _Player()
+    factory = _Factory(["- app.js: no lap count", PLAN, "done", "NONE"])
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=player
+    )
+
+    assert list(outside.iterdir()) == [] and player.calls == []
+    assert result.meta["completion_pass"]["playtest"] == "play_failed"
+    # no replay command without a saved script
+    assert completion_pass.check_command() not in factory.calls[2]["prompt"]
+
+
 async def _serve(app: Path, player: _Player, **kwargs: Any) -> tuple[asyncio.Task, list[str]]:
     served: list[str] = []
     script = playtest.parse_play_script(PLAN, app)

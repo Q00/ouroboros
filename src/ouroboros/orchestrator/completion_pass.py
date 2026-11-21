@@ -59,6 +59,7 @@ from collections.abc import Callable, Mapping
 import contextlib
 import inspect
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -81,7 +82,9 @@ from ouroboros.orchestrator.playtest import (
     REQUEST_PREFIX,
     PlayReport,
     PlayScript,
+    open_dir_inside,
     parse_play_script,
+    save_in,
     write_answer,
 )
 
@@ -262,12 +265,9 @@ def check_command(check_dir: Path = CHECK_DIR) -> str:
     )
 
 
-def _inside(root: Path, path: Path) -> bool:
-    """Whether ``path`` resolves inside ``root``; a worker may have planted a symlink."""
-    try:
-        return path.resolve().is_relative_to(root.resolve())
-    except OSError:
-        return False
+def _make_dir(working_dir: Path, sub: Path) -> None:
+    """Make ``sub`` under ``working_dir``; a symlink on the way raises :class:`OSError`."""
+    os.close(open_dir_inside(working_dir, sub, create=True))
 
 
 async def serve_checks(
@@ -284,45 +284,59 @@ async def serve_checks(
 
     Only ``script``, the one the pass saved, is played; a request carries nothing
     but its name. Each play saves its shots in a new directory named after the
-    request, and a check directory that resolves outside ``working_dir`` is never
-    used. After ``limit`` plays a request is answered with an error.
+    request. The check directory is reached from ``working_dir`` without
+    following a symlink, and every read, removal and write in it goes through that
+    one descriptor, so a link the worker plants never leads a host write outside
+    the app. After ``limit`` plays a request is answered with an error.
     """
-    check_dir = working_dir / CHECK_DIR
     played = 0
     while True:
-        usable = check_dir.is_dir() and _inside(working_dir, check_dir)
-        for request in sorted(check_dir.glob(f"{REQUEST_PREFIX}*")) if usable else ():
-            nonce = request.name[len(REQUEST_PREFIX) :]
-            with contextlib.suppress(OSError):
-                request.unlink()
-            if not _NONCE.fullmatch(nonce):
-                continue
-            answer: dict[str, Any]
-            if played >= limit:
-                answer = {"error": f"the page was already played {limit} times in this session"}
-            else:
-                played += 1
-                served.append(nonce)
-                out = check_dir / nonce
+        try:
+            check_fd: int | None = open_dir_inside(working_dir, CHECK_DIR)
+        except OSError:
+            check_fd = None
+        try:
+            names = sorted(os.listdir(check_fd)) if check_fd is not None else []
+            for name in names:
+                if check_fd is None or not name.startswith(REQUEST_PREFIX):
+                    continue
+                nonce = name[len(REQUEST_PREFIX) :]
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=check_fd)
+                if not _NONCE.fullmatch(nonce):
+                    continue
+                answer: dict[str, Any]
+                if played >= limit:
+                    answer = {"error": f"the page was already played {limit} times in this session"}
+                else:
+                    played += 1
+                    served.append(nonce)
+                    try:
+                        os.mkdir(nonce, 0o755, dir_fd=check_fd)
+                        report = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                player,
+                                working_dir,
+                                script,
+                                working_dir / CHECK_DIR / nonce,
+                                browser,
+                            ),
+                            timeout=PLAY_BOUND_SECONDS,
+                        )
+                        answer = {
+                            "shots": [p.relative_to(working_dir).as_posix() for p in report.shots],
+                            "errors": list(report.errors),
+                            "notes": list(report.notes),
+                        }
+                    except Exception as exc:  # noqa: BLE001 - reported to the worker that asked
+                        answer = {"error": f"the play did not finish: {exc or type(exc).__name__}"}
                 try:
-                    out.mkdir()
-                    if not _inside(working_dir, out):
-                        raise OSError("the check directory is outside the app")
-                    report = await asyncio.wait_for(
-                        asyncio.to_thread(player, working_dir, script, out, browser),
-                        timeout=PLAY_BOUND_SECONDS,
-                    )
-                    answer = {
-                        "shots": [p.relative_to(working_dir).as_posix() for p in report.shots],
-                        "errors": list(report.errors),
-                        "notes": list(report.notes),
-                    }
-                except Exception as exc:  # noqa: BLE001 - reported to the worker that asked
-                    answer = {"error": f"the play did not finish: {exc or type(exc).__name__}"}
-            try:
-                write_answer(check_dir, nonce, answer)
-            except OSError as exc:
-                log.warning("execution.completion_pass.check_not_answered", error=str(exc))
+                    write_answer(check_fd, nonce, answer)
+                except OSError as exc:
+                    log.warning("execution.completion_pass.check_not_answered", error=str(exc))
+        finally:
+            if check_fd is not None:
+                os.close(check_fd)
         await asyncio.sleep(poll_seconds)
 
 
@@ -564,9 +578,7 @@ async def complete_after_run(
         await _announce(event_store, execution_id, stage, PLAY_BOUND_SECONDS, attempt=1)
         out = working_dir / PLAYTEST_DIR / f"round-{round_no}"
         try:
-            out.mkdir(parents=True, exist_ok=True)
-            if not _inside(working_dir, out):
-                raise OSError("the play directory is outside the app")
+            _make_dir(working_dir, out)
             report = await asyncio.wait_for(
                 asyncio.to_thread(
                     player or playtest_module.play, working_dir, script, out, browser
@@ -615,12 +627,13 @@ async def complete_after_run(
             if script is None:
                 record["playtest"] = "plan_failed" if plan is None else "not_planned"
             else:
-                script_path = PLAYTEST_DIR / "script.json"
                 try:
-                    (working_dir / PLAYTEST_DIR).mkdir(parents=True, exist_ok=True)
-                    (working_dir / script_path).write_text(
-                        json.dumps({"page": script.page, "steps": list(script.steps)})
-                    )
+                    playtest_fd = open_dir_inside(working_dir, PLAYTEST_DIR, create=True)
+                    try:
+                        data = json.dumps({"page": script.page, "steps": list(script.steps)})
+                        save_in(playtest_fd, "script.json", data.encode())
+                    finally:
+                        os.close(playtest_fd)
                     check = check_command()
                 except OSError as exc:
                     log.warning("execution.completion_pass.script_not_saved", error=str(exc))
