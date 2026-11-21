@@ -472,6 +472,7 @@ async def test_the_app_is_played_before_the_fix_and_again_after_it(tmp_path) -> 
     assert "- (core) no lap count\n" + visible in fix_prompt  # code defects, then the screen's
     assert "the screenshots are .ouroboros/playtest/round-1/01-shot.png" in fix_prompt
     assert f"run `{completion_pass.check_command()}` in this directory" in fix_prompt
+    assert "never make the page detect that browser or behave differently in it" in fix_prompt
     saved = json.loads((app / ".ouroboros/playtest/script.json").read_text())
     assert saved == {"page": "index.html", "steps": [dict(step) for step in script.steps]}
     assert ".ouroboros/playtest/round-2/01-shot.png" in factory.calls[5]["prompt"]

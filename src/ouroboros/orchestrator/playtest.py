@@ -312,6 +312,8 @@ class _Pipe:
                 "--use-mock-keychain",
                 "--password-store=basic",
                 "--mute-audio",
+                # navigator.webdriver stays false, as in a user's browser.
+                "--disable-blink-features=AutomationControlled",
                 "--use-angle=swiftshader",
                 "--enable-unsafe-swiftshader",
                 f"--window-size={w},{h}",
@@ -470,6 +472,14 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
 
         for domain in ("Page.enable", "Runtime.enable", "Log.enable"):
             cdp(domain)
+        # The page sees an ordinary Chrome: a page that told the headless browser
+        # apart could show it something users never see.
+        agent = str(pipe_.call("Browser.getVersion").get("userAgent", ""))
+        if "HeadlessChrome" in agent:
+            cdp(
+                "Emulation.setUserAgentOverride",
+                {"userAgent": agent.replace("HeadlessChrome", "Chrome")},
+            )
         w, h = VIEWPORT
         cdp(
             "Emulation.setDeviceMetricsOverride",

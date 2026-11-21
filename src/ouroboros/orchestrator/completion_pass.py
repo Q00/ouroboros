@@ -246,6 +246,12 @@ def build_fix_prompt(
             " prints the screenshots that play saved. Open them, and keep changing and checking"
             " until they no longer show those defects."
         )
+    if seen:
+        seen += (
+            " That browser is an ordinary Chrome with WebGL, and what it shows is what users see:"
+            " fix the app itself, and never make the page detect that browser or behave"
+            " differently in it."
+        )
     return FIX_PROMPT.format(goal=scope.goal or seed.goal, defects=listed, seen=seen)
 
 

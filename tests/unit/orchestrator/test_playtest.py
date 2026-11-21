@@ -181,7 +181,9 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
         "<button id=b onclick=\"this.textContent='Started'\">Start</button><p id=k></p>"
         "<button onclick=\"this.textContent = confirm('Delete it?') ? 'Gone' : 'Kept'\">Del</button>"
         "<script>addEventListener('keydown', e => k.textContent = e.key);"
-        "setTimeout(() => { throw new Error('late failure') }, 10);</script>"
+        "setTimeout(() => { throw new Error('late failure') }, 10);"
+        "console.error('seen as ' + navigator.userAgent.includes('Headless') + navigator.webdriver);"
+        "</script>"
     )
     script = parse_play_script(
         _reply(
@@ -203,6 +205,7 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
     assert [p.name for p in report.shots] == ["01-before.png", "02-after.png"]
     assert all(p.read_bytes().startswith(b"\x89PNG") for p in report.shots)
     assert any("late failure" in line for line in report.errors)
+    assert "seen as falsefalse" in report.errors  # the page cannot tell it from a user's Chrome
     assert report.notes == [
         "the page opened a confirm dialog 'Delete it?'; it was accepted",
         "no visible control labelled 'missing'",
