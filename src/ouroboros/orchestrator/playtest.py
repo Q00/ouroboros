@@ -57,6 +57,8 @@ from typing import IO, Any
 import urllib.parse
 import uuid
 
+from ouroboros.orchestrator.verify_shell import sanitized_verify_environment
+
 VIEWPORT = (1280, 800)
 MAX_STEPS = 40
 MAX_SHOTS = 8
@@ -332,6 +334,9 @@ class _Pipe:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            # The page is code the run built: the browser gets no loader or shell
+            # injection from the host's environment.
+            env=sanitized_verify_environment(),
         )
         os.close(to_read)
         os.close(from_write)
