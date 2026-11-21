@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import asdict, replace
+from datetime import UTC
 import json
 import os
 from pathlib import Path
@@ -985,7 +986,9 @@ _RUN_HANDOFF_WAIT_POLL_SECONDS = 5
 # the formal evaluation that a rejected verdict turns into Ralph. A runtime
 # child can keep a finished job open (#1593), so the durable terminal wins,
 # but only after this window: returning at once let the CLI exit and kill the
-# in-process evaluation before it started.
+# in-process evaluation before it started. The window runs from the terminal or
+# from the latest stage the run job's completion pass announced, past the most
+# that stage can take.
 _POST_RUN_GRACE_SECONDS = 300.0
 
 
@@ -999,6 +1002,29 @@ async def _cancel_run_handoff_job(job_manager: JobManager, job_id: str) -> None:
 
 
 _FAILED_RUN_META_STATUSES = frozenset({"failed", "cancelled", "interrupted"})
+
+
+async def _post_run_grace_ends(
+    result: AutoPipelineResult, event_store: EventStore, terminal_seen_at: float
+) -> float:
+    """Wall-clock time after which the durable terminal wins over the open run job."""
+    from ouroboros.orchestrator.completion_pass import STAGE_EVENT
+
+    ends = terminal_seen_at + _POST_RUN_GRACE_SECONDS
+    if not result.execution_id:
+        return ends
+    stages = await event_store.query_events(
+        aggregate_id=result.execution_id, event_type=STAGE_EVENT, limit=1
+    )
+    if stages:
+        bound = stages[0].data.get("bound_seconds")
+        bound_seconds = float(bound) if isinstance(bound, int | float) else 0.0
+        announced = stages[0].timestamp
+        if announced.tzinfo is None:  # SQLite returns naive UTC
+            announced = announced.replace(tzinfo=UTC)
+        announced_at = announced.timestamp()
+        ends = max(ends, announced_at + bound_seconds + _POST_RUN_GRACE_SECONDS)
+    return ends
 
 
 async def _linked_execution_completed_result(
@@ -1343,11 +1369,13 @@ async def _await_run_handoff_terminal(
         while not snapshot.is_terminal:
             linked_completed = await _linked_execution_completed_result(result, event_store)
             if linked_completed is not None:
-                # The job still owes its post-run work (the run receipt and
-                # the evaluation it enqueues); trust the durable terminal
-                # over the open job only once that work had its window.
-                terminal_seen_at = terminal_seen_at or time.monotonic()
-                if time.monotonic() - terminal_seen_at >= _POST_RUN_GRACE_SECONDS:
+                # The job still owes its post-run work (the completion pass,
+                # the run receipt and the evaluation it enqueues); trust the
+                # durable terminal over the open job only once that work had
+                # its window.
+                terminal_seen_at = terminal_seen_at or time.time()
+                grace_ends = await _post_run_grace_ends(result, event_store, terminal_seen_at)
+                if time.time() >= grace_ends:
                     return _persist_resumable_run_verdict(linked_completed, state, store)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
