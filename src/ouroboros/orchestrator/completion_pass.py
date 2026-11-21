@@ -136,7 +136,7 @@ Fix every defect above, the ones about the request's basic use first.{seen} Keep
 
 PLAY_PLAN_PROMPT = """An AI built an app for this request: {goal}
 
-Read the code paths that run. Do not modify any file. If the app runs in a web browser from a static page in this directory, with no build step and no server code of its own, write a short script that plays it the way a first-time user would for about half a minute: open it, start it, and use its main features with the controls the code really listens to. Take a screenshot after each meaningful moment, at most {max_shots}.
+Read the code paths that run. Do not modify any file. If the app runs in a web browser from a static page in this directory, with no build step and no server code of its own, write a short script that plays it the way a first-time user would for about half a minute: open it, start it, and use its main features with the controls the code really listens to. Act as that user does: after typing into a one-line field, submit it by pressing Enter, as most people do, not by clicking a button. Take a screenshot after each meaningful moment, at most {max_shots}.
 
 Reply with one JSON object only: {{"page": "<page path in this directory>", "steps": [...]}}. Each step is one of: {{"wait": ms}}, {{"shot": "name"}}, {{"key": "ArrowUp", "hold": ms}}, {{"keys": ["ArrowUp", "ArrowLeft"], "hold": ms}}, {{"press": "Enter"}}, {{"type": "text"}}, {{"click_text": "visible label"}}, {{"click": [x, y]}}, {{"drag": [x0, y0, x1, y1, ms]}}, {{"wheel": [x, y, dy]}}, {{"reload": true}}. The window is 1280x800. A step waits or holds at most 5000 ms. Keys: the arrow keys, Enter, Escape, Space, Shift, Tab, Backspace or one character.
 If the app does not run that way, reply with the single word {none}."""
