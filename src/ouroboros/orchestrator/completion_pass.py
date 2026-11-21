@@ -15,7 +15,10 @@ before the formal evaluation, so the evaluation judges the finished product:
    basic use that does not work for a first-time user, then each expected line
    the code does not do yet;
 2. when it lists any, a worker with the run's tools and permission mode fixes
-   them, basic use first.
+   them, basic use first;
+3. after that worker, a second read-only reviewer lists only what now stops the
+   app from loading or its basic use from working (a fix that rewrites a file
+   can break what worked), and a worker repairs what it lists.
 
 A parent session that delegated the run (``_ooo_parent_*`` arguments) bounds
 both sessions as it bounded the run: its permission mode is the worker's, and
@@ -86,7 +89,12 @@ FIX_PROMPT = """This project was built for this request: {goal}
 A reviewer read the code and found these defects:
 {defects}
 
-Fix every defect above, the ones about the request's basic use first. Keep everything that already works. Do not add a server, network service, account, payment or personal-data feature unless the request asks for it."""
+Fix every defect above, the ones about the request's basic use first. Keep everything that already works. Do not add a server, network service, account, payment or personal-data feature unless the request asks for it. When you are done, check that every element, file, function and asset the running code uses exists, and run the project's tests if it has any."""
+
+RECHECK_PROMPT = """A worker just changed an app an AI built for this request: {goal}
+
+Read the code paths that run, as a strict reviewer. Do not modify any file. List only what stops the app from loading or its basic use from working for a first-time user, one per line starting with "- ", naming the file: an error on load or in the main loop, an element, file, function, asset or module the running code uses that does not exist or is not loaded, a control that does nothing. Do not list missing features.
+Reply with the list only, or the single word {none}."""
 
 
 def _expected_seed(seed_content: str) -> Seed | None:
@@ -130,6 +138,12 @@ def build_review_prompt(seed: Seed) -> str:
     assert scope is not None
     expected = "\n".join(f"- {line}" for line in scope.expected_experience)
     return REVIEW_PROMPT.format(goal=scope.goal or seed.goal, expected=expected, none=NO_DEFECTS)
+
+
+def build_recheck_prompt(seed: Seed) -> str:
+    scope = seed.sourced_scope
+    assert scope is not None
+    return RECHECK_PROMPT.format(goal=scope.goal or seed.goal, none=NO_DEFECTS)
 
 
 def build_fix_prompt(seed: Seed, defects: tuple[str, ...]) -> str:
@@ -226,13 +240,26 @@ async def _announce(
         log.warning("execution.completion_pass.announce_failed", stage=stage, error=str(exc))
 
 
+_RECHECK_TEXT = {
+    "clean": " A second review found nothing broken.",
+    "repaired": " A second review found {n} broken part(s); a worker repaired them.",
+    "repair_failed": " A second review found {n} broken part(s); the repair did not finish.",
+    "recheck_failed": " The second review did not finish.",
+}
+
+
 def _with_record(run_result: MCPToolResult, record: dict[str, Any]) -> MCPToolResult:
-    if record["status"] == "fixed":
-        text = f"\nCompletion pass: a reviewer found {record['defects']} defect(s); a worker fixed them.\n"
-    elif record["status"] == "clean":
-        text = "\nCompletion pass: the reviewer found no defects.\n"
+    status, found = record["status"], f"a reviewer found {record['defects']} defect(s)"
+    if status == "clean":
+        text = "the reviewer found no defects."
+    elif status == "review_failed":
+        text = "review_failed; the product is as the run left it."
     else:
-        text = f"\nCompletion pass: {record['status']}; the product is as the run left it.\n"
+        text = f"{found}; " + (
+            "a worker fixed them." if status == "fixed" else "the fix did not finish."
+        )
+        text += _RECHECK_TEXT[record["recheck"]].format(n=len(record.get("regressions", ())))
+    text = f"\nCompletion pass: {text}\n"
     return MCPToolResult(
         content=(*run_result.content, MCPContentItem(type=ContentType.TEXT, text=text)),
         is_error=run_result.is_error,
@@ -274,29 +301,28 @@ async def complete_after_run(
     from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
     factory = runtime_factory or create_agent_runtime
-    stage_args = (event_store, execution_id)
-    reply = await _stage(
-        *stage_args,
-        "review",
-        factory,
-        build_review_prompt(seed),
-        tools=reviewer_tools,
-        timeout_seconds=timeout_seconds,
-        data={},
-        backend=runtime_backend,
-        model=None,
-        permission_mode=REVIEWER_PERMISSION_MODE,
-        cwd=working_dir,
-    )
-    defects = parse_defects(reply) if reply is not None else ()
-    record: dict[str, Any] = {"status": "review_failed", "defects": 0}
-    if reply is not None:
-        log.info("execution.completion_pass.reviewed", defects=len(defects), cwd=str(working_dir))
-        record = {"status": "clean", "defects": 0}
-    if defects:
-        fixed = await _stage(
-            *stage_args,
-            "fix",
+
+    async def review(stage: str, prompt: str) -> str | None:
+        return await _stage(
+            event_store,
+            execution_id,
+            stage,
+            factory,
+            prompt,
+            tools=reviewer_tools,
+            timeout_seconds=timeout_seconds,
+            data={},
+            backend=runtime_backend,
+            model=None,
+            permission_mode=REVIEWER_PERMISSION_MODE,
+            cwd=working_dir,
+        )
+
+    async def fix(stage: str, defects: tuple[str, ...]) -> str | None:
+        return await _stage(
+            event_store,
+            execution_id,
+            stage,
             factory,
             build_fix_prompt(seed, defects),
             tools=worker_tools,
@@ -310,9 +336,32 @@ async def complete_after_run(
             stdout_idle_timeout_seconds=0,
             **({"permission_mode": parent_mode} if parent_mode else {}),
         )
+
+    reply = await review("review", build_review_prompt(seed))
+    defects = parse_defects(reply) if reply is not None else ()
+    record: dict[str, Any] = {"status": "review_failed", "defects": 0}
+    if reply is not None:
+        log.info("execution.completion_pass.reviewed", defects=len(defects), cwd=str(working_dir))
+        record = {"status": "clean", "defects": 0}
+    if defects:
+        fixed = await fix("fix", defects)
         status = "fixed" if fixed is not None else "fix_failed"
-        log.info("execution.completion_pass.completed", status=status, defects=len(defects))
         record = {"status": status, "defects": len(defects), "defect_list": list(defects)}
+        # A worker that rewrote a file, or stopped part-way, can break what worked.
+        recheck = await review("recheck", build_recheck_prompt(seed))
+        regressions = parse_defects(recheck) if recheck is not None else ()
+        record["recheck"] = "recheck_failed" if recheck is None else "clean"
+        if regressions:
+            repaired = await fix("repair", regressions)
+            record["recheck"] = "repaired" if repaired is not None else "repair_failed"
+            record["regressions"] = list(regressions)
+        log.info(
+            "execution.completion_pass.completed",
+            status=status,
+            defects=len(defects),
+            recheck=record["recheck"],
+            regressions=len(regressions),
+        )
     await _announce(event_store, execution_id, "done", 0.0, status=record["status"])
     return _with_record(run_result, record)
 
@@ -320,12 +369,14 @@ async def complete_after_run(
 __all__ = [
     "FIX_PROMPT",
     "NO_DEFECTS",
+    "RECHECK_PROMPT",
     "REVIEW_PROMPT",
     "REVIEWER_PERMISSION_MODE",
     "REVIEWER_TOOLS",
     "STAGE_EVENT",
     "WORKER_TOOLS",
     "build_fix_prompt",
+    "build_recheck_prompt",
     "build_review_prompt",
     "complete_after_run",
     "parse_defects",

@@ -24,6 +24,7 @@ from ouroboros.orchestrator.completion_pass import (
     REVIEWER_TOOLS,
     STAGE_EVENT,
     WORKER_TOOLS,
+    build_recheck_prompt,
     build_review_prompt,
     complete_after_run,
     parse_defects,
@@ -128,17 +129,22 @@ async def _complete(factory: _Factory, **overrides: Any) -> MCPToolResult:
 @pytest.mark.asyncio
 async def test_defects_are_reviewed_read_only_then_fixed_by_a_worker() -> None:
     review = "- app.js:21 new tasks without a due date are hidden\n- (core) no edit\nnot a defect"
-    factory = _Factory([review, "done"])
+    factory = _Factory([review, "done", "NONE"])
 
     result = await _complete(factory)
 
-    reviewer, worker = factory.created
+    reviewer, worker, rechecker = factory.created
     assert reviewer["permission_mode"] == REVIEWER_PERMISSION_MODE == "default"
     assert reviewer["cwd"] == Path("/work/app")
     assert "permission_mode" not in worker  # the run's own permission mode
     assert worker["cwd"] == Path("/work/app")
     assert factory.calls[0]["tools"] == list(REVIEWER_TOOLS)
     assert factory.calls[1]["tools"] == list(WORKER_TOOLS)
+    assert rechecker["permission_mode"] == "default"
+    assert factory.calls[2]["tools"] == list(REVIEWER_TOOLS)
+    assert factory.calls[2]["prompt"] == build_recheck_prompt(
+        Seed.from_dict(yaml.safe_load(_seed_content()))
+    )
     fix_prompt = factory.calls[1]["prompt"]
     assert "- app.js:21 new tasks without a due date are hidden\n- (core) no edit" in fix_prompt
     assert "not a defect" not in fix_prompt
@@ -148,10 +154,42 @@ async def test_defects_are_reviewed_read_only_then_fixed_by_a_worker() -> None:
         "status": "fixed",
         "defects": 2,
         "defect_list": ["app.js:21 new tasks without a due date are hidden", "(core) no edit"],
+        "recheck": "clean",
     }
     assert result.meta["status"] == "completed"
     assert result.is_error is False
-    assert "a reviewer found 2 defect(s); a worker fixed them" in result.text_content
+    assert "a reviewer found 2 defect(s); a worker fixed them." in result.text_content
+    assert "A second review found nothing broken." in result.text_content
+
+
+@pytest.mark.asyncio
+async def test_what_the_fix_broke_is_found_again_and_repaired() -> None:
+    regression = "- index.html: game.js reads #lapTotal, which the page does not have"
+    factory = _Factory(["- (core) no lap count", "done", regression + "\nmissing minimap", "done"])
+
+    result = await _complete(factory)
+
+    assert len(factory.created) == 4
+    assert factory.created[2]["permission_mode"] == "default"
+    assert factory.calls[2]["tools"] == list(REVIEWER_TOOLS)
+    assert factory.calls[3]["tools"] == list(WORKER_TOOLS)
+    assert regression in factory.calls[3]["prompt"]
+    assert "missing minimap" not in factory.calls[3]["prompt"]
+    record = result.meta["completion_pass"]
+    assert record["status"] == "fixed"
+    assert record["recheck"] == "repaired"
+    assert record["regressions"] == [regression[2:]]
+    assert "A second review found 1 broken part(s); a worker repaired them." in result.text_content
+
+
+def test_the_recheck_asks_only_for_what_stops_basic_use() -> None:
+    prompt = build_recheck_prompt(Seed.from_dict(yaml.safe_load(_seed_content())))
+
+    assert GOAL in prompt
+    assert "Do not modify any file." in prompt
+    assert "does not exist or is not loaded" in prompt
+    assert "Do not list missing features." in prompt
+    assert prompt.endswith("Reply with the list only, or the single word NONE.")
 
 
 @pytest.mark.asyncio
@@ -167,7 +205,7 @@ async def test_a_clean_review_runs_no_worker() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("replies", "status"),
-    [([None, None], "review_failed"), (["- broken", None, None], "fix_failed")],
+    [([None, None], "review_failed"), (["- broken", None, None, "NONE"], "fix_failed")],
 )
 async def test_a_session_that_fails_twice_leaves_the_run_verdict(replies, status) -> None:
     result = await _complete(_Factory(list(replies)))
@@ -181,7 +219,7 @@ async def test_a_session_that_fails_twice_leaves_the_run_verdict(replies, status
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("replies", "status"),
-    [([None, "NONE"], "clean"), (["- broken", None, "done"], "fixed")],
+    [([None, "NONE"], "clean"), (["- broken", None, "done", "NONE"], "fixed")],
 )
 async def test_a_session_that_ends_in_an_error_is_tried_once_more(replies, status) -> None:
     factory = _Factory(list(replies))
@@ -229,7 +267,7 @@ async def test_nothing_runs_without_expected_experience_or_a_completed_run(overr
 
 @pytest.mark.asyncio
 async def test_a_delegating_parent_bounds_both_sessions_as_it_bounded_the_run() -> None:
-    factory = _Factory(["- broken", "done"])
+    factory = _Factory(["- broken", "done", "NONE"])
     parent = {
         DELEGATED_PARENT_PERMISSION_MODE_ARG: "default",
         DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG: ["Read", "Edit", "Grep", "WebFetch"],
@@ -237,8 +275,8 @@ async def test_a_delegating_parent_bounds_both_sessions_as_it_bounded_the_run() 
 
     await _complete(factory, run_arguments=parent)
 
-    reviewer, worker = factory.created
-    assert reviewer["permission_mode"] == "default"
+    reviewer, worker, rechecker = factory.created
+    assert reviewer["permission_mode"] == rechecker["permission_mode"] == "default"
     assert worker["permission_mode"] == "default"
     assert factory.calls[0]["tools"] == ["Read", "Grep"]
     assert factory.calls[1]["tools"] == ["Read", "Edit", "Grep"]
@@ -272,7 +310,12 @@ async def test_a_plugin_dispatched_backend_is_left_alone(monkeypatch) -> None:
 @pytest.mark.parametrize(
     ("replies", "stages", "status"),
     [
-        (["- broken", "done"], ["review", "fix", "done"], "fixed"),
+        (["- broken", "done", "NONE"], ["review", "fix", "recheck", "done"], "fixed"),
+        (
+            ["- broken", "done", "- broke", "done"],
+            ["review", "fix", "recheck", "repair", "done"],
+            "fixed",
+        ),
         (["NONE"], ["review", "done"], "clean"),
         ([None, "NONE"], ["review", "review", "done"], "clean"),
         ([None, None], ["review", "review", "done"], "review_failed"),
@@ -302,7 +345,7 @@ async def test_a_skipped_pass_announces_nothing_and_a_failed_announce_changes_no
     assert events.appended == []
 
     result = await _complete(
-        _Factory(["- broken", "done"]), event_store=_Events(fail=True), execution_id="x"
+        _Factory(["- broken", "done", "NONE"]), event_store=_Events(fail=True), execution_id="x"
     )
     assert result.meta["completion_pass"]["status"] == "fixed"
 
