@@ -7,18 +7,31 @@ the formal evaluation judges only the Seed's criteria. A product that runs but
 misses capabilities users expect, or that breaks its own basic use while it
 adds them, was therefore approved as it stood.
 
-After such a run completes, two sessions run in the run's working directory,
-before the formal evaluation, so the evaluation judges the finished product:
+After such a run completes, before the formal evaluation, so the evaluation
+judges the finished product:
 
 1. a reviewer reads the code (``Read``/``Glob``/``Grep``, permission mode
    ``default``) and lists concrete defects: first anything in the request's
    basic use that does not work for a first-time user, then each expected line
    the code does not do yet;
-2. when it lists any, a worker with the run's tools and permission mode fixes
-   them, basic use first;
-3. after that worker, a second read-only reviewer lists only what now stops the
-   app from loading or its basic use from working (a fix that rewrites a file
-   can break what worked), and a worker repairs what it lists.
+2. when the app runs in a web browser from a static page and a Chromium-family
+   browser is installed, it is played: a read-only reviewer reads the code and
+   writes a short play script for a first-time user, the script runs in that
+   browser headless (:mod:`ouroboros.orchestrator.playtest`), and a read-only
+   reviewer looks at the screenshots and lists what that user sees broken.
+   Code reading misses a view that never shows the road ahead, a banner that
+   never clears, or a galaxy that is never drawn;
+3. a worker with the run's tools and permission mode fixes what steps 1 and 2
+   listed, basic use first. It gets the screenshots and, when it has a shell,
+   a command that has the script played again so it can look at the page after
+   a change. A worker may run in a sandbox that can start neither a browser nor
+   a server, so the command only leaves a request in the app's directory; the
+   pass, on the host, plays the saved script and answers there while the worker
+   runs (:func:`serve_checks`);
+4. a second read-only code review lists what now stops the app from loading or
+   its basic use from working (a fix that rewrites a file can break what
+   worked), and the script is played and looked at once more;
+5. a worker repairs what step 4 found, once.
 
 A parent session that delegated the run (``_ooo_parent_*`` arguments) bounds
 both sessions as it bounded the run: its permission mode is the worker's, and
@@ -43,8 +56,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+import contextlib
 import inspect
+import json
+import os
 from pathlib import Path
+import re
+import shlex
+import sys
+import threading
 from typing import Any
 
 import structlog
@@ -53,9 +73,20 @@ import yaml
 from ouroboros.core.seed import Seed
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator import playtest as playtest_module
 from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
     DELEGATED_PARENT_PERMISSION_MODE_ARG,
+)
+from ouroboros.orchestrator.playtest import (
+    MAX_SHOTS,
+    REQUEST_PREFIX,
+    PlayReport,
+    PlayScript,
+    open_dir_inside,
+    parse_play_script,
+    save_in,
+    write_answer,
 )
 
 log = structlog.get_logger(__name__)
@@ -73,6 +104,18 @@ MAX_DEFECTS = 40
 MAX_DEFECT_CHARS = 400
 NO_DEFECTS = "NONE"
 STAGE_EVENT = "execution.completion_pass.updated"
+# The play script itself: at most 60 s of waits and holds, plus page loads and
+# browser start-up. Its own protocol calls time out well inside this.
+PLAY_BOUND_SECONDS = 180.0
+# After the bound, the play is told to stop: its browser is killed and it cleans
+# up within seconds. The pass waits at most this long for that before going on.
+PLAY_STOP_GRACE_SECONDS = 30.0
+PLAYTEST_DIR = Path(".ouroboros") / "playtest"
+CHECK_DIR = PLAYTEST_DIR / "check"
+# Plays one fix or repair session may ask for; each is a bounded browser run on the host.
+MAX_CHECKS = 8
+CHECK_POLL_SECONDS = 0.5
+_NONCE = re.compile(r"[0-9a-f]{32}")
 
 REVIEW_PROMPT = """You review an app an AI built for this request: {goal}
 
@@ -89,7 +132,23 @@ FIX_PROMPT = """This project was built for this request: {goal}
 A reviewer read the code and found these defects:
 {defects}
 
-Fix every defect above, the ones about the request's basic use first. Keep everything that already works. Do not add a server, network service, account, payment or personal-data feature unless the request asks for it. When you are done, check that every element, file, function and asset the running code uses exists, and run the project's tests if it has any."""
+Fix every defect above, the ones about the request's basic use first.{seen} Keep everything that already works. Do not add a server, network service, account, payment or personal-data feature unless the request asks for it. When you are done, check that every element, file, function and asset the running code uses exists, and run the project's tests if it has any."""
+
+PLAY_PLAN_PROMPT = """An AI built an app for this request: {goal}
+
+Read the code paths that run. Do not modify any file. If the app runs in a web browser from a static page in this directory, with no build step and no server code of its own, write a short script that plays it the way a first-time user would for about half a minute: open it, start it, and use its main features with the controls the code really listens to. Take a screenshot after each meaningful moment, at most {max_shots}.
+
+Reply with one JSON object only: {{"page": "<page path in this directory>", "steps": [...]}}. Each step is one of: {{"wait": ms}}, {{"shot": "name"}}, {{"key": "ArrowUp", "hold": ms}}, {{"keys": ["ArrowUp", "ArrowLeft"], "hold": ms}}, {{"press": "Enter"}}, {{"type": "text"}}, {{"click_text": "visible label"}}, {{"click": [x, y]}}, {{"drag": [x0, y0, x1, y1, ms]}}, {{"wheel": [x, y, dy]}}, {{"reload": true}}. The window is 1280x800. A step waits or holds at most 5000 ms. Keys: the arrow keys, Enter, Escape, Space, Shift, Tab, Backspace or one character.
+If the app does not run that way, reply with the single word {none}."""
+
+PLAY_LOOK_PROMPT = """An AI built an app for this request: {goal}
+
+The app was opened in a 1280x800 browser and played the way a first-time user would, with these steps:
+{steps}
+The screenshots taken at the screenshot steps, in order: {shots}
+{errors}
+Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, blank or garbled areas, error messages. Do not list missing features.
+Reply with the list only, or the single word {none}."""
 
 RECHECK_PROMPT = """A worker just changed an app an AI built for this request: {goal}
 
@@ -146,11 +205,164 @@ def build_recheck_prompt(seed: Seed) -> str:
     return RECHECK_PROMPT.format(goal=scope.goal or seed.goal, none=NO_DEFECTS)
 
 
-def build_fix_prompt(seed: Seed, defects: tuple[str, ...]) -> str:
+def build_play_plan_prompt(seed: Seed) -> str:
+    scope = seed.sourced_scope
+    assert scope is not None
+    return PLAY_PLAN_PROMPT.format(
+        goal=scope.goal or seed.goal, max_shots=MAX_SHOTS, none=NO_DEFECTS
+    )
+
+
+def build_play_look_prompt(
+    seed: Seed, script: PlayScript, report: PlayReport, working_dir: Path
+) -> str:
+    scope = seed.sourced_scope
+    assert scope is not None
+    shots = ", ".join(path.relative_to(working_dir).as_posix() for path in report.shots)
+    lines = [*report.errors, *report.notes]
+    errors = (
+        "The page logged or met these problems:\n" + "\n".join(f"- {line}" for line in lines)
+        if lines
+        else "The page logged no errors."
+    )
+    return PLAY_LOOK_PROMPT.format(
+        goal=scope.goal or seed.goal,
+        steps=script.describe(),
+        shots=shots,
+        errors=errors,
+        none=NO_DEFECTS,
+    )
+
+
+def build_fix_prompt(
+    seed: Seed, defects: tuple[str, ...], shots: tuple[str, ...] = (), check: str | None = None
+) -> str:
     scope = seed.sourced_scope
     assert scope is not None
     listed = "\n".join(f"- {defect}" for defect in defects)
-    return FIX_PROMPT.format(goal=scope.goal or seed.goal, defects=listed)
+    seen = ""
+    if shots:
+        seen = (
+            " Some defects were seen on the screen while the app was played in a browser;"
+            f" the screenshots are {', '.join(shots)}. Open them to see what the user saw."
+        )
+    if check:
+        seen += (
+            f" To see the page after your changes, run `{check}` in this directory: it has the"
+            " same steps played in a headless browser, waits for them (up to three minutes) and"
+            " prints the screenshots that play saved. Open them, and keep changing and checking"
+            " until they no longer show those defects."
+        )
+    if seen:
+        seen += (
+            " That browser is an ordinary Chrome with WebGL, and what it shows is what users see:"
+            " fix the app itself, and never make the page detect that browser or behave"
+            " differently in it."
+        )
+    return FIX_PROMPT.format(goal=scope.goal or seed.goal, defects=listed, seen=seen)
+
+
+def check_command(check_dir: Path = CHECK_DIR) -> str:
+    """The command a worker runs in the app's directory to have the play script replayed."""
+    return (
+        f"{shlex.quote(sys.executable)} -m ouroboros.orchestrator.playtest {check_dir.as_posix()}"
+    )
+
+
+Player = Callable[[Path, PlayScript, Path, str, threading.Event], PlayReport]
+
+
+async def _bounded_play(
+    player: Player, working_dir: Path, script: PlayScript, out: Path, browser: str
+) -> PlayReport:
+    """One play, for at most :data:`PLAY_BOUND_SECONDS`.
+
+    At the bound, or when the caller is cancelled, the play is told to stop, and
+    this returns or raises only once it has: its browser is gone and it writes
+    nothing more.
+    """
+    stop = threading.Event()
+    running = asyncio.ensure_future(
+        asyncio.to_thread(player, working_dir, script, out, browser, stop)
+    )
+    try:
+        return await asyncio.wait_for(asyncio.shield(running), timeout=PLAY_BOUND_SECONDS)
+    except BaseException:
+        stop.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(running), timeout=PLAY_STOP_GRACE_SECONDS)
+        except Exception:  # noqa: BLE001 - the play's own outcome no longer matters
+            if not running.done():
+                log.warning("execution.completion_pass.play_not_stopped", out=str(out))
+        raise
+
+
+def _make_dir(working_dir: Path, sub: Path) -> None:
+    """Make ``sub`` under ``working_dir``; a symlink on the way raises :class:`OSError`."""
+    os.close(open_dir_inside(working_dir, sub, create=True))
+
+
+async def serve_checks(
+    working_dir: Path,
+    script: PlayScript,
+    browser: str,
+    player: Player,
+    served: list[str],
+    *,
+    limit: int = MAX_CHECKS,
+    poll_seconds: float = CHECK_POLL_SECONDS,
+) -> None:
+    """Answer the replay requests a worker leaves in :data:`CHECK_DIR`, until cancelled.
+
+    Only ``script``, the one the pass saved, is played; a request carries nothing
+    but its name. Each play saves its shots in a new directory named after the
+    request. The check directory is reached from ``working_dir`` without
+    following a symlink, and every read, removal and write in it goes through that
+    one descriptor, so a link the worker plants never leads a host write outside
+    the app. After ``limit`` plays a request is answered with an error.
+    """
+    played = 0
+    while True:
+        try:
+            check_fd: int | None = open_dir_inside(working_dir, CHECK_DIR)
+        except OSError:
+            check_fd = None
+        try:
+            names = sorted(os.listdir(check_fd)) if check_fd is not None else []
+            for name in names:
+                if check_fd is None or not name.startswith(REQUEST_PREFIX):
+                    continue
+                nonce = name[len(REQUEST_PREFIX) :]
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=check_fd)
+                if not _NONCE.fullmatch(nonce):
+                    continue
+                answer: dict[str, Any]
+                if played >= limit:
+                    answer = {"error": f"the page was already played {limit} times in this session"}
+                else:
+                    played += 1
+                    served.append(nonce)
+                    try:
+                        os.mkdir(nonce, 0o755, dir_fd=check_fd)
+                        report = await _bounded_play(
+                            player, working_dir, script, working_dir / CHECK_DIR / nonce, browser
+                        )
+                        answer = {
+                            "shots": [p.relative_to(working_dir).as_posix() for p in report.shots],
+                            "errors": list(report.errors),
+                            "notes": list(report.notes),
+                        }
+                    except Exception as exc:  # noqa: BLE001 - reported to the worker that asked
+                        answer = {"error": f"the play did not finish: {exc or type(exc).__name__}"}
+                try:
+                    write_answer(check_fd, nonce, answer)
+                except OSError as exc:
+                    log.warning("execution.completion_pass.check_not_answered", error=str(exc))
+        finally:
+            if check_fd is not None:
+                os.close(check_fd)
+        await asyncio.sleep(poll_seconds)
 
 
 async def _close(runtime: Any) -> None:
@@ -240,25 +452,55 @@ async def _announce(
         log.warning("execution.completion_pass.announce_failed", stage=stage, error=str(exc))
 
 
+_PLAYTEST_TEXT = {
+    "clean": " Playing it in a browser showed nothing broken.",
+    "found": " Playing it in a browser showed {n} visible problem(s).",
+    "no_browser": " It was not played: no Chromium-family browser was found.",
+    "not_planned": " It was not played: it does not run from a static page.",
+    "plan_failed": " It was not played: the play script was not written.",
+    "play_failed": " Playing it in a browser did not finish.",
+    "look_failed": " The review of the screenshots did not finish.",
+}
 _RECHECK_TEXT = {
-    "clean": " A second review found nothing broken.",
-    "repaired": " A second review found {n} broken part(s); a worker repaired them.",
-    "repair_failed": " A second review found {n} broken part(s); the repair did not finish.",
-    "recheck_failed": " The second review did not finish.",
+    "clean": " A second code review found nothing broken.",
+    "found": " A second code review found {n} broken part(s).",
+    "recheck_failed": " The second code review did not finish.",
+}
+_REPLAY_TEXT = {
+    "clean": " Played again, it showed nothing broken.",
+    "found": " Played again, it still showed {n} problem(s).",
+    "play_failed": " Playing it again did not finish.",
+    "look_failed": " The review of the second play did not finish.",
+}
+_REPAIR_TEXT = {
+    "repaired": " A worker repaired them.",
+    "repair_failed": " The repair did not finish.",
 }
 
 
 def _with_record(run_result: MCPToolResult, record: dict[str, Any]) -> MCPToolResult:
-    status, found = record["status"], f"a reviewer found {record['defects']} defect(s)"
-    if status == "clean":
-        text = "the reviewer found no defects."
-    elif status == "review_failed":
+    status = record["status"]
+    if status == "review_failed":
         text = "review_failed; the product is as the run left it."
     else:
-        text = f"{found}; " + (
-            "a worker fixed them." if status == "fixed" else "the fix did not finish."
-        )
-        text += _RECHECK_TEXT[record["recheck"]].format(n=len(record.get("regressions", ())))
+        n = record["defects"]
+        text = f"a code review found {n} defect(s)." if n else "a code review found no defects."
+        if "playtest" in record:
+            visible = len(record.get("visible_defects", ()))
+            text += _PLAYTEST_TEXT[record["playtest"]].format(n=visible)
+        if status == "fixed":
+            text += " A worker fixed them."
+        elif status == "fix_failed":
+            text += " The fix did not finish."
+        if "recheck" in record:
+            text += _RECHECK_TEXT[record["recheck"]].format(n=len(record.get("regressions", ())))
+        if "replay_2" in record:
+            still = len(record.get("replay_2_defects", ()))
+            text += _REPLAY_TEXT[record["replay_2"]].format(n=still)
+        if "repair" in record:
+            text += _REPAIR_TEXT[record["repair"]]
+        if record.get("checks"):
+            text += f" While they worked, the page was played {record['checks']} more time(s)."
     text = f"\nCompletion pass: {text}\n"
     return MCPToolResult(
         content=(*run_result.content, MCPContentItem(type=ContentType.TEXT, text=text)),
@@ -281,6 +523,8 @@ async def complete_after_run(
     run_arguments: Mapping[str, Any] | None = None,
     runtime_factory: Callable[..., Any] | None = None,
     timeout_seconds: float = SESSION_TIMEOUT_SECONDS,
+    browser_finder: Callable[[], str | None] | None = None,
+    player: Player | None = None,
 ) -> MCPToolResult:
     """Review the finished product against its expected experience and fix what is missing."""
     if run_result.is_error or run_result.meta.get("status") != "completed":
@@ -318,57 +562,155 @@ async def complete_after_run(
             cwd=working_dir,
         )
 
-    async def fix(stage: str, defects: tuple[str, ...]) -> str | None:
-        return await _stage(
-            event_store,
-            execution_id,
-            stage,
-            factory,
-            build_fix_prompt(seed, defects),
-            tools=worker_tools,
-            timeout_seconds=timeout_seconds,
-            data={"defects": len(defects)},
-            backend=runtime_backend,
-            model=resolve_execution_model(runtime_backend),
-            cwd=working_dir,
-            llm_backend=llm_backend,
-            startup_output_timeout_seconds=0,
-            stdout_idle_timeout_seconds=0,
-            **({"permission_mode": parent_mode} if parent_mode else {}),
-        )
+    async def fix(stage: str, defects: tuple[str, ...], shots: tuple[str, ...] = ()) -> str | None:
+        server = None
+        if check is not None and script is not None and browser is not None:
+            if "Bash" in worker_tools:
+                server = asyncio.create_task(
+                    serve_checks(
+                        working_dir, script, browser, player or playtest_module.play, checks
+                    )
+                )
+        try:
+            return await _stage(
+                event_store,
+                execution_id,
+                stage,
+                factory,
+                build_fix_prompt(seed, defects, shots, check if server is not None else None),
+                tools=worker_tools,
+                timeout_seconds=timeout_seconds,
+                data={"defects": len(defects)},
+                backend=runtime_backend,
+                model=resolve_execution_model(runtime_backend),
+                cwd=working_dir,
+                llm_backend=llm_backend,
+                startup_output_timeout_seconds=0,
+                stdout_idle_timeout_seconds=0,
+                **({"permission_mode": parent_mode} if parent_mode else {}),
+            )
+        finally:
+            if server is not None:
+                server.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await server
 
+    async def play_and_look(
+        script: PlayScript, browser: str, round_no: int
+    ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        """One play of ``script``: its status, the visible defects and the shots."""
+        stage = "play" if round_no == 1 else f"play_{round_no}"
+        await _announce(event_store, execution_id, stage, PLAY_BOUND_SECONDS, attempt=1)
+        out = working_dir / PLAYTEST_DIR / f"round-{round_no}"
+        try:
+            _make_dir(working_dir, out)
+            report = await _bounded_play(
+                player or playtest_module.play, working_dir, script, out, browser
+            )
+        except Exception as exc:  # noqa: BLE001 - a play that fails leaves the product as it is
+            log.warning(
+                "execution.completion_pass.play_failed", error=str(exc) or type(exc).__name__
+            )
+            return "play_failed", (), ()
+        if not report.shots:
+            return "play_failed", (), ()
+        look = await review(
+            "play_review" if round_no == 1 else f"play_review_{round_no}",
+            build_play_look_prompt(seed, script, report, working_dir),
+        )
+        if look is None:
+            return "look_failed", (), ()
+        visible = parse_defects(look)
+        shots = tuple(path.relative_to(working_dir).as_posix() for path in report.shots)
+        return ("found" if visible else "clean"), visible, shots
+
+    check: str | None = None
+    checks: list[str] = []
+    script: PlayScript | None = None
+    browser: str | None = None
     reply = await review("review", build_review_prompt(seed))
     defects = parse_defects(reply) if reply is not None else ()
     record: dict[str, Any] = {"status": "review_failed", "defects": 0}
     if reply is not None:
         log.info("execution.completion_pass.reviewed", defects=len(defects), cwd=str(working_dir))
         record = {"status": "clean", "defects": 0}
-    if defects:
-        fixed = await fix("fix", defects)
-        status = "fixed" if fixed is not None else "fix_failed"
-        record = {"status": status, "defects": len(defects), "defect_list": list(defects)}
-        # A worker that rewrote a file, or stopped part-way, can break what worked.
-        recheck = await review("recheck", build_recheck_prompt(seed))
-        regressions = parse_defects(recheck) if recheck is not None else ()
-        record["recheck"] = "recheck_failed" if recheck is None else "clean"
-        if regressions:
-            repaired = await fix("repair", regressions)
-            record["recheck"] = "repaired" if repaired is not None else "repair_failed"
+        if defects:
+            record["defect_list"] = list(defects)
+            record["defects"] = len(defects)
+        # Play the app before the fix, so the fix also gets what the screen shows.
+        visible: tuple[str, ...] = ()
+        shots: tuple[str, ...] = ()
+        browser = (browser_finder or playtest_module.find_browser)()
+        if browser is None:
+            record["playtest"] = "no_browser"
+        else:
+            plan = await review("play_plan", build_play_plan_prompt(seed))
+            script = parse_play_script(plan, working_dir) if plan is not None else None
+            if script is None:
+                record["playtest"] = "plan_failed" if plan is None else "not_planned"
+            else:
+                try:
+                    playtest_fd = open_dir_inside(working_dir, PLAYTEST_DIR, create=True)
+                    try:
+                        data = json.dumps({"page": script.page, "steps": list(script.steps)})
+                        save_in(playtest_fd, "script.json", data.encode())
+                    finally:
+                        os.close(playtest_fd)
+                    check = check_command()
+                except OSError as exc:
+                    log.warning("execution.completion_pass.script_not_saved", error=str(exc))
+                record["playtest"], visible, shots = await play_and_look(script, browser, 1)
+        record["visible_defects"] = list(visible)
+        found = (*defects, *visible)[:MAX_DEFECTS]
+        if found:
+            fixed = await fix("fix", found, shots)
+            record["status"] = "fixed" if fixed is not None else "fix_failed"
+            # A worker that rewrote a file, or stopped part-way, can break what worked,
+            # and a worker cannot be sure what the page shows now.
+            recheck = await review("recheck", build_recheck_prompt(seed))
+            regressions = parse_defects(recheck) if recheck is not None else ()
+            record["recheck"] = (
+                "recheck_failed" if recheck is None else ("found" if regressions else "clean")
+            )
             record["regressions"] = list(regressions)
+            still: tuple[str, ...] = ()
+            if script is not None and browser is not None:
+                status, still, shots = await play_and_look(script, browser, 2)
+                record["replay_2"] = status
+                record["replay_2_defects"] = list(still)
+            broken = (*regressions, *still)[:MAX_DEFECTS]
+            if broken:
+                repaired = await fix("repair", broken, shots if still else ())
+                record["repair"] = "repaired" if repaired is not None else "repair_failed"
+            if checks:
+                record["checks"] = len(checks)
         log.info(
             "execution.completion_pass.completed",
-            status=status,
+            status=record["status"],
             defects=len(defects),
-            recheck=record["recheck"],
-            regressions=len(regressions),
+            playtest=record["playtest"],
+            visible=len(visible),
+            recheck=record.get("recheck"),
+            regressions=len(record.get("regressions", ())),
+            replay=record.get("replay_2"),
+            still_visible=len(record.get("replay_2_defects", ())),
+            repair=record.get("repair"),
+            checks=len(checks),
         )
     await _announce(event_store, execution_id, "done", 0.0, status=record["status"])
     return _with_record(run_result, record)
 
 
 __all__ = [
+    "CHECK_DIR",
     "FIX_PROMPT",
+    "MAX_CHECKS",
     "NO_DEFECTS",
+    "PLAY_BOUND_SECONDS",
+    "PLAY_STOP_GRACE_SECONDS",
+    "PLAY_LOOK_PROMPT",
+    "PLAY_PLAN_PROMPT",
+    "PLAYTEST_DIR",
     "RECHECK_PROMPT",
     "REVIEW_PROMPT",
     "REVIEWER_PERMISSION_MODE",
@@ -376,8 +718,12 @@ __all__ = [
     "STAGE_EVENT",
     "WORKER_TOOLS",
     "build_fix_prompt",
+    "check_command",
+    "build_play_look_prompt",
+    "build_play_plan_prompt",
     "build_recheck_prompt",
     "build_review_prompt",
     "complete_after_run",
     "parse_defects",
+    "serve_checks",
 ]

@@ -298,6 +298,22 @@ def block_expectations_research_cli_spawn(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def block_playtest_browser_spawn(monkeypatch, request):
+    """Stop the completion pass from launching a real headless browser.
+
+    ``playtest.find_browser()`` returns an installed Chromium-family browser,
+    which developer machines and CI runners often have. ``None`` is the pass's
+    own answer on a machine without one: the app is not played. Tests that play
+    an app inject ``browser_finder`` and ``player`` or re-patch after this.
+    """
+    if _is_explicit_live_canonical_test(request):
+        return
+    from ouroboros.orchestrator import playtest
+
+    monkeypatch.setattr(playtest, "find_browser", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def block_interview_investigator_cli_spawn(monkeypatch, request):
     """Stop the auto self-answer investigator from spawning real agent CLIs.
 
