@@ -519,6 +519,52 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
     return report
 
 
+def main(argv: list[str] | None = None) -> int:
+    """``python -m ouroboros.orchestrator.playtest <site> <script.json> <out_dir>``.
+
+    Replays a saved play script and prints the screenshots it saved, so a worker
+    fixing what the screen showed can look at the page after each change.
+    """
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 3:
+        print("usage: python -m ouroboros.orchestrator.playtest <site> <script.json> <out_dir>")
+        return 2
+    site, script_file, out_dir = Path(args[0]), Path(args[1]), Path(args[2])
+    try:
+        script = parse_play_script(script_file.read_text(), site)
+    except OSError as exc:
+        print(f"cannot read the play script: {exc}")
+        return 2
+    if script is None:
+        print("the play script is not valid for this directory")
+        return 2
+    browser = installed_browser()
+    if browser is None:
+        print("no Chromium-family browser is installed")
+        return 1
+    if not out_dir.is_absolute():
+        out_dir = site / out_dir
+    for old in out_dir.glob("*.png") if out_dir.is_dir() else ():
+        old.unlink()
+    try:
+        report = play(site, script, out_dir, browser)
+    except Exception as exc:  # noqa: BLE001 - reported to the worker that ran it
+        print(f"the play did not finish: {exc}")
+        return 1
+    print("Screenshots, in order:")
+    for path in report.shots:
+        print(f"- {path}")
+    for line in report.errors:
+        print(f"page error: {line}")
+    for line in report.notes:
+        print(f"note: {line}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through the module entry point
+    raise SystemExit(main())
+
+
 __all__ = [
     "BROWSER_CANDIDATES",
     "MAX_SHOTS",
@@ -527,6 +573,7 @@ __all__ = [
     "PlayScript",
     "find_browser",
     "installed_browser",
+    "main",
     "parse_play_script",
     "play",
 ]

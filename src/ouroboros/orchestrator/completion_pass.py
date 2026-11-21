@@ -7,26 +7,27 @@ the formal evaluation judges only the Seed's criteria. A product that runs but
 misses capabilities users expect, or that breaks its own basic use while it
 adds them, was therefore approved as it stood.
 
-After such a run completes, two sessions run in the run's working directory,
-before the formal evaluation, so the evaluation judges the finished product:
+After such a run completes, before the formal evaluation, so the evaluation
+judges the finished product:
 
 1. a reviewer reads the code (``Read``/``Glob``/``Grep``, permission mode
    ``default``) and lists concrete defects: first anything in the request's
    basic use that does not work for a first-time user, then each expected line
    the code does not do yet;
-2. when it lists any, a worker with the run's tools and permission mode fixes
-   them, basic use first;
-3. after that worker, a second read-only reviewer lists only what now stops the
-   app from loading or its basic use from working (a fix that rewrites a file
-   can break what worked);
-4. when the app runs in a web browser from a static page and a Chromium-family
+2. when the app runs in a web browser from a static page and a Chromium-family
    browser is installed, it is played: a read-only reviewer reads the code and
    writes a short play script for a first-time user, the script runs in that
    browser headless (:mod:`ouroboros.orchestrator.playtest`), and a read-only
-   reviewer looks at the screenshots and lists what that user sees broken
-   (code reading misses a view that never shows the road ahead, or a banner
-   that never clears);
-5. a worker repairs what steps 3 and 4 listed, once.
+   reviewer looks at the screenshots and lists what that user sees broken.
+   Code reading misses a view that never shows the road ahead, a banner that
+   never clears, or a galaxy that is never drawn;
+3. a worker with the run's tools and permission mode fixes what steps 1 and 2
+   listed, basic use first. It gets the screenshots and, when it has a shell,
+   a command that replays the script so it can look at the page after a change;
+4. a second read-only code review lists what now stops the app from loading or
+   its basic use from working (a fix that rewrites a file can break what
+   worked), and the script is played and looked at once more;
+5. a worker repairs what step 4 found, once.
 
 A parent session that delegated the run (``_ooo_parent_*`` arguments) bounds
 both sessions as it bounded the run: its permission mode is the worker's, and
@@ -52,7 +53,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 import inspect
+import json
 from pathlib import Path
+import shlex
+import sys
 from typing import Any
 
 import structlog
@@ -92,11 +96,6 @@ STAGE_EVENT = "execution.completion_pass.updated"
 # browser start-up. Its own protocol calls time out well inside this.
 PLAY_BOUND_SECONDS = 180.0
 PLAYTEST_DIR = Path(".ouroboros") / "playtest"
-# Plays of one script: the first, and one after the repair to see whether what
-# the screen showed is gone. A worker cannot see the page, so a rendering defect
-# often survives one blind repair; what the replay still shows is repaired once
-# more, and nothing further runs.
-PLAY_ROUNDS = 2
 
 REVIEW_PROMPT = """You review an app an AI built for this request: {goal}
 
@@ -215,17 +214,33 @@ def build_play_look_prompt(
     )
 
 
-def build_fix_prompt(seed: Seed, defects: tuple[str, ...], shots: tuple[str, ...] = ()) -> str:
+def build_fix_prompt(
+    seed: Seed, defects: tuple[str, ...], shots: tuple[str, ...] = (), check: str | None = None
+) -> str:
     scope = seed.sourced_scope
     assert scope is not None
     listed = "\n".join(f"- {defect}" for defect in defects)
-    seen = (
-        " Some defects were seen on the screen while the app was played in a browser;"
-        f" the screenshots are {', '.join(shots)}. Open them to see what the user saw."
-        if shots
-        else ""
-    )
+    seen = ""
+    if shots:
+        seen = (
+            " Some defects were seen on the screen while the app was played in a browser;"
+            f" the screenshots are {', '.join(shots)}. Open them to see what the user saw."
+        )
+    if check:
+        seen += (
+            f" To see the page after your changes, run `{check}`: it plays the same steps in a"
+            " headless browser and prints the screenshots it saved. Open them, and keep changing"
+            " and checking until they no longer show those defects."
+        )
     return FIX_PROMPT.format(goal=scope.goal or seed.goal, defects=listed, seen=seen)
+
+
+def check_command(script_path: Path, out_dir: Path) -> str:
+    """The command a worker runs in the app's directory to replay the play script."""
+    return (
+        f"{shlex.quote(sys.executable)} -m ouroboros.orchestrator.playtest . "
+        f"{script_path.as_posix()} {out_dir.as_posix()}"
+    )
 
 
 async def _close(runtime: Any) -> None:
@@ -315,11 +330,6 @@ async def _announce(
         log.warning("execution.completion_pass.announce_failed", stage=stage, error=str(exc))
 
 
-_RECHECK_TEXT = {
-    "clean": " A second review found nothing broken.",
-    "found": " A second review found {n} broken part(s).",
-    "recheck_failed": " The second review did not finish.",
-}
 _PLAYTEST_TEXT = {
     "clean": " Playing it in a browser showed nothing broken.",
     "found": " Playing it in a browser showed {n} visible problem(s).",
@@ -329,10 +339,15 @@ _PLAYTEST_TEXT = {
     "play_failed": " Playing it in a browser did not finish.",
     "look_failed": " The review of the screenshots did not finish.",
 }
+_RECHECK_TEXT = {
+    "clean": " A second code review found nothing broken.",
+    "found": " A second code review found {n} broken part(s).",
+    "recheck_failed": " The second code review did not finish.",
+}
 _REPLAY_TEXT = {
-    "clean": " Played again after the repair, it showed nothing broken.",
-    "found": " Played again after the repair, it still showed {n} problem(s).",
-    "play_failed": " Playing it again after the repair did not finish.",
+    "clean": " Played again, it showed nothing broken.",
+    "found": " Played again, it still showed {n} problem(s).",
+    "play_failed": " Playing it again did not finish.",
     "look_failed": " The review of the second play did not finish.",
 }
 _REPAIR_TEXT = {
@@ -342,28 +357,26 @@ _REPAIR_TEXT = {
 
 
 def _with_record(run_result: MCPToolResult, record: dict[str, Any]) -> MCPToolResult:
-    status, found = record["status"], f"a reviewer found {record['defects']} defect(s)"
-    if status == "clean":
-        text = "the reviewer found no defects."
-    elif status == "review_failed":
+    status = record["status"]
+    if status == "review_failed":
         text = "review_failed; the product is as the run left it."
     else:
-        text = f"{found}; " + (
-            "a worker fixed them." if status == "fixed" else "the fix did not finish."
-        )
-    if "recheck" in record:
-        text += _RECHECK_TEXT[record["recheck"]].format(n=len(record.get("regressions", ())))
-    if "playtest" in record:
-        visible = len(record.get("visible_defects", ()))
-        text += _PLAYTEST_TEXT[record["playtest"]].format(n=visible)
-    if "repair" in record:
-        text += _REPAIR_TEXT[record["repair"]]
-    for round_no in range(2, PLAY_ROUNDS + 1):
-        if f"replay_{round_no}" in record:
-            still = len(record.get(f"replay_{round_no}_defects", ()))
-            text += _REPLAY_TEXT[record[f"replay_{round_no}"]].format(n=still)
-        if f"repair_{round_no}" in record:
-            text += _REPAIR_TEXT[record[f"repair_{round_no}"]]
+        n = record["defects"]
+        text = f"a code review found {n} defect(s)." if n else "a code review found no defects."
+        if "playtest" in record:
+            visible = len(record.get("visible_defects", ()))
+            text += _PLAYTEST_TEXT[record["playtest"]].format(n=visible)
+        if status == "fixed":
+            text += " A worker fixed them."
+        elif status == "fix_failed":
+            text += " The fix did not finish."
+        if "recheck" in record:
+            text += _RECHECK_TEXT[record["recheck"]].format(n=len(record.get("regressions", ())))
+        if "replay_2" in record:
+            still = len(record.get("replay_2_defects", ()))
+            text += _REPLAY_TEXT[record["replay_2"]].format(n=still)
+        if "repair" in record:
+            text += _REPAIR_TEXT[record["repair"]]
     text = f"\nCompletion pass: {text}\n"
     return MCPToolResult(
         content=(*run_result.content, MCPContentItem(type=ContentType.TEXT, text=text)),
@@ -426,12 +439,13 @@ async def complete_after_run(
         )
 
     async def fix(stage: str, defects: tuple[str, ...], shots: tuple[str, ...] = ()) -> str | None:
+        can_check = check is not None and "Bash" in worker_tools
         return await _stage(
             event_store,
             execution_id,
             stage,
             factory,
-            build_fix_prompt(seed, defects, shots),
+            build_fix_prompt(seed, defects, shots, check if can_check else None),
             tools=worker_tools,
             timeout_seconds=timeout_seconds,
             data={"defects": len(defects)},
@@ -476,28 +490,17 @@ async def complete_after_run(
         shots = tuple(path.relative_to(working_dir).as_posix() for path in report.shots)
         return ("found" if visible else "clean"), visible, shots
 
+    check: str | None = None
     reply = await review("review", build_review_prompt(seed))
     defects = parse_defects(reply) if reply is not None else ()
     record: dict[str, Any] = {"status": "review_failed", "defects": 0}
     if reply is not None:
         log.info("execution.completion_pass.reviewed", defects=len(defects), cwd=str(working_dir))
         record = {"status": "clean", "defects": 0}
-        broken: list[str] = []
         if defects:
-            fixed = await fix("fix", defects)
-            record = {
-                "status": "fixed" if fixed is not None else "fix_failed",
-                "defects": len(defects),
-                "defect_list": list(defects),
-            }
-            # A worker that rewrote a file, or stopped part-way, can break what worked.
-            recheck = await review("recheck", build_recheck_prompt(seed))
-            regressions = parse_defects(recheck) if recheck is not None else ()
-            record["recheck"] = (
-                "recheck_failed" if recheck is None else ("found" if regressions else "clean")
-            )
-            record["regressions"] = list(regressions)
-            broken.extend(regressions)
+            record["defect_list"] = list(defects)
+            record["defects"] = len(defects)
+        # Play the app before the fix, so the fix also gets what the screen shows.
         visible: tuple[str, ...] = ()
         shots: tuple[str, ...] = ()
         script: PlayScript | None = None
@@ -510,36 +513,49 @@ async def complete_after_run(
             if script is None:
                 record["playtest"] = "plan_failed" if plan is None else "not_planned"
             else:
+                script_path = PLAYTEST_DIR / "script.json"
+                try:
+                    (working_dir / PLAYTEST_DIR).mkdir(parents=True, exist_ok=True)
+                    (working_dir / script_path).write_text(
+                        json.dumps({"page": script.page, "steps": list(script.steps)})
+                    )
+                    check = check_command(script_path, PLAYTEST_DIR / "check")
+                except OSError as exc:
+                    log.warning("execution.completion_pass.script_not_saved", error=str(exc))
                 record["playtest"], visible, shots = await play_and_look(script, browser, 1)
         record["visible_defects"] = list(visible)
-        broken.extend(visible)
-        if broken:
-            repaired = await fix("repair", tuple(broken[:MAX_DEFECTS]), shots)
-            record["repair"] = "repaired" if repaired is not None else "repair_failed"
-            # The worker repaired what the screen showed without seeing the page.
-            for round_no in range(2, PLAY_ROUNDS + 1):
-                if not visible or repaired is None or script is None or browser is None:
-                    break
-                status, visible, shots = await play_and_look(script, browser, round_no)
-                record[f"replay_{round_no}"] = status
-                record[f"replay_{round_no}_defects"] = list(visible)
-                if visible:
-                    repaired = await fix(f"repair_{round_no}", visible, shots)
-                    record[f"repair_{round_no}"] = (
-                        "repaired" if repaired is not None else "repair_failed"
-                    )
+        found = (*defects, *visible)[:MAX_DEFECTS]
+        if found:
+            fixed = await fix("fix", found, shots)
+            record["status"] = "fixed" if fixed is not None else "fix_failed"
+            # A worker that rewrote a file, or stopped part-way, can break what worked,
+            # and a worker cannot be sure what the page shows now.
+            recheck = await review("recheck", build_recheck_prompt(seed))
+            regressions = parse_defects(recheck) if recheck is not None else ()
+            record["recheck"] = (
+                "recheck_failed" if recheck is None else ("found" if regressions else "clean")
+            )
+            record["regressions"] = list(regressions)
+            still: tuple[str, ...] = ()
+            if script is not None and browser is not None:
+                status, still, shots = await play_and_look(script, browser, 2)
+                record["replay_2"] = status
+                record["replay_2_defects"] = list(still)
+            broken = (*regressions, *still)[:MAX_DEFECTS]
+            if broken:
+                repaired = await fix("repair", broken, shots if still else ())
+                record["repair"] = "repaired" if repaired is not None else "repair_failed"
         log.info(
             "execution.completion_pass.completed",
             status=record["status"],
             defects=len(defects),
+            playtest=record["playtest"],
+            visible=len(visible),
             recheck=record.get("recheck"),
             regressions=len(record.get("regressions", ())),
-            playtest=record["playtest"],
-            visible=len(record["visible_defects"]),
-            repair=record.get("repair"),
             replay=record.get("replay_2"),
             still_visible=len(record.get("replay_2_defects", ())),
-            repair_2=record.get("repair_2"),
+            repair=record.get("repair"),
         )
     await _announce(event_store, execution_id, "done", 0.0, status=record["status"])
     return _with_record(run_result, record)
@@ -551,7 +567,6 @@ __all__ = [
     "PLAY_BOUND_SECONDS",
     "PLAY_LOOK_PROMPT",
     "PLAY_PLAN_PROMPT",
-    "PLAY_ROUNDS",
     "PLAYTEST_DIR",
     "RECHECK_PROMPT",
     "REVIEW_PROMPT",
@@ -560,6 +575,7 @@ __all__ = [
     "STAGE_EVENT",
     "WORKER_TOOLS",
     "build_fix_prompt",
+    "check_command",
     "build_play_look_prompt",
     "build_play_plan_prompt",
     "build_recheck_prompt",

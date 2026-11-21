@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
@@ -154,15 +156,18 @@ async def test_defects_are_reviewed_read_only_then_fixed_by_a_worker() -> None:
         "status": "fixed",
         "defects": 2,
         "defect_list": ["app.js:21 new tasks without a due date are hidden", "(core) no edit"],
-        "recheck": "clean",
-        "regressions": [],
         "playtest": "no_browser",
         "visible_defects": [],
+        "recheck": "clean",
+        "regressions": [],
     }
     assert result.meta["status"] == "completed"
     assert result.is_error is False
-    assert "a reviewer found 2 defect(s); a worker fixed them." in result.text_content
-    assert "A second review found nothing broken." in result.text_content
+    assert (
+        "Completion pass: a code review found 2 defect(s). It was not played: no"
+        " Chromium-family browser was found. A worker fixed them. A second code review found"
+        " nothing broken."
+    ) in result.text_content
 
 
 @pytest.mark.asyncio
@@ -183,8 +188,9 @@ async def test_what_the_fix_broke_is_found_again_and_repaired() -> None:
     assert record["recheck"] == "found"
     assert record["regressions"] == [regression[2:]]
     assert record["repair"] == "repaired"
-    assert "A second review found 1 broken part(s)." in result.text_content
-    assert "A worker repaired them." in result.text_content
+    assert "A second code review found 1 broken part(s). A worker repaired them." in (
+        result.text_content
+    )
 
 
 def test_the_recheck_asks_only_for_what_stops_basic_use() -> None:
@@ -417,75 +423,130 @@ def _app(tmp_path: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_the_app_is_played_and_what_its_screen_shows_is_repaired(tmp_path) -> None:
+async def test_the_app_is_played_before_the_fix_and_again_after_it(tmp_path) -> None:
     app = _app(tmp_path)
     player = _Player()
     visible = "- game.js: the GO! banner stays on screen during the race"
-    factory = _Factory(["- (core) no lap count", "done", "NONE", PLAN, visible, "done", "NONE"])
+    factory = _Factory(["- (core) no lap count", PLAN, visible, "done", "NONE", "NONE"])
 
     result = await _complete(
         factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=player
     )
 
-    planner, looker, repairer = factory.created[3], factory.created[4], factory.created[5]
-    assert planner["permission_mode"] == looker["permission_mode"] == "default"
-    assert factory.calls[3]["tools"] == factory.calls[4]["tools"] == list(REVIEWER_TOOLS)
-    assert factory.calls[3]["prompt"] == completion_pass.build_play_plan_prompt(
+    reviewer, planner, looker, fixer, rechecker, relooker = factory.created
+    for session in (reviewer, planner, looker, rechecker, relooker):
+        assert session["permission_mode"] == "default"
+    assert [call["tools"] for call in factory.calls] == [
+        list(REVIEWER_TOOLS),
+        list(REVIEWER_TOOLS),
+        list(REVIEWER_TOOLS),
+        list(WORKER_TOOLS),
+        list(REVIEWER_TOOLS),
+        list(REVIEWER_TOOLS),
+    ]
+    assert "permission_mode" not in fixer
+    assert factory.calls[1]["prompt"] == completion_pass.build_play_plan_prompt(
         Seed.from_dict(yaml.safe_load(_seed_content()))
     )
     (site, script, out_dir, browser), replay = player.calls
     assert (site, out_dir, browser) == (app, app / ".ouroboros/playtest/round-1", "/bin/chrome")
-    assert replay[1] is script  # the same script, played again after the repair
-    assert replay[2] == app / ".ouroboros/playtest/round-2"
     assert script.page == "index.html"
     assert [next(iter(step)) for step in script.steps] == ["shot", "click_text", "key", "shot"]
-    look = factory.calls[4]["prompt"]
+    assert replay[1] is script and replay[2] == app / ".ouroboros/playtest/round-2"
+    look = factory.calls[2]["prompt"]
     assert ".ouroboros/playtest/round-1/01-shot.png, .ouroboros/playtest/round-1/02-shot.png" in (
         look
     )
     assert "- TypeError: lap is undefined" in look
     assert '2. click_text "Start race"' in look
     assert "Open and look at every screenshot. Do not modify any file." in look
-    assert "permission_mode" not in repairer
-    assert factory.calls[5]["tools"] == list(WORKER_TOOLS)
-    assert visible in factory.calls[5]["prompt"]
-    assert (
-        "the screenshots are .ouroboros/playtest/round-1/01-shot.png"
-        in (factory.calls[5]["prompt"])
+    fix_prompt = factory.calls[3]["prompt"]
+    assert "- (core) no lap count\n" + visible in fix_prompt  # code defects, then the screen's
+    assert "the screenshots are .ouroboros/playtest/round-1/01-shot.png" in fix_prompt
+    check = completion_pass.check_command(
+        completion_pass.PLAYTEST_DIR / "script.json", completion_pass.PLAYTEST_DIR / "check"
     )
-    assert factory.calls[6]["tools"] == list(REVIEWER_TOOLS)
-    assert ".ouroboros/playtest/round-2/01-shot.png" in factory.calls[6]["prompt"]
-    record = result.meta["completion_pass"]
-    assert record["playtest"] == "found"
-    assert record["visible_defects"] == [visible[2:]]
-    assert record["repair"] == "repaired"
-    assert record["replay_2"] == "clean"
-    assert "repair_2" not in record
+    assert f"run `{check}`" in fix_prompt
+    saved = json.loads((app / ".ouroboros/playtest/script.json").read_text())
+    assert saved == {"page": "index.html", "steps": [dict(step) for step in script.steps]}
+    assert ".ouroboros/playtest/round-2/01-shot.png" in factory.calls[5]["prompt"]
+    assert result.meta["completion_pass"] == {
+        "status": "fixed",
+        "defects": 1,
+        "defect_list": ["(core) no lap count"],
+        "playtest": "found",
+        "visible_defects": [visible[2:]],
+        "recheck": "clean",
+        "regressions": [],
+        "replay_2": "clean",
+        "replay_2_defects": [],
+    }
     assert (
-        "Playing it in a browser showed 1 visible problem(s). A worker repaired them."
-        " Played again after the repair, it showed nothing broken."
+        "a code review found 1 defect(s). Playing it in a browser showed 1 visible problem(s)."
+        " A worker fixed them. A second code review found nothing broken. Played again, it"
+        " showed nothing broken."
     ) in result.text_content
 
 
+def test_the_check_command_replays_the_saved_script_with_this_python() -> None:
+    command = completion_pass.check_command(
+        Path(".ouroboros/playtest/script.json"), Path(".ouroboros/playtest/check")
+    )
+
+    assert command.endswith(
+        " -m ouroboros.orchestrator.playtest . .ouroboros/playtest/script.json"
+        " .ouroboros/playtest/check"
+    )
+    assert sys.executable in command
+
+
 @pytest.mark.asyncio
-async def test_what_the_fix_broke_and_what_the_screen_shows_go_to_one_repair(tmp_path) -> None:
+async def test_a_worker_without_a_shell_gets_no_check_command(tmp_path) -> None:
+    factory = _Factory(["NONE", PLAN, "- app.js: not drawn", "done", "NONE", "NONE"])
+
+    await _complete(
+        factory,
+        working_dir=_app(tmp_path),
+        browser_finder=lambda: "/bin/chrome",
+        player=_Player(),
+        run_arguments={DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG: ["Read", "Edit", "Glob", "Grep"]},
+    )
+
+    fix_prompt = factory.calls[3]["prompt"]
+    assert "the screenshots are" in fix_prompt
+    assert "To see the page after your changes" not in fix_prompt
+
+
+@pytest.mark.asyncio
+async def test_what_the_recheck_and_the_replay_find_go_to_one_repair(tmp_path) -> None:
     regression = "- index.html: game.js reads #lapTotal, which the page does not have"
-    visible = "- game.js: the road ahead is drawn as stray lines"
-    factory = _Factory(["- (core) no lap count", "done", regression, PLAN, visible, "done", "NONE"])
+    still = "- app.js: the galaxy is still a white blob"
+    factory = _Factory(["NONE", PLAN, "- app.js: not drawn", "done", regression, still, "done"])
 
     result = await _complete(
         factory, working_dir=_app(tmp_path), browser_finder=lambda: "/bin/chrome", player=_Player()
     )
 
     assert len(factory.created) == 7
-    repair_prompt = factory.calls[5]["prompt"]
-    assert f"{regression}\n{visible}" in repair_prompt
-    assert result.meta["completion_pass"]["recheck"] == "found"
-    assert result.meta["completion_pass"]["repair"] == "repaired"
+    repair_prompt = factory.calls[6]["prompt"]
+    assert factory.calls[6]["tools"] == list(WORKER_TOOLS)
+    assert f"{regression}\n{still}" in repair_prompt
+    assert ".ouroboros/playtest/round-2/01-shot.png" in repair_prompt
+    assert "To see the page after your changes" in repair_prompt
+    record = result.meta["completion_pass"]
+    assert (record["recheck"], record["replay_2"], record["repair"]) == (
+        "found",
+        "found",
+        "repaired",
+    )
+    assert record["replay_2_defects"] == [still[2:]]
+    assert "Played again, it still showed 1 problem(s). A worker repaired them." in (
+        result.text_content
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_clean_review_still_plays_the_app(tmp_path) -> None:
+async def test_a_clean_review_and_a_clean_play_run_no_worker(tmp_path) -> None:
     player = _Player(errors=())
     factory = _Factory(["NONE", PLAN, "NONE"])
 
@@ -494,6 +555,7 @@ async def test_a_clean_review_still_plays_the_app(tmp_path) -> None:
     )
 
     assert len(factory.created) == 3
+    assert len(player.calls) == 1
     assert "The page logged no errors." in factory.calls[2]["prompt"]
     assert result.meta["completion_pass"] == {
         "status": "clean",
@@ -502,6 +564,19 @@ async def test_a_clean_review_still_plays_the_app(tmp_path) -> None:
         "visible_defects": [],
     }
     assert "Playing it in a browser showed nothing broken." in result.text_content
+
+
+@pytest.mark.asyncio
+async def test_what_only_the_screen_shows_is_fixed(tmp_path) -> None:
+    factory = _Factory(["NONE", PLAN, "- app.js: the galaxy is not drawn", "done", "NONE", "NONE"])
+
+    result = await _complete(
+        factory, working_dir=_app(tmp_path), browser_finder=lambda: "/bin/chrome", player=_Player()
+    )
+
+    assert "- app.js: the galaxy is not drawn" in factory.calls[3]["prompt"]
+    assert result.meta["completion_pass"]["status"] == "fixed"
+    assert result.meta["completion_pass"]["defects"] == 0
 
 
 @pytest.mark.asyncio
@@ -525,7 +600,7 @@ async def test_an_app_that_cannot_be_played_is_left_as_it_is(
 
     assert len(factory.created) == sessions
     assert result.meta["completion_pass"]["playtest"] == status
-    assert "repair" not in result.meta["completion_pass"]
+    assert result.meta["completion_pass"]["status"] == "clean"
     assert result.meta["status"] == "completed"
 
 
@@ -543,7 +618,7 @@ async def test_no_browser_means_no_play_and_no_extra_session(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_the_play_stages_are_announced_with_their_bounds(tmp_path) -> None:
     events = _Events()
-    factory = _Factory(["NONE", PLAN, "- game.js: banner stays", "done", "NONE"])
+    factory = _Factory(["NONE", PLAN, "- game.js: banner stays", "done", "NONE", "NONE"])
 
     await _complete(
         factory,
@@ -554,14 +629,15 @@ async def test_the_play_stages_are_announced_with_their_bounds(tmp_path) -> None
         execution_id="exec_1",
     )
 
-    bound = completion_pass.SESSION_TIMEOUT_SECONDS
+    bound, play = completion_pass.SESSION_TIMEOUT_SECONDS, completion_pass.PLAY_BOUND_SECONDS
     assert events.stages() == [
         ("review", bound),
         ("play_plan", bound),
-        ("play", completion_pass.PLAY_BOUND_SECONDS),
+        ("play", play),
         ("play_review", bound),
-        ("repair", bound),
-        ("play_2", completion_pass.PLAY_BOUND_SECONDS),
+        ("fix", bound),
+        ("recheck", bound),
+        ("play_2", play),
         ("play_review_2", bound),
         ("done", 0.0),
     ]
@@ -579,56 +655,3 @@ def test_the_play_prompts_say_what_to_write_and_what_to_look_for() -> None:
     assert plan.endswith("If the app does not run that way, reply with the single word NONE.")
     assert "Do not list missing features." in completion_pass.PLAY_LOOK_PROMPT
     assert "text or overlays that stay" in completion_pass.PLAY_LOOK_PROMPT
-
-
-@pytest.mark.asyncio
-async def test_what_the_screen_still_shows_after_the_repair_is_repaired_once_more(tmp_path) -> None:
-    player = _Player()
-    first, still = "- app.js: the galaxy is not drawn", "- app.js: the galaxy is a white blob"
-    factory = _Factory(["NONE", PLAN, first, "done", still, "done"])
-
-    result = await _complete(
-        factory, working_dir=_app(tmp_path), browser_finder=lambda: "/bin/chrome", player=player
-    )
-
-    assert len(player.calls) == 2  # no third play
-    assert len(factory.created) == 6
-    second_repair = factory.calls[5]["prompt"]
-    assert still in second_repair and first not in second_repair
-    assert ".ouroboros/playtest/round-2/01-shot.png" in second_repair
-    assert factory.calls[5]["tools"] == list(WORKER_TOOLS)
-    record = result.meta["completion_pass"]
-    assert (record["repair"], record["replay_2"], record["repair_2"]) == (
-        "repaired",
-        "found",
-        "repaired",
-    )
-    assert record["replay_2_defects"] == [still[2:]]
-    assert (
-        "Played again after the repair, it still showed 1 problem(s). A worker repaired them."
-        in (result.text_content)
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("replies", "replayed"),
-    [
-        (["- (core) x", "done", "- app.js: broken", PLAN, "NONE", "done"], False),
-        (["NONE", PLAN, "- app.js: not drawn", None, None], False),
-    ],
-)
-async def test_no_replay_without_a_visible_defect_or_after_a_failed_repair(
-    tmp_path, replies, replayed
-) -> None:
-    player = _Player()
-
-    result = await _complete(
-        _Factory(list(replies)),
-        working_dir=_app(tmp_path),
-        browser_finder=lambda: "/bin/chrome",
-        player=player,
-    )
-
-    assert len(player.calls) == 1
-    assert ("replay_2" in result.meta["completion_pass"]) is replayed

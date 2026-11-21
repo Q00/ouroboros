@@ -197,3 +197,54 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
     assert all(p.read_bytes().startswith(b"\x89PNG") for p in report.shots)
     assert any("late failure" in line for line in report.errors)
     assert report.notes == ["no visible control labelled 'missing'"]
+
+
+def test_the_replay_command_plays_a_saved_script_and_lists_its_shots(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    site = _site(tmp_path)
+    script_file = site / "script.json"
+    script_file.write_text(json.dumps({"page": "index.html", "steps": [{"shot": "a"}]}))
+    old = site / "check" / "01-stale.png"
+    old.parent.mkdir()
+    old.write_bytes(b"old")
+    calls = []
+
+    def fake_play(where, script, out_dir, browser):
+        calls.append((where, script.page, out_dir, browser))
+        shot = out_dir / "01-a.png"
+        shot.write_bytes(b"png")
+        return playtest.PlayReport(shots=[shot], errors=["TypeError: x"])
+
+    monkeypatch.setattr(playtest, "installed_browser", lambda: "/bin/chrome")
+    monkeypatch.setattr(playtest, "play", fake_play)
+
+    code = playtest.main([str(site), str(script_file), "check"])
+
+    assert code == 0
+    assert calls == [(site, "index.html", site / "check", "/bin/chrome")]
+    assert not old.exists()  # shots from an earlier check never pass for new ones
+    out = capsys.readouterr().out
+    assert f"- {site / 'check' / '01-a.png'}" in out
+    assert "page error: TypeError: x" in out
+
+
+@pytest.mark.parametrize(
+    ("args", "browser", "code", "message"),
+    [
+        (["only-one"], "/bin/chrome", 2, "usage:"),
+        (["{site}", "{site}/missing.json", "check"], "/bin/chrome", 2, "cannot read"),
+        (["{site}", "{site}/bad.json", "check"], "/bin/chrome", 2, "not valid"),
+        (["{site}", "{site}/good.json", "check"], None, 1, "no Chromium-family browser"),
+    ],
+)
+def test_the_replay_command_says_why_it_did_not_play(
+    tmp_path, monkeypatch, capsys, args, browser, code, message
+) -> None:
+    site = _site(tmp_path)
+    (site / "bad.json").write_text('{"page": "../x.html", "steps": [{"shot": "a"}]}')
+    (site / "good.json").write_text('{"page": "index.html", "steps": [{"shot": "a"}]}')
+    monkeypatch.setattr(playtest, "installed_browser", lambda: browser)
+
+    assert playtest.main([a.format(site=site) for a in args]) == code
+    assert message in capsys.readouterr().out
