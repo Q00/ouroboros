@@ -309,6 +309,49 @@ Malformed wrapper receipts remain rejected. A current-attempt Bash start/complet
 
 For the current recursive execution flow, see [parallel_executor.py](../src/ouroboros/orchestrator/parallel_executor.py) and [runner.py](../src/ouroboros/orchestrator/runner.py).
 
+**Completion pass (between execution and evaluation):**
+
+A request names a kind of product ("a racing game", "a to-do app") but not
+everything a user of that kind of product expects. For new work (a workspace
+with no existing code), `ooo auto` researches that list once, beside the
+interview: `auto/expectations.py` runs one read-only agent session, with live
+web search where the backend offers it, and the Seed carries the result as
+`SourcedScope.expected_experience`. The run's worker is told to build to it.
+
+One worker attempt can still miss lines of that list, or break the request's
+basic use while it adds them, and the formal evaluation judges only the Seed's
+criteria. So after a run of such a Seed completes, and before evaluation,
+`orchestrator/completion_pass.py` reviews and completes the product:
+
+1. A read-only reviewer reads the code and lists defects: first anything in
+   the request's basic use that does not work for a first-time user, then each
+   expected line the code does not do yet.
+2. When the app runs in a web browser from a static page and a Chromium-family
+   browser is installed (not on Windows), it is played. A read-only reviewer
+   writes a short first-time-user play script, `orchestrator/playtest.py` runs
+   it in that browser headless over `--remote-debugging-pipe`, serving the app
+   read-only on a loopback port, and a reviewer looks at the screenshots and
+   lists what that user sees broken. Screenshots and the script are kept under
+   `.ouroboros/playtest/` in the app's directory.
+3. A worker with the run's tools and permission mode fixes both lists, basic
+   use first. It gets the screenshots and, when it has a shell, a command that
+   has the script played again; the command only leaves a request under
+   `.ouroboros/playtest/check/`, and the pass, on the host, plays and answers,
+   so a sandboxed worker can use it.
+4. A second read-only code review lists what now stops the app from loading or
+   working, and the app is played and looked at once more.
+5. A worker repairs what step 4 found, once.
+
+Each play is bounded (180 s, then the browser is killed); each session has a
+hang guard and one retry after a provider error. A delegated run's parent
+bounds both sessions as it bounded the run. The pass is best effort and never
+changes the run verdict: a Seed without expected experience, a run that did not
+complete, a backend that dispatches through a host plugin, or a failed session
+leaves the product as the run left it. It adds a `completion_pass` record to
+the run result and one `execution.completion_pass.updated` event per stage
+([events](./events.md#executioncompletion_passupdated)). The module docstrings
+are the contract.
+
 ### Phase 3: Resilience
 
 When execution stalls, the resilience system detects stagnation and applies lateral thinking.

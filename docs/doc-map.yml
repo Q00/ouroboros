@@ -160,6 +160,22 @@
 - sources: [src/ouroboros/orchestrator/level_context.py]
   docs: [docs/architecture.md]
   note: Level context.
+- sources:
+    - src/ouroboros/orchestrator/completion_pass.py
+    - src/ouroboros/orchestrator/playtest.py
+  docs: [docs/architecture.md, docs/events.md, docs/auto-runtime-semantics.md]
+  note: >-
+    The module docstrings are the contract. architecture.md: "Completion pass"
+    block in Phase 2 (steps, bounds, when it is skipped). events.md:
+    `execution.completion_pass.updated` stages and fields.
+    auto-runtime-semantics.md: the completion pass row.
+- sources: [src/ouroboros/auto/expectations.py]
+  docs: [docs/architecture.md, docs/events.md, docs/auto-runtime-semantics.md]
+  note: >-
+    architecture.md: the research paragraph of the "Completion pass" block.
+    events.md: `auto.expectations.researched` fields and outcomes.
+    auto-runtime-semantics.md: the expected-experience research row (timeout
+    variable, when it is skipped).
 - sources: [src/ouroboros/orchestrator/evidence/command_replay.py]
   docs: [docs/contributing/verifier-evidence-policy.md]
   note: Replay selection, isolation, output-filter pipelines, claim linkage and the denylist.
