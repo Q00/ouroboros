@@ -108,6 +108,11 @@ class _Events:
         return [(e.data["stage"], e.data["bound_seconds"]) for e in self.appended]
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_wait(monkeypatch) -> None:
+    monkeypatch.setattr(completion_pass, "RETRY_DELAY_SECONDS", 0.0)
+
+
 async def _complete(factory: _Factory, **overrides: Any) -> MCPToolResult:
     kwargs: dict[str, Any] = {
         "seed_content": _seed_content(),
@@ -162,9 +167,9 @@ async def test_a_clean_review_runs_no_worker() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("replies", "status"),
-    [([None], "review_failed"), (["- broken", None], "fix_failed")],
+    [([None, None], "review_failed"), (["- broken", None, None], "fix_failed")],
 )
-async def test_a_failed_session_leaves_the_run_verdict(replies, status) -> None:
+async def test_a_session_that_fails_twice_leaves_the_run_verdict(replies, status) -> None:
     result = await _complete(_Factory(list(replies)))
 
     assert result.meta["completion_pass"]["status"] == status
@@ -174,12 +179,28 @@ async def test_a_failed_session_leaves_the_run_verdict(replies, status) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_hung_session_is_bounded() -> None:
-    result = await asyncio.wait_for(
-        _complete(_Factory(["x"], hang=True), timeout_seconds=0.05), timeout=5
-    )
+@pytest.mark.parametrize(
+    ("replies", "status"),
+    [([None, "NONE"], "clean"), (["- broken", None, "done"], "fixed")],
+)
+async def test_a_session_that_ends_in_an_error_is_tried_once_more(replies, status) -> None:
+    factory = _Factory(list(replies))
+
+    result = await _complete(factory)
+
+    assert result.meta["completion_pass"]["status"] == status
+    assert len(factory.created) == len(replies)
+    assert all(runtime.closed for runtime in factory.runtimes)
+
+
+@pytest.mark.asyncio
+async def test_a_hung_session_is_bounded_and_not_tried_again() -> None:
+    factory = _Factory(["x", "x"], hang=True)
+
+    result = await asyncio.wait_for(_complete(factory, timeout_seconds=0.05), timeout=5)
 
     assert result.meta["completion_pass"]["status"] == "review_failed"
+    assert len(factory.created) == 1
 
 
 @pytest.mark.asyncio
@@ -253,7 +274,8 @@ async def test_a_plugin_dispatched_backend_is_left_alone(monkeypatch) -> None:
     [
         (["- broken", "done"], ["review", "fix", "done"], "fixed"),
         (["NONE"], ["review", "done"], "clean"),
-        ([None], ["review", "done"], "review_failed"),
+        ([None, "NONE"], ["review", "review", "done"], "clean"),
+        ([None, None], ["review", "review", "done"], "review_failed"),
     ],
 )
 async def test_each_stage_is_announced_with_the_most_it_can_take(replies, stages, status) -> None:
@@ -267,6 +289,8 @@ async def test_each_stage_is_announced_with_the_most_it_can_take(replies, stages
     bound = completion_pass.SESSION_TIMEOUT_SECONDS
     assert events.stages() == [(stage, 0.0 if stage == "done" else bound) for stage in stages]
     assert events.appended[-1].data["status"] == status
+    attempts = [e.data["attempt"] for e in events.appended if e.data["stage"] == "review"]
+    assert attempts == list(range(1, len(attempts) + 1))
 
 
 @pytest.mark.asyncio

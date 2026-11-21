@@ -24,7 +24,9 @@ no tool that writes, nothing runs.
 
 The pass is best effort. A Seed without expected experience, a run that did not
 complete, a backend that dispatches through a host plugin, or a session that
-fails or hangs leaves the product as the run left it. The pass never changes
+fails or hangs leaves the product as the run left it. A session that ends in a
+provider error (a model at capacity, say) is tried once more after a short wait;
+a hung session is not. The pass never changes
 the run verdict; it adds a ``completion_pass`` record to the run result.
 
 The pass runs after ``execution.terminal``, while the run job is still open. A
@@ -61,6 +63,9 @@ WORKER_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "Bash", "Glob", "Grep"
 WRITING_TOOLS = frozenset({"Write", "Edit", "Bash"})
 # Hang guard for one session: a runtime that never returns. Not a time budget.
 SESSION_TIMEOUT_SECONDS = 1800.0
+# One more try for a session that ended in an error, after this wait.
+SESSION_ATTEMPTS = 2
+RETRY_DELAY_SECONDS = 30.0
 MAX_DEFECTS = 40
 MAX_DEFECT_CHARS = 400
 NO_DEFECTS = "NONE"
@@ -147,31 +152,60 @@ async def _session(
     tools: tuple[str, ...],
     timeout_seconds: float,
     **runtime_kwargs: Any,
-) -> str | None:
-    """Run one session; its final message, or ``None`` when it did not finish."""
+) -> tuple[str | None, bool]:
+    """Run one session: its final message (``None`` when it did not finish) and
+    whether the failure was an error worth one more try."""
     from ouroboros.orchestrator.runtime_factory import preflight_agent_runtime
 
     try:
         runtime = await asyncio.to_thread(factory, **runtime_kwargs)
     except Exception as exc:  # noqa: BLE001 - best effort: no runtime, no pass
         log.warning("execution.completion_pass.runtime_failed", error=str(exc))
-        return None
+        return None, False
     try:
         if preflight_agent_runtime(runtime) is not None:
-            return None
+            return None, False
         result = await asyncio.wait_for(
             runtime.execute_task_to_result(prompt, tools=list(tools)),
             timeout=timeout_seconds,
         )
-    except Exception as exc:  # noqa: BLE001 - a failed or hung session ends the pass
+    except TimeoutError:
+        log.warning("execution.completion_pass.session_hung", timeout_seconds=timeout_seconds)
+        return None, False
+    except Exception as exc:  # noqa: BLE001 - a failed session ends the pass
         log.warning("execution.completion_pass.session_failed", error=str(exc))
-        return None
+        return None, True
     finally:
         await _close(runtime)
     if result.is_err:
         log.warning("execution.completion_pass.session_failed", error=str(result.error))
-        return None
-    return result.value.final_message or ""
+        return None, True
+    return result.value.final_message or "", False
+
+
+async def _stage(
+    event_store: Any,
+    execution_id: str | None,
+    stage: str,
+    factory: Callable[..., Any],
+    prompt: str,
+    *,
+    tools: tuple[str, ...],
+    timeout_seconds: float,
+    data: Mapping[str, Any],
+    **runtime_kwargs: Any,
+) -> str | None:
+    """Announce and run one stage's session, once more after an error."""
+    for attempt in range(1, SESSION_ATTEMPTS + 1):
+        if attempt > 1:
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
+        await _announce(event_store, execution_id, stage, timeout_seconds, attempt=attempt, **data)
+        reply, retryable = await _session(
+            factory, prompt, tools=tools, timeout_seconds=timeout_seconds, **runtime_kwargs
+        )
+        if reply is not None or not retryable:
+            return reply
+    return None
 
 
 async def _announce(
@@ -240,12 +274,15 @@ async def complete_after_run(
     from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
     factory = runtime_factory or create_agent_runtime
-    await _announce(event_store, execution_id, "review", timeout_seconds)
-    reply = await _session(
+    stage_args = (event_store, execution_id)
+    reply = await _stage(
+        *stage_args,
+        "review",
         factory,
         build_review_prompt(seed),
         tools=reviewer_tools,
         timeout_seconds=timeout_seconds,
+        data={},
         backend=runtime_backend,
         model=None,
         permission_mode=REVIEWER_PERMISSION_MODE,
@@ -257,12 +294,14 @@ async def complete_after_run(
         log.info("execution.completion_pass.reviewed", defects=len(defects), cwd=str(working_dir))
         record = {"status": "clean", "defects": 0}
     if defects:
-        await _announce(event_store, execution_id, "fix", timeout_seconds, defects=len(defects))
-        fixed = await _session(
+        fixed = await _stage(
+            *stage_args,
+            "fix",
             factory,
             build_fix_prompt(seed, defects),
             tools=worker_tools,
             timeout_seconds=timeout_seconds,
+            data={"defects": len(defects)},
             backend=runtime_backend,
             model=resolve_execution_model(runtime_backend),
             cwd=working_dir,
