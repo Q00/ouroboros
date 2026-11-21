@@ -19,6 +19,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 from uuid import NAMESPACE_URL, uuid5
 import weakref
 
@@ -44,6 +45,10 @@ class ProjectIdentityError(ValueError):
 
 class ProjectIdentityUnavailableError(ProjectIdentityError):
     """Raised when the installed Git boundary cannot answer deterministically."""
+
+    def __init__(self, message: str, *, git_query: dict[str, object] | None = None) -> None:
+        super().__init__(message)
+        self.git_query = git_query
 
 
 class ProjectIdentityGitVersionError(ProjectIdentityError):
@@ -257,6 +262,30 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
+def _git_query_diagnostics(
+    arguments: tuple[str, ...],
+    stage: str,
+    started: float,
+    *,
+    exception: OSError | subprocess.SubprocessError | None = None,
+    return_code: int | None = None,
+) -> dict[str, object]:
+    # Internal Git queries use fixed options. Redact their checkout and gitdir paths.
+    args = ["--git-dir=<path>" if arg.startswith("--git-dir=") else arg for arg in arguments]
+    if len(args) > 1 and args[0] == "-C":
+        args[1] = "<path>"
+    return {
+        "command": ["git", *args],
+        "stage": stage,
+        "exception_type": type(exception).__name__ if exception is not None else None,
+        "errno": getattr(exception, "errno", None),
+        "winerror": getattr(exception, "winerror", None),
+        "return_code": return_code,
+        "timeout_seconds": _GIT_TIMEOUT_SECONDS,
+        "elapsed_seconds": time.monotonic() - started,
+    }
+
+
 def _run_git_command(*arguments: str) -> bytes:
     """Run one bounded, non-interactive Git command and return complete stdout.
 
@@ -264,8 +293,11 @@ def _run_git_command(*arguments: str) -> bytes:
     exit-code distinction between malformed topology and transient repository
     I/O.
     """
+    started = time.monotonic()
+    stage = "temporary_output_open"
     try:
         with tempfile.TemporaryFile() as output:
+            stage = "git_process"
             completed = subprocess.run(
                 ["git", *arguments],
                 check=False,
@@ -278,16 +310,28 @@ def _run_git_command(*arguments: str) -> bytes:
             )
             if completed.returncode != 0:
                 raise ProjectIdentityUnavailableError(
-                    "Git query failed before topology could be proven"
+                    "Git query failed before topology could be proven",
+                    git_query=_git_query_diagnostics(
+                        arguments, "git_exit", started, return_code=completed.returncode
+                    ),
                 )
+            stage = "output_read"
             if output.tell() > _MAX_GIT_OUTPUT_LENGTH:
-                raise ProjectIdentityUnavailableError("Git query output exceeds its bound")
+                raise ProjectIdentityUnavailableError(
+                    "Git query output exceeds its bound",
+                    git_query=_git_query_diagnostics(arguments, stage, started),
+                )
             output.seek(0)
-            return output.read()
-    except ProjectIdentityUnavailableError:
-        raise
+            data = output.read()
+            stage = "temporary_output_close"
+            return data
     except (OSError, subprocess.SubprocessError) as exc:
-        raise ProjectIdentityUnavailableError("Git query is temporarily unavailable") from exc
+        if isinstance(exc, subprocess.TimeoutExpired):
+            stage = "git_wait"
+        raise ProjectIdentityUnavailableError(
+            "Git query is temporarily unavailable",
+            git_query=_git_query_diagnostics(arguments, stage, started, exception=exc),
+        ) from exc
 
 
 def _run_git(start: Path, *arguments: str) -> bytes:
@@ -1067,12 +1111,20 @@ def resolve_managed_project_identity(
             )
         )
     )
-    _require_supported_git()
-    source = _source_project_identity(
-        canonical_source_root,
-        canonical_source_workspace,
-    )
-    execution = _resolve_canonical_project_identity(canonical_execution_workspace)
+    checkout = "git_version"
+    try:
+        _require_supported_git()
+        checkout = "source"
+        source = _source_project_identity(
+            canonical_source_root,
+            canonical_source_workspace,
+        )
+        checkout = "worktree"
+        execution = _resolve_canonical_project_identity(canonical_execution_workspace)
+    except ProjectIdentityUnavailableError as exc:
+        if exc.git_query is not None:
+            exc.git_query["checkout"] = checkout
+        raise
     # This declared scope comparison preserves the public error taxonomy only.
     # Acceptance below still requires Git-proven checkout and resolved scope.
     try:
