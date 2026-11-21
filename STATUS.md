@@ -14,6 +14,6 @@
 ## AI 실행 맥락
 
 - 마지막 소스 커밋: c70db9a15f8622860b90b9de12e528ba401e2a4a
-- 마지막 문서 커밋: f3a007d
+- 마지막 문서 커밋: e68236d
 - 지금 손댄 파일: 없음. audit worktree는 clean
 - 다음 할 일: PR #3089 검토 후 serial project-identity 실패와 MCP 2 전체 suite 완료 여부를 maintainer가 재검증한다.
