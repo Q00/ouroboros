@@ -24,6 +24,19 @@ tests/
 
 ## Running Tests
 
+### Full Repository Suite
+
+The complete collection includes the MCP 2 test surface, which is kept in its
+own dependency group because it conflicts with the MCP 1.x Claude SDK profile.
+Run the full suite with the test group enabled:
+
+```bash
+uv run --group mcp-test pytest
+```
+
+Running `uv run pytest` without that group skips collection of MCP 2 tests and
+fails during collection when those modules import the optional `mcp` package.
+
 ### All Unit Tests
 
 ```bash
