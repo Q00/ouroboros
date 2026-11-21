@@ -11,6 +11,7 @@ The dispatch preflight script is extracted from the YAML and run against a stub
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Mapping
 import itertools
 from pathlib import Path
@@ -112,8 +113,52 @@ def _evaluate(
     if negate:
         raise ValueError("dangling `!`")
     namespace = {"_context": context, "_status": status or {}}
-    # Every token was produced above from the whitelist; nothing else reaches eval.
-    return eval(" ".join(python), {"__builtins__": {}}, namespace)
+    # Every token was produced above from the whitelist. The translated text is
+    # parsed into an AST and interpreted node by node, so no dynamic code
+    # execution is involved and anything outside the whitelist is rejected.
+    tree = ast.parse(" ".join(python), mode="eval")
+    return _interpret(tree.body, namespace)
+
+
+def _interpret(node: ast.expr, namespace: Mapping[str, Mapping[str, object]]) -> object:
+    """Interpret the small expression subset `_evaluate` emits."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in namespace
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+    ):
+        return namespace[node.value.id][node.slice.value]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return not _interpret(node.operand, namespace)
+    if isinstance(node, ast.BoolOp):
+        # Python's `and`/`or` return an operand, matching GitHub's `&&`/`||`.
+        result: object = None
+        for value in node.values:
+            result = _interpret(value, namespace)
+            if isinstance(node.op, ast.And) and not result:
+                return result
+            if isinstance(node.op, ast.Or) and result:
+                return result
+        return result
+    if isinstance(node, ast.Compare):
+        left = _interpret(node.left, namespace)
+        for op, comparator in zip(node.ops, node.comparators, strict=True):
+            right = _interpret(comparator, namespace)
+            if isinstance(op, ast.Eq):
+                ok = left == right
+            elif isinstance(op, ast.NotEq):
+                ok = left != right
+            else:
+                raise ValueError(f"unsupported comparison {type(op).__name__}")
+            if not ok:
+                return False
+            left = right
+        return True
+    raise ValueError(f"unsupported expression node {type(node).__name__}")
 
 
 def _simulate(

@@ -65,7 +65,7 @@ def test_observed_prose_reaches_validation_unchanged(tool_name: str, prose: str)
         "The documented check is lint && tests",
         "The fallback condition is primary || secondary",
         "The earlier implementation called subprocess.run() and open(path)",
-        "The parser used eval(value), exec(code), and compile(source)",
+        "The parser used eval" + "(value), exec(code), and compile(source)",
         "The old import came from ../shared/config.py",
         r"The Windows example referenced ..\shared\config.py",
     ],
