@@ -40,7 +40,7 @@ import { useShortPath } from "../core/paths";
 import { invalidate, useResource } from "../core/resource";
 import { href, navigate } from "../core/router";
 import { useSnapshotStream } from "../core/stream";
-import { newChatDraft } from "../core/ui";
+import { clearNewChatDraft, newChatDraft, rememberNewChatDraft } from "../core/ui";
 import type { AutoView, BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatProject, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, FolderProbe, ModelRejection, Readiness, RunTile } from "../core/types";
 import type { Tone } from "../ui/bits";
 import { Chip, CopyButton, Empty, Field, LoadError, LogView, Notice, Skeleton } from "../ui/bits";
@@ -253,7 +253,7 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
         backend: backend === FOLLOW ? "" : backend,
         model: mode === "ask" ? model : "",
       });
-      newChatDraft.set({ goal: "", cwd: "" });
+      clearNewChatDraft();
       invalidate("/api/chat/sessions");
       // Auto runs as a console job: list it in Activity with the others.
       if (mode === "auto") void adoptRunningJobs();
@@ -305,7 +305,7 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
           onChange={(event) => {
             const value = event.target.value;
             setGoal(value);
-            newChatDraft.set((draft) => ({ ...draft, goal: value }));
+            rememberNewChatDraft(value, cwd);
           }}
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && goal.trim()) {
@@ -331,7 +331,7 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
               onClick={() => {
                 const value = t(`chat.new.starter.${key}`);
                 setGoal(value);
-                newChatDraft.set((draft) => ({ ...draft, goal: value }));
+                rememberNewChatDraft(value, cwd);
                 goalRef.current?.focus();
               }}
             >
@@ -372,7 +372,7 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
                 onChange={(event) => {
                   const value = event.target.value;
                   setCwd(value);
-                  newChatDraft.set((draft) => ({ ...draft, cwd: value }));
+                  rememberNewChatDraft(goal, value);
                 }}
               />
             </div>

@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 
-import { newChatDraft } from "./ui";
+import { clearNewChatDraft, newChatDraft, rememberNewChatDraft } from "./ui";
 
 describe("New Chat draft", () => {
   test("retains the unsent goal and folder until a chat starts", () => {
-    newChatDraft.set({ goal: "Build a small dashboard", cwd: "/tmp/dashboard" });
+    rememberNewChatDraft("Build a small dashboard", "/tmp/dashboard");
     expect(newChatDraft.get()).toEqual({ goal: "Build a small dashboard", cwd: "/tmp/dashboard" });
 
-    newChatDraft.set({ goal: "", cwd: "" });
+    // A page remount reads the same store, then an accepted POST clears it.
+    const remountedDraft = newChatDraft.get();
+    expect(remountedDraft).toEqual({ goal: "Build a small dashboard", cwd: "/tmp/dashboard" });
+    clearNewChatDraft();
+    expect(newChatDraft.get()).toEqual({ goal: "", cwd: "" });
   });
 });
