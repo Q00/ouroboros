@@ -81,7 +81,7 @@ Required repository gates from `AGENTS.md` were run. Ruff format/check and mypy 
 
 - `src/ouroboros/boundary/base_regression.py` — cancellation-safe cleanup waits and explicit result retrieval for throwaway-copy tasks.
 - `docs/security/audits/2026-11-21-security-usability-architecture.md` — audit scope, reproductions, dispositions, evidence, unverified areas, and rollback steps.
-- `docs/security/audits/2026-11-21-pr-body.md` — draft PR description. It explicitly declares the review boundary and records that no source fix was applied.
+- `docs/security/audits/2026-11-21-pr-body.md` — draft PR description. It explicitly declares the review boundary and records the cancellation-cleanup fix in `c70db9a`.
 - `STATUS.md` — project execution status for this audit.
 
 ## Commit and publication status
