@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -16,12 +17,13 @@ from ouroboros.core.errors import ProviderError
 from ouroboros.core.seed import Seed, SourcedScope
 from ouroboros.core.types import Result
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
-from ouroboros.orchestrator import completion_pass
+from ouroboros.orchestrator import completion_pass, playtest
 from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
     DELEGATED_PARENT_PERMISSION_MODE_ARG,
 )
 from ouroboros.orchestrator.completion_pass import (
+    CHECK_DIR,
     REVIEWER_PERMISSION_MODE,
     REVIEWER_TOOLS,
     STAGE_EVENT,
@@ -69,9 +71,12 @@ class _Runtime:
     calls: list[dict[str, Any]]
     hang: bool = False
     closed: bool = False
+    action: Callable[[], Awaitable[None]] | None = None
 
     async def execute_task_to_result(self, prompt: str, tools: list[str] | None = None) -> Any:
         self.calls.append({"prompt": prompt, "tools": tools})
+        if self.action is not None:
+            await self.action()
         if self.hang:
             await asyncio.Event().wait()
         if self.reply is None:
@@ -89,10 +94,13 @@ class _Factory:
     created: list[dict[str, Any]] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
     runtimes: list[_Runtime] = field(default_factory=list)
+    # what the session with this index does while it runs
+    actions: dict[int, Callable[[], Awaitable[None]]] = field(default_factory=dict)
 
     def __call__(self, **kwargs: Any) -> _Runtime:
         self.created.append(kwargs)
-        runtime = _Runtime(self.replies.pop(0), self.calls, hang=self.hang)
+        action = self.actions.get(len(self.created) - 1)
+        runtime = _Runtime(self.replies.pop(0), self.calls, hang=self.hang, action=action)
         self.runtimes.append(runtime)
         return runtime
 
@@ -463,10 +471,7 @@ async def test_the_app_is_played_before_the_fix_and_again_after_it(tmp_path) -> 
     fix_prompt = factory.calls[3]["prompt"]
     assert "- (core) no lap count\n" + visible in fix_prompt  # code defects, then the screen's
     assert "the screenshots are .ouroboros/playtest/round-1/01-shot.png" in fix_prompt
-    check = completion_pass.check_command(
-        completion_pass.PLAYTEST_DIR / "script.json", completion_pass.PLAYTEST_DIR / "check"
-    )
-    assert f"run `{check}`" in fix_prompt
+    assert f"run `{completion_pass.check_command()}` in this directory" in fix_prompt
     saved = json.loads((app / ".ouroboros/playtest/script.json").read_text())
     assert saved == {"page": "index.html", "steps": [dict(step) for step in script.steps]}
     assert ".ouroboros/playtest/round-2/01-shot.png" in factory.calls[5]["prompt"]
@@ -488,16 +493,128 @@ async def test_the_app_is_played_before_the_fix_and_again_after_it(tmp_path) -> 
     ) in result.text_content
 
 
-def test_the_check_command_replays_the_saved_script_with_this_python() -> None:
-    command = completion_pass.check_command(
-        Path(".ouroboros/playtest/script.json"), Path(".ouroboros/playtest/check")
+def test_the_check_command_asks_with_this_python() -> None:
+    command = completion_pass.check_command()
+
+    assert command.endswith(" -m ouroboros.orchestrator.playtest .ouroboros/playtest/check")
+    assert sys.executable in command
+
+
+@pytest.mark.asyncio
+async def test_the_host_plays_the_page_whenever_the_worker_asks_while_it_fixes(tmp_path) -> None:
+    app = _app(tmp_path)
+    player = _Player()
+    answers: list[Any] = []
+
+    async def worker_checks() -> None:  # what the worker's check command does, in its shell
+        answers.append(await asyncio.to_thread(playtest.request_play, app / CHECK_DIR, 5.0))
+
+    factory = _Factory(
+        ["NONE", PLAN, "- app.js: not drawn", "done", "NONE", "NONE"], actions={3: worker_checks}
     )
 
-    assert command.endswith(
-        " -m ouroboros.orchestrator.playtest . .ouroboros/playtest/script.json"
-        " .ouroboros/playtest/check"
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=player
     )
-    assert sys.executable in command
+
+    first, check, replay = player.calls
+    assert check[1] is first[1]  # the saved script, never one the worker names
+    assert check[2].parent == app / CHECK_DIR
+    (answer,) = answers
+    assert answer["shots"] == [
+        f".ouroboros/playtest/check/{check[2].name}/01-shot.png",
+        f".ouroboros/playtest/check/{check[2].name}/02-shot.png",
+    ]
+    assert answer["errors"] == ["TypeError: lap is undefined"]
+    assert result.meta["completion_pass"]["checks"] == 1
+    assert "While they worked, the page was played 1 more time(s)." in result.text_content
+    # Once the worker is done, nobody answers.
+    assert await asyncio.to_thread(playtest.request_play, app / CHECK_DIR, 0.6) is None
+
+
+async def _serve(app: Path, player: _Player, **kwargs: Any) -> tuple[asyncio.Task, list[str]]:
+    served: list[str] = []
+    script = playtest.parse_play_script(PLAN, app)
+    assert script is not None
+    task = asyncio.create_task(
+        completion_pass.serve_checks(
+            app, script, "/bin/chrome", player, served, poll_seconds=0.01, **kwargs
+        )
+    )
+    return task, served
+
+
+@pytest.mark.asyncio
+async def test_a_worker_gets_at_most_the_limit_of_plays(tmp_path) -> None:
+    app = _app(tmp_path)
+    (app / CHECK_DIR).mkdir(parents=True)
+    player = _Player()
+    task, served = await _serve(app, player, limit=1)
+    try:
+        first = await asyncio.to_thread(playtest.request_play, app / CHECK_DIR, 5.0)
+        second = await asyncio.to_thread(playtest.request_play, app / CHECK_DIR, 5.0)
+    finally:
+        task.cancel()
+    assert first is not None and len(first["shots"]) == 2
+    assert second == {"error": "the page was already played 1 times in this session"}
+    assert len(player.calls) == len(served) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_play_that_fails_is_reported_to_the_worker(tmp_path) -> None:
+    app = _app(tmp_path)
+    task, _ = await _serve(app, _Player(fail=True))
+    try:
+        answer = await asyncio.to_thread(playtest.request_play, app / CHECK_DIR, 5.0)
+    finally:
+        task.cancel()
+    assert answer == {"error": "the play did not finish: browser closed the pipe"}
+
+
+@pytest.mark.asyncio
+async def test_a_check_directory_that_leads_outside_the_app_is_never_used(tmp_path) -> None:
+    (tmp_path / "app").mkdir()
+    app = _app(tmp_path / "app")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (app / CHECK_DIR).parent.mkdir(parents=True)
+    (app / CHECK_DIR).symlink_to(outside)
+    player = _Player()
+    task, _ = await _serve(app, player)
+    try:
+        answer = await asyncio.to_thread(playtest.request_play, app / CHECK_DIR, 0.5)
+    finally:
+        task.cancel()
+    assert answer is None and player.calls == []
+    assert [p.name for p in outside.iterdir()][0].startswith("request-")  # left unanswered
+
+
+@pytest.mark.asyncio
+async def test_a_planted_play_directory_is_refused_and_odd_requests_are_dropped(tmp_path) -> None:
+    (tmp_path / "app").mkdir()
+    app = _app(tmp_path / "app")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    check_dir = app / CHECK_DIR
+    check_dir.mkdir(parents=True)
+    nonce = "a" * 32
+    (check_dir / nonce).symlink_to(outside)
+    (check_dir / f"request-{nonce}").write_text("")
+    (check_dir / "request-not-a-nonce").write_text("")
+    player = _Player()
+    task, _ = await _serve(app, player)
+    try:
+        for _ in range(200):
+            if (check_dir / f"result-{nonce}.json").exists():
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+    answer = json.loads((check_dir / f"result-{nonce}.json").read_text())
+    assert answer["error"].startswith("the play did not finish")
+    assert player.calls == [] and list(outside.iterdir()) == []
+    assert not (check_dir / "request-not-a-nonce").exists()
+    assert not (check_dir / "result-not-a-nonce.json").exists()
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -199,52 +201,75 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
     assert report.notes == ["no visible control labelled 'missing'"]
 
 
-def test_the_replay_command_plays_a_saved_script_and_lists_its_shots(
-    tmp_path, monkeypatch, capsys
-) -> None:
-    site = _site(tmp_path)
-    script_file = site / "script.json"
-    script_file.write_text(json.dumps({"page": "index.html", "steps": [{"shot": "a"}]}))
-    old = site / "check" / "01-stale.png"
-    old.parent.mkdir()
-    old.write_bytes(b"old")
-    calls = []
+def _answer_next_request(check_dir: Path, answer: dict) -> threading.Thread:
+    """A host that answers the first request left in ``check_dir``."""
 
-    def fake_play(where, script, out_dir, browser):
-        calls.append((where, script.page, out_dir, browser))
-        shot = out_dir / "01-a.png"
-        shot.write_bytes(b"png")
-        return playtest.PlayReport(shots=[shot], errors=["TypeError: x"])
+    def host() -> None:
+        for _ in range(200):
+            requests = list(check_dir.glob("request-*")) if check_dir.is_dir() else []
+            if requests:
+                nonce = requests[0].name.removeprefix("request-")
+                requests[0].unlink()
+                playtest.write_answer(check_dir, nonce, answer)
+                return
+            time.sleep(0.02)
 
-    monkeypatch.setattr(playtest, "installed_browser", lambda: "/bin/chrome")
-    monkeypatch.setattr(playtest, "play", fake_play)
+    thread = threading.Thread(target=host, daemon=True)
+    thread.start()
+    return thread
 
-    code = playtest.main([str(site), str(script_file), "check"])
 
+def test_the_replay_command_asks_the_host_to_play_and_lists_its_shots(tmp_path, capsys) -> None:
+    check_dir = tmp_path / ".ouroboros" / "playtest" / "check"
+    host = _answer_next_request(
+        check_dir,
+        {"shots": ["check/n/01-a.png"], "errors": ["TypeError: x"], "notes": ["no button"]},
+    )
+
+    code = playtest.main([str(check_dir)])
+
+    host.join(5)
     assert code == 0
-    assert calls == [(site, "index.html", site / "check", "/bin/chrome")]
-    assert not old.exists()  # shots from an earlier check never pass for new ones
     out = capsys.readouterr().out
-    assert f"- {site / 'check' / '01-a.png'}" in out
+    assert "Screenshots, in order:\n- check/n/01-a.png" in out
     assert "page error: TypeError: x" in out
+    assert "note: no button" in out
+    assert [p.name for p in check_dir.iterdir()][0].startswith("result-")  # nothing else is left
 
 
 @pytest.mark.parametrize(
-    ("args", "browser", "code", "message"),
+    ("args", "answer", "code", "message"),
     [
-        (["only-one"], "/bin/chrome", 2, "usage:"),
-        (["{site}", "{site}/missing.json", "check"], "/bin/chrome", 2, "cannot read"),
-        (["{site}", "{site}/bad.json", "check"], "/bin/chrome", 2, "not valid"),
-        (["{site}", "{site}/good.json", "check"], None, 1, "no Chromium-family browser"),
+        (["a", "b"], None, 2, "usage:"),
+        (["{check}"], None, 1, "no play answered"),
+        (["{check}"], {"error": "the play did not finish: boom"}, 1, "did not finish: boom"),
     ],
 )
 def test_the_replay_command_says_why_it_did_not_play(
-    tmp_path, monkeypatch, capsys, args, browser, code, message
+    tmp_path, monkeypatch, capsys, args, answer, code, message
 ) -> None:
-    site = _site(tmp_path)
-    (site / "bad.json").write_text('{"page": "../x.html", "steps": [{"shot": "a"}]}')
-    (site / "good.json").write_text('{"page": "index.html", "steps": [{"shot": "a"}]}')
-    monkeypatch.setattr(playtest, "installed_browser", lambda: browser)
+    check_dir = tmp_path / "check"
+    monkeypatch.setattr(playtest, "CHECK_WAIT_SECONDS", 0.3)
+    if answer is not None:
+        _answer_next_request(check_dir, answer)
 
-    assert playtest.main([a.format(site=site) for a in args]) == code
+    assert playtest.main([a.format(check=check_dir) for a in args]) == code
     assert message in capsys.readouterr().out
+
+
+def test_a_shot_or_an_answer_replaces_a_planted_symlink_instead_of_writing_through_it(
+    tmp_path,
+) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    check_dir = tmp_path / "check"
+    check_dir.mkdir()
+    (check_dir / "01-a.png").symlink_to(outside)
+    (check_dir / "result-n.json").symlink_to(outside)
+
+    playtest._save(check_dir / "01-a.png", b"png")
+    playtest.write_answer(check_dir, "n", {"shots": []})
+
+    assert outside.read_text() == "keep"
+    assert (check_dir / "01-a.png").read_bytes() == b"png"
+    assert json.loads((check_dir / "result-n.json").read_text()) == {"shots": []}

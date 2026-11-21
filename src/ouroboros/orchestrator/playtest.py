@@ -14,6 +14,12 @@ play. The browser gets a fresh temporary profile that is removed afterwards.
 When no such browser is found, or on Windows (where the pipe needs handles,
 not descriptors), nothing runs.
 
+A worker fixing what the screen showed may run in a sandbox that can start
+neither a browser nor a server. Its replay command (:func:`main`) therefore only
+leaves a request file in a check directory and waits; the completion pass,
+which runs on the host, plays the saved script and writes the answer there
+(:func:`write_answer`).
+
 A play script is JSON written by a read-only reviewer that read the code:
 ``{"page": "index.html", "steps": [...]}``. Every step is one of
 ``{"wait": ms}``, ``{"shot": name}``, ``{"key": k, "hold": ms}``,
@@ -40,6 +46,7 @@ import tempfile
 import threading
 import time
 from typing import Any
+import uuid
 
 VIEWPORT = (1280, 800)
 MAX_STEPS = 40
@@ -50,6 +57,12 @@ MAX_TEXT_CHARS = 200
 MAX_ERRORS = 20
 LOAD_SETTLE_SECONDS = 1.5
 CDP_CALL_TIMEOUT_SECONDS = 20.0
+# A worker's replay request: the host plays the script (at most PLAY_BOUND_SECONDS in
+# the completion pass) and answers in the same directory.
+REQUEST_PREFIX = "request-"
+RESULT_PREFIX = "result-"
+CHECK_WAIT_SECONDS = 200.0
+CHECK_POLL_SECONDS = 0.5
 
 BROWSER_CANDIDATES: tuple[str, ...] = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -401,6 +414,14 @@ def _errors(events: list[dict[str, Any]]) -> list[str]:
     return unique[:MAX_ERRORS]
 
 
+def _save(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path``; a symlink planted there is replaced, never followed."""
+    fd, tmp = tempfile.mkstemp(prefix=".shot-", dir=path.parent)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    os.replace(tmp, path)
+
+
 def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayReport:
     """Run ``script`` against ``site`` and save its shots in ``out_dir``. Blocking."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -464,7 +485,7 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
             elif "shot" in step:
                 data = cdp("Page.captureScreenshot", {"format": "png"})["data"]
                 path = out_dir / f"{len(report.shots) + 1:02d}-{step['shot']}.png"
-                path.write_bytes(base64.b64decode(data))
+                _save(path, base64.b64decode(data))
                 report.shots.append(path)
             elif "key" in step or "keys" in step:
                 keys = step.get("keys") or [step["key"]]
@@ -519,44 +540,66 @@ def play(site: Path, script: PlayScript, out_dir: Path, browser: str) -> PlayRep
     return report
 
 
-def main(argv: list[str] | None = None) -> int:
-    """``python -m ouroboros.orchestrator.playtest <site> <script.json> <out_dir>``.
+def write_answer(check_dir: Path, nonce: str, answer: dict[str, Any]) -> None:
+    """Write the answer to play request ``nonce`` so its reader never sees half of it."""
+    fd, tmp = tempfile.mkstemp(prefix=".answer-", dir=check_dir)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(answer, handle)
+    # A rename replaces a planted symlink instead of writing through it.
+    os.replace(tmp, check_dir / f"{RESULT_PREFIX}{nonce}.json")
 
-    Replays a saved play script and prints the screenshots it saved, so a worker
-    fixing what the screen showed can look at the page after each change.
+
+def request_play(check_dir: Path, wait_seconds: float | None = None) -> dict[str, Any] | None:
+    """Ask the host running the completion pass to play its saved script; its answer, or ``None``.
+
+    A sandboxed worker can neither start a browser nor open a port, so it only
+    leaves a request file here, and the host plays the page and answers next to it.
+    """
+    nonce = uuid.uuid4().hex
+    check_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".request-", dir=check_dir)
+    os.close(fd)
+    os.replace(tmp, check_dir / f"{REQUEST_PREFIX}{nonce}")
+    result = check_dir / f"{RESULT_PREFIX}{nonce}.json"
+    deadline = time.monotonic() + (CHECK_WAIT_SECONDS if wait_seconds is None else wait_seconds)
+    while True:
+        if result.is_file():
+            try:
+                answer = json.loads(result.read_text())
+            except (OSError, ValueError):
+                answer = None
+            if isinstance(answer, dict):
+                return answer
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        time.sleep(min(CHECK_POLL_SECONDS, left))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m ouroboros.orchestrator.playtest <check_dir>``.
+
+    Asks the completion pass to replay its saved play script and prints the
+    screenshots that play saved, so a worker fixing what the screen showed can
+    look at the page after each change.
     """
     args = sys.argv[1:] if argv is None else argv
-    if len(args) != 3:
-        print("usage: python -m ouroboros.orchestrator.playtest <site> <script.json> <out_dir>")
+    if len(args) != 1:
+        print("usage: python -m ouroboros.orchestrator.playtest <check_dir>")
         return 2
-    site, script_file, out_dir = Path(args[0]), Path(args[1]), Path(args[2])
-    try:
-        script = parse_play_script(script_file.read_text(), site)
-    except OSError as exc:
-        print(f"cannot read the play script: {exc}")
-        return 2
-    if script is None:
-        print("the play script is not valid for this directory")
-        return 2
-    browser = installed_browser()
-    if browser is None:
-        print("no Chromium-family browser is installed")
+    answer = request_play(Path(args[0]))
+    if answer is None:
+        print("no play answered: this command works only while the completion pass is fixing")
         return 1
-    if not out_dir.is_absolute():
-        out_dir = site / out_dir
-    for old in out_dir.glob("*.png") if out_dir.is_dir() else ():
-        old.unlink()
-    try:
-        report = play(site, script, out_dir, browser)
-    except Exception as exc:  # noqa: BLE001 - reported to the worker that ran it
-        print(f"the play did not finish: {exc}")
+    if answer.get("error"):
+        print(answer["error"])
         return 1
     print("Screenshots, in order:")
-    for path in report.shots:
+    for path in answer.get("shots", ()):
         print(f"- {path}")
-    for line in report.errors:
+    for line in answer.get("errors", ()):
         print(f"page error: {line}")
-    for line in report.notes:
+    for line in answer.get("notes", ()):
         print(f"note: {line}")
     return 0
 
@@ -567,6 +610,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised through the module en
 
 __all__ = [
     "BROWSER_CANDIDATES",
+    "CHECK_WAIT_SECONDS",
     "MAX_SHOTS",
     "MAX_STEPS",
     "PlayReport",
@@ -576,4 +620,6 @@ __all__ = [
     "main",
     "parse_play_script",
     "play",
+    "request_play",
+    "write_answer",
 ]

@@ -23,7 +23,11 @@ judges the finished product:
    never clears, or a galaxy that is never drawn;
 3. a worker with the run's tools and permission mode fixes what steps 1 and 2
    listed, basic use first. It gets the screenshots and, when it has a shell,
-   a command that replays the script so it can look at the page after a change;
+   a command that has the script played again so it can look at the page after
+   a change. A worker may run in a sandbox that can start neither a browser nor
+   a server, so the command only leaves a request in the app's directory; the
+   pass, on the host, plays the saved script and answers there while the worker
+   runs (:func:`serve_checks`);
 4. a second read-only code review lists what now stops the app from loading or
    its basic use from working (a fix that rewrites a file can break what
    worked), and the script is played and looked at once more;
@@ -52,9 +56,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+import contextlib
 import inspect
 import json
 from pathlib import Path
+import re
 import shlex
 import sys
 from typing import Any
@@ -72,9 +78,11 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.playtest import (
     MAX_SHOTS,
+    REQUEST_PREFIX,
     PlayReport,
     PlayScript,
     parse_play_script,
+    write_answer,
 )
 
 log = structlog.get_logger(__name__)
@@ -96,6 +104,11 @@ STAGE_EVENT = "execution.completion_pass.updated"
 # browser start-up. Its own protocol calls time out well inside this.
 PLAY_BOUND_SECONDS = 180.0
 PLAYTEST_DIR = Path(".ouroboros") / "playtest"
+CHECK_DIR = PLAYTEST_DIR / "check"
+# Plays one fix or repair session may ask for; each is a bounded browser run on the host.
+MAX_CHECKS = 8
+CHECK_POLL_SECONDS = 0.5
+_NONCE = re.compile(r"[0-9a-f]{32}")
 
 REVIEW_PROMPT = """You review an app an AI built for this request: {goal}
 
@@ -228,19 +241,83 @@ def build_fix_prompt(
         )
     if check:
         seen += (
-            f" To see the page after your changes, run `{check}`: it plays the same steps in a"
-            " headless browser and prints the screenshots it saved. Open them, and keep changing"
-            " and checking until they no longer show those defects."
+            f" To see the page after your changes, run `{check}` in this directory: it has the"
+            " same steps played in a headless browser, waits for them (up to three minutes) and"
+            " prints the screenshots that play saved. Open them, and keep changing and checking"
+            " until they no longer show those defects."
         )
     return FIX_PROMPT.format(goal=scope.goal or seed.goal, defects=listed, seen=seen)
 
 
-def check_command(script_path: Path, out_dir: Path) -> str:
-    """The command a worker runs in the app's directory to replay the play script."""
+def check_command(check_dir: Path = CHECK_DIR) -> str:
+    """The command a worker runs in the app's directory to have the play script replayed."""
     return (
-        f"{shlex.quote(sys.executable)} -m ouroboros.orchestrator.playtest . "
-        f"{script_path.as_posix()} {out_dir.as_posix()}"
+        f"{shlex.quote(sys.executable)} -m ouroboros.orchestrator.playtest {check_dir.as_posix()}"
     )
+
+
+def _inside(root: Path, path: Path) -> bool:
+    """Whether ``path`` resolves inside ``root``; a worker may have planted a symlink."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
+async def serve_checks(
+    working_dir: Path,
+    script: PlayScript,
+    browser: str,
+    player: Callable[[Path, PlayScript, Path, str], PlayReport],
+    served: list[str],
+    *,
+    limit: int = MAX_CHECKS,
+    poll_seconds: float = CHECK_POLL_SECONDS,
+) -> None:
+    """Answer the replay requests a worker leaves in :data:`CHECK_DIR`, until cancelled.
+
+    Only ``script``, the one the pass saved, is played; a request carries nothing
+    but its name. Each play saves its shots in a new directory named after the
+    request, and a check directory that resolves outside ``working_dir`` is never
+    used. After ``limit`` plays a request is answered with an error.
+    """
+    check_dir = working_dir / CHECK_DIR
+    played = 0
+    while True:
+        usable = check_dir.is_dir() and _inside(working_dir, check_dir)
+        for request in sorted(check_dir.glob(f"{REQUEST_PREFIX}*")) if usable else ():
+            nonce = request.name[len(REQUEST_PREFIX) :]
+            with contextlib.suppress(OSError):
+                request.unlink()
+            if not _NONCE.fullmatch(nonce):
+                continue
+            answer: dict[str, Any]
+            if played >= limit:
+                answer = {"error": f"the page was already played {limit} times in this session"}
+            else:
+                played += 1
+                served.append(nonce)
+                out = check_dir / nonce
+                try:
+                    out.mkdir()
+                    if not _inside(working_dir, out):
+                        raise OSError("the check directory is outside the app")
+                    report = await asyncio.wait_for(
+                        asyncio.to_thread(player, working_dir, script, out, browser),
+                        timeout=PLAY_BOUND_SECONDS,
+                    )
+                    answer = {
+                        "shots": [p.relative_to(working_dir).as_posix() for p in report.shots],
+                        "errors": list(report.errors),
+                        "notes": list(report.notes),
+                    }
+                except Exception as exc:  # noqa: BLE001 - reported to the worker that asked
+                    answer = {"error": f"the play did not finish: {exc or type(exc).__name__}"}
+            try:
+                write_answer(check_dir, nonce, answer)
+            except OSError as exc:
+                log.warning("execution.completion_pass.check_not_answered", error=str(exc))
+        await asyncio.sleep(poll_seconds)
 
 
 async def _close(runtime: Any) -> None:
@@ -377,6 +454,8 @@ def _with_record(run_result: MCPToolResult, record: dict[str, Any]) -> MCPToolRe
             text += _REPLAY_TEXT[record["replay_2"]].format(n=still)
         if "repair" in record:
             text += _REPAIR_TEXT[record["repair"]]
+        if record.get("checks"):
+            text += f" While they worked, the page was played {record['checks']} more time(s)."
     text = f"\nCompletion pass: {text}\n"
     return MCPToolResult(
         content=(*run_result.content, MCPContentItem(type=ContentType.TEXT, text=text)),
@@ -439,24 +518,37 @@ async def complete_after_run(
         )
 
     async def fix(stage: str, defects: tuple[str, ...], shots: tuple[str, ...] = ()) -> str | None:
-        can_check = check is not None and "Bash" in worker_tools
-        return await _stage(
-            event_store,
-            execution_id,
-            stage,
-            factory,
-            build_fix_prompt(seed, defects, shots, check if can_check else None),
-            tools=worker_tools,
-            timeout_seconds=timeout_seconds,
-            data={"defects": len(defects)},
-            backend=runtime_backend,
-            model=resolve_execution_model(runtime_backend),
-            cwd=working_dir,
-            llm_backend=llm_backend,
-            startup_output_timeout_seconds=0,
-            stdout_idle_timeout_seconds=0,
-            **({"permission_mode": parent_mode} if parent_mode else {}),
-        )
+        server = None
+        if check is not None and script is not None and browser is not None:
+            if "Bash" in worker_tools:
+                server = asyncio.create_task(
+                    serve_checks(
+                        working_dir, script, browser, player or playtest_module.play, checks
+                    )
+                )
+        try:
+            return await _stage(
+                event_store,
+                execution_id,
+                stage,
+                factory,
+                build_fix_prompt(seed, defects, shots, check if server is not None else None),
+                tools=worker_tools,
+                timeout_seconds=timeout_seconds,
+                data={"defects": len(defects)},
+                backend=runtime_backend,
+                model=resolve_execution_model(runtime_backend),
+                cwd=working_dir,
+                llm_backend=llm_backend,
+                startup_output_timeout_seconds=0,
+                stdout_idle_timeout_seconds=0,
+                **({"permission_mode": parent_mode} if parent_mode else {}),
+            )
+        finally:
+            if server is not None:
+                server.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await server
 
     async def play_and_look(
         script: PlayScript, browser: str, round_no: int
@@ -464,14 +556,14 @@ async def complete_after_run(
         """One play of ``script``: its status, the visible defects and the shots."""
         stage = "play" if round_no == 1 else f"play_{round_no}"
         await _announce(event_store, execution_id, stage, PLAY_BOUND_SECONDS, attempt=1)
+        out = working_dir / PLAYTEST_DIR / f"round-{round_no}"
         try:
+            out.mkdir(parents=True, exist_ok=True)
+            if not _inside(working_dir, out):
+                raise OSError("the play directory is outside the app")
             report = await asyncio.wait_for(
                 asyncio.to_thread(
-                    player or playtest_module.play,
-                    working_dir,
-                    script,
-                    working_dir / PLAYTEST_DIR / f"round-{round_no}",
-                    browser,
+                    player or playtest_module.play, working_dir, script, out, browser
                 ),
                 timeout=PLAY_BOUND_SECONDS,
             )
@@ -491,6 +583,9 @@ async def complete_after_run(
         return ("found" if visible else "clean"), visible, shots
 
     check: str | None = None
+    checks: list[str] = []
+    script: PlayScript | None = None
+    browser: str | None = None
     reply = await review("review", build_review_prompt(seed))
     defects = parse_defects(reply) if reply is not None else ()
     record: dict[str, Any] = {"status": "review_failed", "defects": 0}
@@ -503,7 +598,6 @@ async def complete_after_run(
         # Play the app before the fix, so the fix also gets what the screen shows.
         visible: tuple[str, ...] = ()
         shots: tuple[str, ...] = ()
-        script: PlayScript | None = None
         browser = (browser_finder or playtest_module.find_browser)()
         if browser is None:
             record["playtest"] = "no_browser"
@@ -519,7 +613,7 @@ async def complete_after_run(
                     (working_dir / script_path).write_text(
                         json.dumps({"page": script.page, "steps": list(script.steps)})
                     )
-                    check = check_command(script_path, PLAYTEST_DIR / "check")
+                    check = check_command()
                 except OSError as exc:
                     log.warning("execution.completion_pass.script_not_saved", error=str(exc))
                 record["playtest"], visible, shots = await play_and_look(script, browser, 1)
@@ -545,6 +639,8 @@ async def complete_after_run(
             if broken:
                 repaired = await fix("repair", broken, shots if still else ())
                 record["repair"] = "repaired" if repaired is not None else "repair_failed"
+            if checks:
+                record["checks"] = len(checks)
         log.info(
             "execution.completion_pass.completed",
             status=record["status"],
@@ -556,13 +652,16 @@ async def complete_after_run(
             replay=record.get("replay_2"),
             still_visible=len(record.get("replay_2_defects", ())),
             repair=record.get("repair"),
+            checks=len(checks),
         )
     await _announce(event_store, execution_id, "done", 0.0, status=record["status"])
     return _with_record(run_result, record)
 
 
 __all__ = [
+    "CHECK_DIR",
     "FIX_PROMPT",
+    "MAX_CHECKS",
     "NO_DEFECTS",
     "PLAY_BOUND_SECONDS",
     "PLAY_LOOK_PROMPT",
@@ -582,4 +681,5 @@ __all__ = [
     "build_review_prompt",
     "complete_after_run",
     "parse_defects",
+    "serve_checks",
 ]
