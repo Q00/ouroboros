@@ -190,7 +190,8 @@ def auto_command(
                 "mode the in-process job dies with the CLI, so detached execution does "
                 "NOT survive process exit unless a persistent owner (e.g. a running "
                 "'ouroboros mcp serve') holds it. Default off: auto waits for the run "
-                "job to reach a terminal state and reports the verdict."
+                "job to reach a terminal state, reports the verdict, and follows the "
+                "evaluation and Ralph jobs the run chains."
             ),
         ),
     ] = False,
@@ -335,7 +336,9 @@ def auto_command(
     By default the command waits for the execute run-handoff job to reach a
     terminal state and reports the run verdict, because in direct CLI mode the
     in-process job manager dies with the process and would otherwise cancel the
-    run on exit. Pass ``--no-wait`` to restore fire-and-forget behaviour.
+    run on exit. It then follows the formal evaluation the run enqueues, and the
+    Ralph loop a rejected evaluation chains, which would die with the process
+    too. Pass ``--no-wait`` to restore fire-and-forget behaviour.
     """
     if complete_product:
         print_warning(
@@ -730,6 +733,14 @@ async def _run_auto(
                 state=state,
                 store=store,
             )
+            await _follow_run_successors(
+                result,
+                job_manager=getattr(start_execute, "_job_manager", None),
+                start_evaluate_handler=getattr(start_execute, "start_evaluate_handler", None),
+                quiet=progress_callback is None if quiet is None else quiet,
+                deadline_at=state.deadline_at,
+                fallback_timeout_seconds=float(state.pipeline_timeout_seconds),
+            )
     finally:
         release_auto_worktree(
             auto_workspace,
@@ -969,6 +980,13 @@ def _is_external_ralph_plugin_completion(result: AutoPipelineResult) -> bool:
 # AC/phase progress or terminal status, so this is only an upper bound on how
 # long a fully-idle poll blocks before we re-check the snapshot.
 _RUN_HANDOFF_WAIT_POLL_SECONDS = 5
+
+# After ``execution.terminal`` the run job still projects the run and enqueues
+# the formal evaluation that a rejected verdict turns into Ralph. A runtime
+# child can keep a finished job open (#1593), so the durable terminal wins,
+# but only after this window: returning at once let the CLI exit and kill the
+# in-process evaluation before it started.
+_POST_RUN_GRACE_SECONDS = 300.0
 
 
 async def _cancel_run_handoff_job(job_manager: JobManager, job_id: str) -> None:
@@ -1320,11 +1338,17 @@ async def _await_run_handoff_terminal(
     wait_handler = JobWaitHandler(job_manager=job_manager, event_store=event_store)
     cursor = 0
     last_line = ""
+    terminal_seen_at: float | None = None
     try:
         while not snapshot.is_terminal:
             linked_completed = await _linked_execution_completed_result(result, event_store)
             if linked_completed is not None:
-                return _persist_resumable_run_verdict(linked_completed, state, store)
+                # The job still owes its post-run work (the run receipt and
+                # the evaluation it enqueues); trust the durable terminal
+                # over the open job only once that work had its window.
+                terminal_seen_at = terminal_seen_at or time.monotonic()
+                if time.monotonic() - terminal_seen_at >= _POST_RUN_GRACE_SECONDS:
+                    return _persist_resumable_run_verdict(linked_completed, state, store)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 linked_completed = await _linked_execution_completed_result(result, event_store)
@@ -1402,6 +1426,75 @@ async def _await_run_handoff_terminal(
             console.print(receipt.value.text_content)
     reconciled = _reconcile_run_handoff_result(result, snapshot)
     return _persist_resumable_run_verdict(reconciled, state, store)
+
+
+async def _follow_run_successors(
+    result: AutoPipelineResult,
+    *,
+    job_manager: JobManager | None,
+    start_evaluate_handler: object | None,
+    quiet: bool,
+    deadline_at: float | None,
+    fallback_timeout_seconds: float = DEFAULT_PIPELINE_TIMEOUT_SECONDS,
+) -> None:
+    """Follow the evaluation a finished run job enqueued, and the Ralph it chains.
+
+    The run job owns run -> evaluate -> ralph, but in direct CLI mode those jobs
+    live in this process and stop when it exits, so the command waits for them
+    the way ``ouroboros run`` does (``run_successors._follow_chain``), within
+    what is left of the pipeline deadline. Following never cancels a job and
+    never changes the run verdict.
+    """
+    if result.status != "complete" or not result.job_id or job_manager is None:
+        return
+    try:
+        snapshot = await job_manager.get_snapshot(result.job_id)
+    except ValueError:
+        return
+    evaluate_job_id = (snapshot.result_meta or {}).get("chained_evaluate_job_id")
+    if not snapshot.is_terminal or not isinstance(evaluate_job_id, str) or not evaluate_job_id:
+        return
+    from ouroboros.cli.commands import run_successors
+
+    deadline = (
+        deadline_at
+        if deadline_at is not None
+        else time.monotonic() + max(0.0, fallback_timeout_seconds)
+    )
+    session_id = result.run_session_id
+    retry = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
+    was_quiet = console.quiet
+    console.quiet = was_quiet or quiet
+    # Its own task: the shared follower absorbs cancellation (it stops
+    # following and prints where the jobs went), so the deadline is decided
+    # here, from whether the follower finished in time.
+    follower = asyncio.ensure_future(
+        run_successors._follow_chain(  # noqa: SLF001 - the shared CLI follower
+            evaluate_job_id,
+            job_manager=getattr(start_evaluate_handler, "_job_manager", None),
+            event_store=getattr(start_evaluate_handler, "_event_store", None),
+            retry=retry,
+            ralph_may_follow=True,
+        )
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {follower}, timeout=max(0.0, deadline - time.monotonic())
+        )
+        if follower not in done:
+            follower.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await follower
+            print_warning(
+                f"Stopped following evaluation job {evaluate_job_id} at the pipeline deadline. "
+                f"Evaluate again with: {retry}"
+            )
+        else:
+            await follower
+    finally:
+        if not follower.done():
+            follower.cancel()
+        console.quiet = was_quiet
 
 
 def _print_detached_guidance(result: AutoPipelineResult) -> None:
