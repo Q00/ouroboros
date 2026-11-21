@@ -122,9 +122,12 @@ attempt; a later terminal lifecycle event supersedes the seal.
 ### execution.completion_pass.updated
 
 Written by the completion pass (`orchestrator/completion_pass.py`) after
-`execution.terminal`, while the run job is still open, once per stage. A waiter
-uses it to keep the process alive until stage `done`. The aggregate is the
-execution.
+`execution.terminal`, while the run job is still open, each time a stage
+starts. A session stage retried after a provider error is announced again with
+`attempt` 2, so a stage name can appear twice; `done` is written once, last. A
+pass that is skipped (see [architecture](./architecture.md#phase-2-execution))
+writes none. A waiter uses it to keep the process alive until stage `done`. The aggregate is
+the execution.
 
 | Field | Type | Description |
 |-------|------|-------------|

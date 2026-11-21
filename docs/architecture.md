@@ -348,7 +348,8 @@ bounds both sessions as it bounded the run. The pass is best effort and never
 changes the run verdict: a Seed without expected experience, a run that did not
 complete, a backend that dispatches through a host plugin, or a failed session
 leaves the product as the run left it. It adds a `completion_pass` record to
-the run result and one `execution.completion_pass.updated` event per stage
+the run result and an `execution.completion_pass.updated` event each time a
+stage starts, a retry included, then `done`
 ([events](./events.md#executioncompletion_passupdated)). The module docstrings
 are the contract.
 
