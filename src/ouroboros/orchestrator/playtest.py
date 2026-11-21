@@ -413,7 +413,17 @@ class _Pipe:
                 pass
 
 
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+def _flag(name: str) -> int:
+    """An :mod:`os` open flag, or 0 where the platform has none.
+
+    Windows lacks ``O_DIRECTORY``, ``O_NOFOLLOW`` and ``O_NONBLOCK``; nothing
+    plays there (see :func:`installed_browser`), so these paths never run, but
+    the module must still import.
+    """
+    return int(getattr(os, name, 0))
+
+
+_DIR_FLAGS = os.O_RDONLY | _flag("O_DIRECTORY") | _flag("O_NOFOLLOW")
 
 
 def open_dir_inside(root: Path, sub: Path, *, create: bool = False) -> int:
@@ -428,7 +438,7 @@ def open_dir_inside(root: Path, sub: Path, *, create: bool = False) -> int:
         parts = (sub.relative_to(root) if sub.is_absolute() else sub).parts
     except ValueError as exc:
         raise OSError(errno.EINVAL, "not under the app's directory", str(sub)) from exc
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    fd = os.open(root, os.O_RDONLY | _flag("O_DIRECTORY"))
     try:
         for part in parts:
             if part in (".", ".."):
@@ -451,7 +461,8 @@ def save_in(dir_fd: int, name: str, data: bytes) -> None:
     A symlink planted at ``name`` is replaced, never written through.
     """
     part = f".part-{uuid.uuid4().hex}"
-    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dir_fd)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _flag("O_NOFOLLOW")
+    fd = os.open(part, flags, 0o644, dir_fd=dir_fd)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
@@ -487,7 +498,7 @@ class _SiteHandler(http.server.SimpleHTTPRequestHandler):
         fd = None
         if dir_fd is not None:
             try:
-                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                flags = os.O_RDONLY | _flag("O_NOFOLLOW") | _flag("O_NONBLOCK")
                 fd = os.open(parts[-1], flags, dir_fd=dir_fd)
             except (OSError, ValueError):
                 fd = None

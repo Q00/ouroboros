@@ -10,6 +10,8 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import threading
 import time
 from typing import Any
@@ -428,3 +430,20 @@ def test_a_slow_or_hung_page_ends_the_play_with_the_shots_it_took(
 
     assert [p.name for p in report.shots] == shots
     assert len(report.notes) == 1 and note in report.notes[0]
+
+
+def test_the_module_imports_where_the_platform_lacks_posix_open_flags() -> None:
+    # Windows has no O_DIRECTORY, O_NOFOLLOW or O_NONBLOCK; nothing plays there, but the
+    # completion pass, and so every run, imports this module.
+    code = (
+        "import os\n"
+        "for name in ('O_DIRECTORY', 'O_NOFOLLOW', 'O_NONBLOCK'):\n"
+        "    delattr(os, name)\n"
+        "import ouroboros.orchestrator.completion_pass\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+
+    assert result.returncode == 0, result.stderr
