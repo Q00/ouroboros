@@ -46,6 +46,13 @@ browser's frames on macOS, where every keyboard game had looked frozen and
 its reviews had called the steering unresponsive. The browser uses the host's
 GPU, as a user's does; forcing software rendering had halved the frame rate of
 a canvas game.
+
+Before the app loads, the play also counts the frames the browser draws on its
+empty page. When that page drew at a user's rate and the app drew fewer than
+10 frames a second, the slowness is the app's own drawing, which a user would
+see too, and the report says so. Without that count, a galaxy that drew a few
+thousand glowing stars one by one each frame, at 1 to 3 frames a second, was
+reported as a browser that may be slower than a user's, and the fix left it so.
 """
 
 from __future__ import annotations
@@ -97,6 +104,11 @@ FRAME_STEP_MS = 1000
 USER_FPS = 60
 SLOW_FPS = 30
 STALL_FPS = 20
+# A page that drew fewer than this while the browser's empty page drew at least
+# SLOW_FPS is slow for a user too: on a host twice as fast it would still draw
+# fewer than STALL_FPS. Above it, a play on a busy host can draw a page slower
+# than a user's browser would.
+APP_SLOW_FPS = 10
 MAX_STALL_NOTES = 3
 # A worker's replay request: the host plays the script (at most PLAY_BOUND_SECONDS in
 # the completion pass) and answers in the same directory.
@@ -702,6 +714,31 @@ _FRAME_COUNTER_JS = """(() => {
   return globalThis.ouroborosFrames();
 })()"""
 
+# Frames a second the browser draws on its empty page, before the app loads.
+_EMPTY_PAGE_FPS_JS = """new Promise((done) => {
+  let n = 0;
+  const t0 = performance.now();
+  const end = () => done(n * 1000 / Math.max(performance.now() - t0, 1));
+  const tick = () => { n += 1; if (performance.now() - t0 < 1000) requestAnimationFrame(tick); else end(); };
+  requestAnimationFrame(tick);
+  setTimeout(end, 1500);
+})"""
+
+
+def empty_page_fps(cdp: Callable[..., dict[str, Any]]) -> float | None:
+    """Frames a second the browser draws with no app loaded; ``None`` when it cannot tell."""
+    try:
+        found = cdp(
+            "Runtime.evaluate",
+            {"expression": _EMPTY_PAGE_FPS_JS, "returnByValue": True, "awaitPromise": True},
+        )
+    except (RuntimeError, KeyError, TypeError, ValueError, TimeoutError):
+        return None
+    value = found.get("result", {}).get("value")
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    return None
+
 
 class _FrameCounter:
     """Frames the page has drawn, counted in an isolated world.
@@ -750,17 +787,27 @@ class _FrameCounter:
         return None
 
 
-def frame_notes(rates: list[tuple[int, dict[str, Any], float]]) -> list[str]:
+def frame_notes(
+    rates: list[tuple[int, dict[str, Any], float]], empty_fps: float | None = None
+) -> list[str]:
     """What the frame rates of the timed steps tell a reviewer of the shots.
 
     ``rates`` holds, per timed step, its number, the step and the frames a
-    second the page drew while it ran.
+    second the page drew while it ran. ``empty_fps`` is what the browser drew
+    on its empty page before the app loaded, when it was counted.
     """
     if not rates:
         return []
     best = max(rate for _, _, rate in rates)
     notes: list[str] = []
-    if best < SLOW_FPS:
+    if best < APP_SLOW_FPS and empty_fps is not None and empty_fps >= SLOW_FPS:
+        notes.append(
+            f"the page drew at most {best:.0f} frames a second, where this browser drew"
+            f" {empty_fps:.0f} before the app loaded and a user's draws about {USER_FPS}:"
+            " the app's own drawing is that slow, so a user would also see its motion"
+            " stutter and its controls answer late"
+        )
+    elif best < SLOW_FPS:
         notes.append(
             f"this browser drew at most {best:.0f} frames a second, where a user's draws"
             f" about {USER_FPS}: what moves once a frame moved more slowly here than it"
@@ -877,6 +924,7 @@ def play(
             "Emulation.setDeviceMetricsOverride",
             {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False},
         )
+        empty_fps = empty_page_fps(cdp)
         cdp("Page.navigate", {"url": f"http://127.0.0.1:{server.server_address[1]}/{script.page}"})
         pause(LOAD_SETTLE_SECONDS)
         try:
@@ -942,7 +990,7 @@ def play(
                 )
                 break
         report.errors = _errors(pipe_.events)
-        report.notes = [*pipe_.dialogs, *report.notes, *frame_notes(rates)][:MAX_NOTES]
+        report.notes = [*pipe_.dialogs, *report.notes, *frame_notes(rates, empty_fps)][:MAX_NOTES]
     finally:
         finished.set()
         if pipe is not None:

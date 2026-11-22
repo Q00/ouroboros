@@ -334,7 +334,11 @@ criteria. So after a run of such a Seed completes, and before evaluation,
    lists what that user sees broken. The play also notes what the reviewer
    should not take for the app's fault: typing that reached no text field, and
    a step during which the page drew far fewer frames than at its best (it
-   counts them from an isolated world the page cannot see). It also notes
+   counts them from an isolated world the page cannot see). It counts the
+   frames the browser draws on its empty page before the app loads too: when
+   that page drew at a user's rate and the app drew fewer than 10 frames a
+   second, the note says the slowness is the app's own drawing, which a user
+   would see as well, instead of a browser slower than a user's. It also notes
    what the loaded page's layout says: rules a stylesheet's browser dropped
    (a bracket left open swallows every rule after it) and controls outside a
    window the page cannot scroll. Screenshots and the script are kept under

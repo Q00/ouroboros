@@ -191,6 +191,52 @@ def test_frame_rates_note_a_stall_and_a_browser_slower_than_a_users() -> None:
     assert len(many) == playtest.MAX_STALL_NOTES
 
 
+def test_a_page_far_slower_than_the_empty_browser_is_noted_as_the_apps_own_drawing() -> None:
+    slow = [(1, {"wait": 2000}, 3.0), (2, {"drag": [400, 400, 880, 400, 1000]}, 2.0)]
+
+    assert playtest.frame_notes(slow, empty_fps=60.0) == [
+        "the page drew at most 3 frames a second, where this browser drew 60 before the app"
+        " loaded and a user's draws about 60: the app's own drawing is that slow, so a user"
+        " would also see its motion stutter and its controls answer late"
+    ]
+    # A browser that is itself slow, or not counted, still gets the browser's note.
+    for empty_fps in (None, 12.0):
+        assert playtest.frame_notes(slow, empty_fps)[0].startswith(
+            "this browser drew at most 3 frames a second"
+        )
+    # A page at 10 or more may only be slow on a busy host: still the browser's note.
+    for best in (10.0, 20.0):
+        assert playtest.frame_notes([(1, {"wait": 2000}, best)], 60.0)[0].startswith(
+            f"this browser drew at most {best:.0f} frames a second"
+        )
+    assert playtest.frame_notes([(1, {"wait": 2000}, 45.0)], 60.0) == []
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ({"result": {"type": "number", "value": 59.6}}, 59.6),
+        ({"result": {"type": "number", "value": 0}}, 0.0),
+        ({"result": {"type": "boolean", "value": True}}, None),
+        ({"result": {"type": "undefined"}}, None),
+        (RuntimeError("Target closed"), None),
+        (TimeoutError("browser did not answer"), None),
+    ],
+)
+def test_the_empty_page_is_timed_before_the_app_loads(answer: Any, expected: float | None) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def cdp(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        calls.append((method, params or {}))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    assert playtest.empty_page_fps(cdp) == expected
+    assert [method for method, _ in calls] == ["Runtime.evaluate"]
+    assert calls[0][1]["awaitPromise"] is True
+
+
 def test_layout_notes_name_dropped_rules_and_controls_outside_a_fixed_window() -> None:
     found = {
         "sheets": [
@@ -452,6 +498,34 @@ def test_a_real_browser_notes_the_step_during_which_the_page_stopped_drawing(tmp
     os.environ.get("OUROBOROS_PLAYTEST_LIVE") != "1",
     reason="starts a real headless browser; set OUROBOROS_PLAYTEST_LIVE=1",
 )
+def test_a_real_browser_notes_a_page_whose_own_drawing_is_slow(tmp_path) -> None:
+    browser = playtest.installed_browser()
+    if browser is None:
+        pytest.skip("no Chromium-family browser installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    # Each frame takes about 200 ms of the page's own work.
+    (site / "index.html").write_text(
+        "<canvas id=c></canvas><script>"
+        "const x = c.getContext('2d'); let n = 0;"
+        "(function f() { const t = performance.now(); while (performance.now() - t < 200);"
+        " x.fillRect(n++ % 300, 0, 2, 2); requestAnimationFrame(f); })();"
+        "</script>"
+    )
+    script = parse_play_script(_reply([{"wait": 2000}, {"shot": "after"}]), site)
+    assert script is not None
+
+    report = playtest.play(site, script, site / "shots", browser)
+
+    assert len(report.notes) == 1
+    assert report.notes[0].startswith("the page drew at most ")
+    assert "the app's own drawing is that slow" in report.notes[0]
+
+
+@pytest.mark.skipif(
+    os.environ.get("OUROBOROS_PLAYTEST_LIVE") != "1",
+    reason="starts a real headless browser; set OUROBOROS_PLAYTEST_LIVE=1",
+)
 def test_a_real_browser_times_the_first_step_after_the_page_navigates(
     tmp_path, monkeypatch
 ) -> None:
@@ -477,11 +551,15 @@ def test_a_real_browser_times_the_first_step_after_the_page_navigates(
     )
     assert script is not None
     timed: list[tuple[int, float]] = []
+    empty: list[float | None] = []
     notes = playtest.frame_notes
 
-    def keep(rates: list[tuple[int, dict[str, Any], float]]) -> list[str]:
+    def keep(
+        rates: list[tuple[int, dict[str, Any], float]], empty_fps: float | None = None
+    ) -> list[str]:
         timed.extend((number, rate) for number, _, rate in rates)
-        return notes(rates)
+        empty.append(empty_fps)
+        return notes(rates, empty_fps)
 
     monkeypatch.setattr(playtest, "frame_notes", keep)
 
@@ -489,6 +567,7 @@ def test_a_real_browser_times_the_first_step_after_the_page_navigates(
 
     assert [number for number, _ in timed] == [1, 3, 5]
     assert all(rate > 30 for _, rate in timed)
+    assert len(empty) == 1 and empty[0] is not None and empty[0] > 30
     assert report.notes == []
 
 
