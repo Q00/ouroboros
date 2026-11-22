@@ -139,6 +139,132 @@ def test_no_browser_on_windows_or_when_none_is_installed(monkeypatch) -> None:
     assert playtest.installed_browser() is None
 
 
+@pytest.mark.parametrize(("focused", "noted"), [(True, False), (False, True), (None, True)])
+def test_typing_with_no_text_field_focused_is_noted(focused, noted) -> None:
+    calls: list[tuple[str, Any]] = []
+
+    def cdp(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        calls.append((method, params))
+        return {"result": {"value": focused}} if method == "Runtime.evaluate" else {}
+
+    report = playtest.PlayReport()
+    unused: Any = None
+    playtest._run_step({"type": "walk"}, cdp, unused, unused, unused, unused, unused, report)
+
+    assert calls[-1] == ("Input.insertText", {"text": "walk"})  # typed as the user would anyway
+    assert bool(report.notes) is noted
+    if noted:
+        assert "typed 'walk', so the text went nowhere" in report.notes[0]
+
+
+def _hold(ms: int) -> dict[str, Any]:
+    return {"key": "ArrowUp", "hold": ms}
+
+
+def test_frame_rates_note_a_stall_and_a_browser_slower_than_a_users() -> None:
+    assert playtest.frame_notes([]) == []
+    assert playtest.frame_notes([(2, _hold(4000), 60.0), (4, _hold(4000), 45.0)]) == []
+
+    stalled = playtest.frame_notes(
+        [(2, _hold(4000), 60.0), (4, _hold(4000), 0.2), (5, {"wait": 2000}, 0.0)]
+    )
+    assert stalled == [
+        "while step 4 (hold ArrowUp for 4000 ms) ran, the page drew 0.2 frames a second,"
+        " against 60 at its best in this play: its drawing stalled then, so a shot after"
+        " it may show a frozen screen rather than what the controls did",
+        "while step 5 (wait 2000) ran, the page drew 0.0 frames a second, against 60 at"
+        " its best in this play: its drawing stalled then, so a shot after it may show a"
+        " frozen screen rather than what the controls did",
+    ]
+
+    slow = playtest.frame_notes([(2, _hold(4000), 14.0), (3, _hold(4000), 9.0)])
+    assert slow == [
+        "this browser drew at most 14 frames a second, where a user's draws about 60:"
+        " what moves once a frame moved more slowly here than it would for a user, so"
+        " slow motion or a control that seems to barely respond may be the play's, not"
+        " the app's"
+    ]
+
+    many = playtest.frame_notes(
+        [(1, _hold(2000), 60.0)] + [(n, _hold(2000), 1.0) for n in range(2, 8)]
+    )
+    assert len(many) == playtest.MAX_STALL_NOTES
+
+
+def test_the_frame_counter_starts_in_its_own_world_and_again_at_once_after_a_navigation() -> None:
+    calls: list[str] = []
+    answers: list[Any] = [
+        {"frameTree": {"frame": {"id": "f"}}},
+        {"executionContextId": 7},
+        {"result": {"value": 0}},
+        {"result": {"value": 42}},
+        RuntimeError("Runtime.evaluate: Cannot find context with specified id"),
+        {"frameTree": {"frame": {"id": "g"}}},
+        {"executionContextId": 8},
+        {"result": {"value": 0}},
+        {"frameTree": {"frame": {"id": "h"}}},
+        {"executionContextId": 9},
+        {"result": {"value": 3}},
+    ]
+    contexts: list[int] = []
+
+    def cdp(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        calls.append(method)
+        if method == "Runtime.evaluate":
+            assert params is not None
+            contexts.append(params["contextId"])
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    counter = playtest._FrameCounter(cdp)
+
+    assert counter.read() == (1, 0)  # started in a world of its own
+    assert counter.read() == (1, 42)
+    assert counter.read() == (2, 0)  # the world went with a navigation: a new one, at once
+    counter.forget()
+    assert counter.read() == (3, 3)  # a reload: counting starts again in a new world
+    assert contexts == [7, 7, 7, 8, 9]
+    assert calls.count("Page.createIsolatedWorld") == 3
+    assert answers == []
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        [RuntimeError("no frame tree"), RuntimeError("no frame tree")],
+        [{"frameTree": {"frame": {"id": "f"}}}, {"executionContextId": 7}, {"result": {}}] * 2,
+    ],
+)
+def test_the_frame_counter_gives_up_after_a_second_failed_start(answers: list[Any]) -> None:
+    def cdp(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    assert playtest._FrameCounter(cdp).read() is None
+    assert answers == []
+
+
+def test_a_key_is_sent_without_a_native_key_code() -> None:
+    assert playtest.key_event("ArrowUp", True) == {
+        "type": "keyDown",
+        "key": "ArrowUp",
+        "code": "ArrowUp",
+        "windowsVirtualKeyCode": 38,
+    }
+    assert playtest.key_event("Shift", False) == {
+        "type": "keyUp",
+        "key": "Shift",
+        "code": "ShiftLeft",
+        "windowsVirtualKeyCode": 16,
+    }
+    assert playtest.key_event("a", True)["text"] == "a"  # type: ignore[index]
+    assert playtest.key_event("F13", True) is None
+
+
 def test_console_errors_are_kept_once_without_the_favicon() -> None:
     events = [
         {
@@ -184,6 +310,7 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
     site.mkdir()
     (site / "index.html").write_text(
         "<button id=b onclick=\"this.textContent='Started'\">Start</button><p id=k></p>"
+        "<input id=t placeholder='New task' onkeydown=\"if (event.key === 'Enter') k.textContent = this.value\">"
         "<button onclick=\"this.textContent = confirm('Delete it?') ? 'Gone' : 'Kept'\">Del</button>"
         "<script>addEventListener('keydown', e => k.textContent = e.key);"
         "setTimeout(() => { throw new Error('late failure') }, 10);"
@@ -194,11 +321,19 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
         _reply(
             [
                 {"shot": "before"},
+                {"type": "lost"},
+                {"click_text": "new task"},
+                {"type": "walk"},
+                {"press": "Enter"},
+                {"shot": "typed"},
                 {"click_text": "start"},
                 {"key": "ArrowUp", "hold": 50},
                 {"click_text": "missing"},
                 {"click_text": "del"},
                 {"shot": "after"},
+                {"wait": 1200},
+                {"reload": True},
+                {"wait": 1200},
             ]
         ),
         site,
@@ -207,14 +342,121 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
 
     report = playtest.play(site, script, site / "shots", browser)
 
-    assert [p.name for p in report.shots] == ["01-before.png", "02-after.png"]
+    assert [p.name for p in report.shots] == ["01-before.png", "02-typed.png", "03-after.png"]
     assert all(p.read_bytes().startswith(b"\x89PNG") for p in report.shots)
     assert any("late failure" in line for line in report.errors)
     assert "seen as falsefalse" in report.errors  # the page cannot tell it from a user's Chrome
     assert report.notes == [
         "the page opened a confirm dialog 'Delete it?'; it was accepted",
+        "no text field had focus when the play typed 'lost', so the text went nowhere:"
+        " the play's earlier click missed the field",
         "no visible control labelled 'missing'",
     ]
+
+
+@pytest.mark.skipif(
+    os.environ.get("OUROBOROS_PLAYTEST_LIVE") != "1",
+    reason="starts a real headless browser; set OUROBOROS_PLAYTEST_LIVE=1",
+)
+def test_a_real_browser_notes_the_step_during_which_the_page_stopped_drawing(tmp_path) -> None:
+    browser = playtest.installed_browser()
+    if browser is None:
+        pytest.skip("no Chromium-family browser installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text(
+        "<canvas id=c></canvas><script>"
+        "const x = c.getContext('2d'); let n = 0;"
+        "(function f() { x.fillRect(n++ % 300, 0, 2, 2); requestAnimationFrame(f); })();"
+        "addEventListener('keydown', (e) => { if (e.key === 'Shift') setInterval(() => {"
+        " const t = performance.now(); while (performance.now() - t < 500); }, 0); });"
+        "</script>"
+    )
+    script = parse_play_script(
+        _reply([{"wait": 2000}, {"key": "Shift", "hold": 2000}, {"shot": "after"}]), site
+    )
+    assert script is not None
+
+    report = playtest.play(site, script, site / "shots", browser)
+
+    assert len(report.notes) == 1
+    assert report.notes[0].startswith("while step 2 (hold Shift for 2000 ms) ran, the page drew")
+    assert "its drawing stalled then" in report.notes[0]
+
+
+@pytest.mark.skipif(
+    os.environ.get("OUROBOROS_PLAYTEST_LIVE") != "1",
+    reason="starts a real headless browser; set OUROBOROS_PLAYTEST_LIVE=1",
+)
+def test_a_real_browser_times_the_first_step_after_the_page_navigates(
+    tmp_path, monkeypatch
+) -> None:
+    browser = playtest.installed_browser()
+    if browser is None:
+        pytest.skip("no Chromium-family browser installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text("<a href='game.html'>Start</a>")
+    (site / "game.html").write_text("<p>Race</p>")
+    script = parse_play_script(
+        _reply(
+            [
+                {"wait": 1200},
+                {"click_text": "start"},
+                {"key": "ArrowUp", "hold": 2000},
+                {"reload": True},
+                {"wait": 1200},
+                {"shot": "after"},
+            ]
+        ),
+        site,
+    )
+    assert script is not None
+    timed: list[tuple[int, float]] = []
+    notes = playtest.frame_notes
+
+    def keep(rates: list[tuple[int, dict[str, Any], float]]) -> list[str]:
+        timed.extend((number, rate) for number, _, rate in rates)
+        return notes(rates)
+
+    monkeypatch.setattr(playtest, "frame_notes", keep)
+
+    report = playtest.play(site, script, site / "shots", browser)
+
+    assert [number for number, _ in timed] == [1, 3, 5]
+    assert all(rate > 30 for _, rate in timed)
+    assert report.notes == []
+
+
+@pytest.mark.skipif(
+    os.environ.get("OUROBOROS_PLAYTEST_LIVE") != "1",
+    reason="starts a real headless browser; set OUROBOROS_PLAYTEST_LIVE=1",
+)
+@pytest.mark.parametrize(
+    "name", ["Type to filter", "Search", "Find a task", "filter", "  search  "]
+)
+def test_a_real_browser_reaches_a_field_by_its_placeholder_or_any_label(
+    tmp_path, name: str
+) -> None:
+    browser = playtest.installed_browser()
+    if browser is None:
+        pytest.skip("no Chromium-family browser installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    # The visible <label> sits after the field, so a click on it is not what finds the field.
+    (site / "index.html").write_text(
+        "<button>Go</button>"
+        "<input id=q placeholder='Type to filter' aria-label='Search'>"
+        "<p>between</p><label for=q>Find a task</label>"
+    )
+    script = parse_play_script(
+        _reply([{"click_text": name}, {"type": "milk"}, {"shot": "typed"}]), site
+    )
+    assert script is not None
+
+    report = playtest.play(site, script, site / "shots", browser)
+
+    assert report.notes == []  # the typing reached the field
 
 
 def _answer_next_request(check_dir: Path, answer: dict) -> threading.Thread:

@@ -331,8 +331,11 @@ criteria. So after a run of such a Seed completes, and before evaluation,
    writes a short first-time-user play script, `orchestrator/playtest.py` runs
    it in that browser headless over `--remote-debugging-pipe`, serving the app
    read-only on a loopback port, and a reviewer looks at the screenshots and
-   lists what that user sees broken. Screenshots and the script are kept under
-   `.ouroboros/playtest/` in the app's directory.
+   lists what that user sees broken. The play also notes what the reviewer
+   should not take for the app's fault: typing that reached no text field, and
+   a step during which the page drew far fewer frames than at its best (it
+   counts them from an isolated world the page cannot see). Screenshots and
+   the script are kept under `.ouroboros/playtest/` in the app's directory.
 3. A worker with the run's tools and permission mode fixes both lists, basic
    use first. It gets the screenshots and, when it has a shell, a command that
    has the script played again; the command only leaves a request under
