@@ -874,8 +874,27 @@ def test_the_play_prompts_say_what_to_write_and_what_to_look_for() -> None:
     assert "Do not modify any file." in plan
     assert "the controls the code really listens to" in plan
     assert "submit it by pressing Enter, as most people do" in plan
-    assert "at most 8." in plan
+    assert (
+        "click a text field before typing into it, with click_text naming its placeholder" in plan
+    )
+    assert '{"click_text": "visible label or a field\'s placeholder"}' in plan
+    assert "at most 8, and name each" in plan
     assert '{"page": "<page path in this directory>", "steps": [...]}' in plan
     assert plan.endswith("If the app does not run that way, reply with the single word NONE.")
+    assert "name each for what the user has just done" in plan
+    assert "not for what the app should show by then" in plan
     assert "Do not list missing features." in completion_pass.PLAY_LOOK_PROMPT
     assert "text or overlays that stay" in completion_pass.PLAY_LOOK_PROMPT
+    assert "reload the page once near the end and take a screenshot after it" in plan
+    assert (
+        "text a drag or click left selected, what the user made that a reload lost"
+        in completion_pass.PLAY_LOOK_PROMPT
+    )
+    assert (
+        "that something a real user needs longer to reach did not happen in it is not a defect, "
+        "and nothing should happen faster than it would for a real user."
+    ) in completion_pass.PLAY_LOOK_PROMPT
+    assert (
+        "A step the notes say missed its target tells nothing about the app."
+        in completion_pass.PLAY_LOOK_PROMPT
+    )

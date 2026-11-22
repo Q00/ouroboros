@@ -30,6 +30,22 @@ A play script is JSON written by a read-only reviewer that read the code:
 ``{"click_text": text}``, ``{"click": [x, y]}``,
 ``{"drag": [x0, y0, x1, y1, ms]}``, ``{"wheel": [x, y, dy]}`` or
 ``{"reload": true}``. :func:`parse_play_script` bounds it.
+``click_text`` finds a control by its label and a text field by its placeholder
+or label: a script that clicked a field by position, guessed from the code,
+missed it and typed into nothing. A ``type`` step that finds no text field
+focused says so in the report, so a reviewer of the shots does not take the
+lost typing for an app that ignores it.
+
+The play also counts the frames the page draws during each step of a second or
+more, from an isolated world the page cannot see. A game that steps once a frame
+looks frozen or unresponsive when its frame rate collapses, and a reviewer of the
+shots sees only that: the report says when the page drew far fewer frames than
+at its best in the play, and when the browser itself drew far fewer than a
+user's. The count found the play's own arrow and Shift keys stopping the
+browser's frames on macOS, where every keyboard game had looked frozen and
+its reviews had called the steering unresponsive. The browser uses the host's
+GPU, as a user's does; forcing software rendering had halved the frame rate of
+a canvas game.
 """
 
 from __future__ import annotations
@@ -74,6 +90,14 @@ MAX_PLAY_SECONDS = 120.0
 # Mouse moves one drag sends: each waits for the page, which a heavy page answers slowly.
 MAX_DRAG_MOVES = 15
 MAX_NOTES = 20
+# A step this long or longer is timed in frames. A user's browser draws about 60
+# frames a second; a game that moves once a frame and caps the time a frame may
+# cover runs slower than for a user once its frame rate falls far below that.
+FRAME_STEP_MS = 1000
+USER_FPS = 60
+SLOW_FPS = 30
+STALL_FPS = 20
+MAX_STALL_NOTES = 3
 # A worker's replay request: the host plays the script (at most PLAY_BOUND_SECONDS in
 # the completion pass) and answers in the same directory.
 REQUEST_PREFIX = "request-"
@@ -324,7 +348,8 @@ class _Pipe:
                 "--mute-audio",
                 # navigator.webdriver stays false, as in a user's browser.
                 "--disable-blink-features=AutomationControlled",
-                "--use-angle=swiftshader",
+                # The host's GPU draws as a user's browser does; without one,
+                # WebGL falls back to software rather than failing.
                 "--enable-unsafe-swiftshader",
                 f"--window-size={w},{h}",
                 "about:blank",
@@ -539,13 +564,135 @@ class _SiteHandler(http.server.SimpleHTTPRequestHandler):
 _CLICK_TEXT_JS = """(() => {
   const want = %s.toLowerCase();
   const seen = (e) => { const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0; };
-  const label = (e) => (e.innerText || e.value || e.getAttribute('aria-label') || '').trim().toLowerCase();
-  const all = [...document.querySelectorAll('button, a, [role=button], input[type=button], input[type=submit], label, summary')].filter(seen);
+  const field = (e) => e.matches('textarea, [contenteditable=""], [contenteditable=true]')
+    || (e.matches('input') && !/^(button|submit|reset|image)$/i.test(e.type));
+  const label = (e) => (field(e)
+    ? e.placeholder || e.getAttribute('aria-label') || (e.labels && e.labels[0] && e.labels[0].innerText) || ''
+    : e.innerText || e.value || e.getAttribute('aria-label') || '').trim().toLowerCase();
+  const all = [...document.querySelectorAll('button, a, [role=button], input, textarea, [contenteditable], label, summary')].filter(seen);
   const hit = all.find((e) => label(e) === want) || all.find((e) => label(e).includes(want));
   if (!hit) return null;
   const b = hit.getBoundingClientRect();
   return [b.x + b.width / 2, b.y + b.height / 2];
 })()"""
+
+
+_FIELD_FOCUSED_JS = """(() => {
+  const e = document.activeElement;
+  if (!e) return false;
+  if (e.isContentEditable) return true;
+  if (e.disabled || e.readOnly) return false;
+  if (e.tagName === 'TEXTAREA') return true;
+  return e.tagName === 'INPUT' && !/^(button|submit|reset|image|checkbox|radio|range|color|file|hidden)$/i.test(e.type);
+})()"""
+
+
+def key_event(name: str, down: bool) -> dict[str, Any] | None:
+    """The DevTools key event that presses (``down``) or releases key ``name``."""
+    info = _key_info(name)
+    if info is None:
+        return None
+    dom_key, code, vk, text = info
+    # No nativeVirtualKeyCode: on macOS it names a Mac key, and a Windows code
+    # there made an arrow key or Shift stop the browser drawing frames for the
+    # rest of the play, so every keyboard game looked frozen.
+    params: dict[str, Any] = {
+        "type": "keyDown" if down else "keyUp",
+        "key": dom_key,
+        "code": code,
+        "windowsVirtualKeyCode": vk,
+    }
+    if down and text:
+        params["text"] = text
+    return params
+
+
+# Counts the frames the page draws, from a world of its own the page cannot see.
+_FRAME_COUNTER_JS = """(() => {
+  if (!globalThis.ouroborosFrames) {
+    let n = 0;
+    const tick = () => { n += 1; requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+    globalThis.ouroborosFrames = () => n;
+  }
+  return globalThis.ouroborosFrames();
+})()"""
+
+
+class _FrameCounter:
+    """Frames the page has drawn, counted in an isolated world.
+
+    A navigation or reload drops the world; the next read starts a new one and
+    gives ``None``, so the step it would have timed is not timed.
+    """
+
+    def __init__(self, cdp: Callable[..., dict[str, Any]]) -> None:
+        self._cdp = cdp
+        self._context: int | None = None
+
+    def forget(self) -> None:
+        """The page was reloaded: the next read starts counting in a new world."""
+        self._context = None
+
+    def read(self) -> int | None:
+        try:
+            if self._context is None:
+                frame = self._cdp("Page.getFrameTree")["frameTree"]["frame"]["id"]
+                world = self._cdp(
+                    "Page.createIsolatedWorld", {"frameId": frame, "worldName": "ouroboros-play"}
+                )
+                self._context = int(world["executionContextId"])
+                self._cdp(
+                    "Runtime.evaluate",
+                    {"expression": _FRAME_COUNTER_JS, "contextId": self._context},
+                )
+                return None
+            found = self._cdp(
+                "Runtime.evaluate",
+                {
+                    "expression": _FRAME_COUNTER_JS,
+                    "contextId": self._context,
+                    "returnByValue": True,
+                },
+            )
+        except (RuntimeError, KeyError, TypeError, ValueError):  # the world went with a navigation
+            self._context = None
+            return None
+        value = found.get("result", {}).get("value")
+        if not isinstance(value, int | float) or isinstance(value, bool):
+            self._context = None
+            return None
+        return int(value)
+
+
+def frame_notes(rates: list[tuple[int, dict[str, Any], float]]) -> list[str]:
+    """What the frame rates of the timed steps tell a reviewer of the shots.
+
+    ``rates`` holds, per timed step, its number, the step and the frames a
+    second the page drew while it ran.
+    """
+    if not rates:
+        return []
+    best = max(rate for _, _, rate in rates)
+    notes: list[str] = []
+    if best < SLOW_FPS:
+        notes.append(
+            f"this browser drew at most {best:.0f} frames a second, where a user's draws"
+            f" about {USER_FPS}: what moves once a frame moved more slowly here than it"
+            " would for a user, so slow motion or a control that seems to barely respond"
+            " may be the play's, not the app's"
+        )
+    stalls = [
+        (number, step, rate) for number, step, rate in rates if rate < STALL_FPS and rate < best / 3
+    ]
+    for number, step, rate in stalls[:MAX_STALL_NOTES]:
+        notes.append(
+            f"while step {number} ({_describe(step)}) ran, the page drew {rate:.1f} frames"
+            f" a second, against {best:.0f} at its best in this play: its drawing stalled"
+            " then, so a shot after it may show a frozen screen rather than what the"
+            " controls did"
+        )
+    return notes
 
 
 def _errors(events: list[dict[str, Any]]) -> list[str]:
@@ -649,20 +796,9 @@ def play(
         pause(LOAD_SETTLE_SECONDS)
 
         def key(name: str, down: bool) -> None:
-            info = _key_info(name)
-            if info is None:
-                return
-            dom_key, code, vk, text = info
-            params: dict[str, Any] = {
-                "type": "keyDown" if down else "keyUp",
-                "key": dom_key,
-                "code": code,
-                "windowsVirtualKeyCode": vk,
-                "nativeVirtualKeyCode": vk,
-            }
-            if down and text:
-                params["text"] = text
-            cdp("Input.dispatchKeyEvent", params)
+            params = key_event(name, down)
+            if params is not None:
+                cdp("Input.dispatchKeyEvent", params)
 
         def mouse(kind: str, x: float, y: float, held: bool = False, **extra: Any) -> None:
             button = "left" if held or kind in ("mousePressed", "mouseReleased") else "none"
@@ -674,6 +810,8 @@ def play(
             mouse("mousePressed", x, y, True, clickCount=1)
             mouse("mouseReleased", x, y, clickCount=1)
 
+        counter = _FrameCounter(cdp)
+        rates: list[tuple[int, dict[str, Any], float]] = []
         started = time.monotonic()
         for number, step in enumerate(script.steps, 1):
             if time.monotonic() - started > MAX_PLAY_SECONDS:
@@ -683,7 +821,18 @@ def play(
                 )
                 break
             try:
+                if number == 1:
+                    counter.read()  # starts counting
+                timed = _step_ms(step) >= FRAME_STEP_MS and "reload" not in step
+                before = counter.read() if timed else None
+                began = time.monotonic()
                 _run_step(step, cdp, key, mouse, click, shoot, pause, report)
+                if "reload" in step:
+                    counter.forget()
+                    counter.read()
+                after = counter.read() if before is not None else None
+                if before is not None and after is not None and after >= before:
+                    rates.append((number, step, (after - before) / (time.monotonic() - began)))
             except Exception as exc:
                 if stop.is_set():  # the killed browser fails whatever call was waiting
                     report.notes.append(STOPPED_NOTE)
@@ -695,7 +844,7 @@ def play(
                 )
                 break
         report.errors = _errors(pipe_.events)
-        report.notes = [*pipe_.dialogs, *report.notes][:MAX_NOTES]
+        report.notes = [*pipe_.dialogs, *report.notes, *frame_notes(rates)][:MAX_NOTES]
     finally:
         finished.set()
         if pipe is not None:
@@ -735,6 +884,12 @@ def _run_step(
         key(step["press"], True)
         key(step["press"], False)
     elif "type" in step:
+        focused = cdp("Runtime.evaluate", {"expression": _FIELD_FOCUSED_JS, "returnByValue": True})
+        if focused["result"].get("value") is not True:
+            report.notes.append(
+                f"no text field had focus when the play typed {step['type']!r}, so the text"
+                " went nowhere: the play's earlier click missed the field"
+            )
         cdp("Input.insertText", {"text": step["type"]})
     elif "click" in step:
         click(*step["click"])

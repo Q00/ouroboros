@@ -20,7 +20,13 @@ judges the finished product:
    browser headless (:mod:`ouroboros.orchestrator.playtest`), and a read-only
    reviewer looks at the screenshots and lists what that user sees broken.
    Code reading misses a view that never shows the road ahead, a banner that
-   never clears, or a galaxy that is never drawn;
+   never clears, or a galaxy that is never drawn. The play is about half a
+   minute, so its shots are named for what the user did, and an outcome a
+   real user needs longer to reach is not a defect: a review that asked for
+   one had a fix count three laps in a second and a repair end the race at
+   once. An app that keeps what the user makes is reloaded once near the end,
+   and the look counts text a drag left selected and what a reload lost: both
+   cost Auto blind comparisons the play had not looked for;
 3. a worker with the run's tools and permission mode fixes what steps 1 and 2
    listed, basic use first. It gets the screenshots and, when it has a shell,
    a command that has the script played again so it can look at the page after
@@ -136,9 +142,9 @@ Fix every defect above, the ones about the request's basic use first.{seen} Keep
 
 PLAY_PLAN_PROMPT = """An AI built an app for this request: {goal}
 
-Read the code paths that run. Do not modify any file. If the app runs in a web browser from a static page in this directory, with no build step and no server code of its own, write a short script that plays it the way a first-time user would for about half a minute: open it, start it, and use its main features with the controls the code really listens to. Act as that user does: after typing into a one-line field, submit it by pressing Enter, as most people do, not by clicking a button. Take a screenshot after each meaningful moment, at most {max_shots}.
+Read the code paths that run. Do not modify any file. If the app runs in a web browser from a static page in this directory, with no build step and no server code of its own, write a short script that plays it the way a first-time user would for about half a minute: open it, start it, and use its main features with the controls the code really listens to. Act as that user does: click a text field before typing into it, with click_text naming its placeholder or label, since a click by position guessed from the code can miss the field and send the typing nowhere; after typing into a one-line field, submit it by pressing Enter, as most people do, not by clicking a button. If the app keeps what the user makes or changes, reload the page once near the end and take a screenshot after it, as a user who comes back later would. Take a screenshot after each meaningful moment, at most {max_shots}, and name each for what the user has just done (for example "after-typing-a-task" or "after-holding-up-5s"), not for what the app should show by then: half a minute rarely reaches the end of anything that takes a real user longer.
 
-Reply with one JSON object only: {{"page": "<page path in this directory>", "steps": [...]}}. Each step is one of: {{"wait": ms}}, {{"shot": "name"}}, {{"key": "ArrowUp", "hold": ms}}, {{"keys": ["ArrowUp", "ArrowLeft"], "hold": ms}}, {{"press": "Enter"}}, {{"type": "text"}}, {{"click_text": "visible label"}}, {{"click": [x, y]}}, {{"drag": [x0, y0, x1, y1, ms]}}, {{"wheel": [x, y, dy]}}, {{"reload": true}}. The window is 1280x800. A step waits or holds at most 5000 ms. Keys: the arrow keys, Enter, Escape, Space, Shift, Tab, Backspace or one character.
+Reply with one JSON object only: {{"page": "<page path in this directory>", "steps": [...]}}. Each step is one of: {{"wait": ms}}, {{"shot": "name"}}, {{"key": "ArrowUp", "hold": ms}}, {{"keys": ["ArrowUp", "ArrowLeft"], "hold": ms}}, {{"press": "Enter"}}, {{"type": "text"}}, {{"click_text": "visible label or a field's placeholder"}}, {{"click": [x, y]}}, {{"drag": [x0, y0, x1, y1, ms]}}, {{"wheel": [x, y, dy]}}, {{"reload": true}}. The window is 1280x800. A step waits or holds at most 5000 ms. Keys: the arrow keys, Enter, Escape, Space, Shift, Tab, Backspace or one character.
 If the app does not run that way, reply with the single word {none}."""
 
 PLAY_LOOK_PROMPT = """An AI built an app for this request: {goal}
@@ -147,7 +153,7 @@ The app was opened in a 1280x800 browser and played the way a first-time user wo
 {steps}
 The screenshots taken at the screenshot steps, in order: {shots}
 {errors}
-Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, blank or garbled areas, error messages. Do not list missing features.
+Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, text a drag or click left selected, what the user made that a reload lost, blank or garbled areas, error messages. Do not list missing features. The play lasted about half a minute, and a screenshot's name says what the user had just done, not what the app must show: that something a real user needs longer to reach did not happen in it is not a defect, and nothing should happen faster than it would for a real user. A step the notes say missed its target tells nothing about the app.
 Reply with the list only, or the single word {none}."""
 
 RECHECK_PROMPT = """A worker just changed an app an AI built for this request: {goal}
