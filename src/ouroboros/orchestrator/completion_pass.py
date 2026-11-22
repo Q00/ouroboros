@@ -31,7 +31,11 @@ judges the finished product:
    released product of its kind (a main view that leaves much of the window
    empty, a sparse scene, panels that crowd the view): blind judges held these
    against Auto products that worked, and neither look had named them. The
-   second look does not, as nothing plays after the repair it feeds;
+   second look does not. The play also notes rules a stylesheet's browser
+   dropped and controls left outside a window the page cannot scroll: a
+   bracket left open made one page drop every rule after it, and two workers
+   told only that its controls were not visible added rules the browser
+   dropped too;
 3. a worker with the run's tools and permission mode fixes what steps 1 and 2
    listed, basic use first. It gets the screenshots and, when it has a shell,
    a command that has the script played again so it can look at the page after
@@ -47,7 +51,15 @@ judges the finished product:
    the first play showed, and a look at the new screenshots alone found neither.
    For the same reason the script uses every control the code takes for one
    action, and the fix is told to keep what a file it rewrites had;
-5. a worker repairs what step 4 found, once.
+5. a worker repairs what step 4 found, once, and the script is played again;
+6. the version played last is compared with each version played before it
+   (:mod:`ouroboros.orchestrator.app_versions` keeps their files), the one just
+   before it first. A read-only reviewer sees both plays' screenshots and says
+   which a first-time user would rather get, then again with the two named the
+   other way round; when both answers prefer the earlier version, its files are
+   written back. A fix had broken the shaders of a galaxy the first play showed,
+   and a repair raised another's particle count until it was one white slab:
+   both stayed, as nothing compared them with what came before.
 
 A parent session that delegated the run (``_ooo_parent_*`` arguments) bounds
 both sessions as it bounded the run: its permission mode is the worker's, and
@@ -89,6 +101,7 @@ import yaml
 from ouroboros.core.seed import Seed
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator import app_versions
 from ouroboros.orchestrator import playtest as playtest_module
 from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
@@ -168,7 +181,7 @@ Reply with the list only, or the single word {none}."""
 
 # The second look only: the same steps were played before the fix, and a fix that
 # rewrote a file had dropped arrow keys or flattened a scene that the first play showed.
-PLAY_LOOK_BEFORE = """ The same steps were played before the last change, with these screenshots, in the same order: {shots}. Open them too, and also list what looks worse now than in them: a control that responded and no longer does, a view or scene drawn less fully, something that showed and is gone."""
+PLAY_LOOK_BEFORE = """ The same steps were played before the last change, with these screenshots, in the same order: {shots}. Open them too, and also list what looks worse now than in them: a control that responded and no longer does, a view or scene drawn less fully, something that showed and is gone. Compare what is drawn, not counts or claims the page writes about itself."""
 
 # The first look only: what judges held against Auto products that worked,
 # where the fix that follows can still be played and looked at again.
@@ -178,6 +191,20 @@ RECHECK_PROMPT = """A worker just changed an app an AI built for this request: {
 
 Read the code paths that run, as a strict reviewer. Do not modify any file. List only what stops the app from loading or its basic use from working for a first-time user, one per line starting with "- ", naming the file: an error on load or in the main loop, an element, file, function, asset or module the running code uses that does not exist or is not loaded, a control that does nothing. Do not list missing features.
 Reply with the list only, or the single word {none}."""
+
+
+# Which of two played versions a user would rather get. Asked in both orders;
+# an earlier version is put back only when both answers prefer it.
+PICK_PROMPT = """An AI built an app for this request: {goal}
+
+Two versions of the app were each opened in a 1280x800 browser and played with the same steps:
+{steps}
+Version 1, its screenshots in order: {first}
+{first_notes}
+Version 2, its screenshots in order: {second}
+{second_notes}
+Open every screenshot. Do not modify any file. Which version would a first-time user rather get? Judge what the screenshots show: the main view drawn fully and clearly, controls that visibly respond, nothing blank, washed out, broken, overlapping or cut off. Compare what is drawn, not counts or claims the page writes about itself.
+Reply with 1 or 2 only, or 0 when neither is clearly better."""
 
 
 def _expected_seed(seed_content: str) -> Seed | None:
@@ -263,6 +290,37 @@ def build_play_look_prompt(
         before=PLAY_LOOK_BEFORE.format(shots=", ".join(before)) if before else "",
         none=NO_DEFECTS,
     )
+
+
+def _play_notes(report: PlayReport) -> str:
+    lines = [*report.errors, *report.notes]
+    if not lines:
+        return "Its page logged no errors."
+    return "Its page logged or met these problems:\n" + "\n".join(f"- {line}" for line in lines)
+
+
+def build_pick_prompt(
+    seed: Seed,
+    script: PlayScript,
+    first: tuple[tuple[str, ...], PlayReport],
+    second: tuple[tuple[str, ...], PlayReport],
+) -> str:
+    scope = seed.sourced_scope
+    assert scope is not None
+    return PICK_PROMPT.format(
+        goal=scope.goal or seed.goal,
+        steps=script.describe(),
+        first=", ".join(first[0]),
+        first_notes=_play_notes(first[1]),
+        second=", ".join(second[0]),
+        second_notes=_play_notes(second[1]),
+    )
+
+
+def parse_pick(reply: str | None) -> int:
+    """The version a pick preferred, 1 or 2; 0 for neither or no answer."""
+    found = re.search(r"\b([012])\b", reply or "")
+    return int(found.group(1)) if found else 0
 
 
 def build_fix_prompt(
@@ -530,6 +588,17 @@ def _with_record(run_result: MCPToolResult, record: dict[str, Any]) -> MCPToolRe
             text += _REPLAY_TEXT[record["replay_2"]].format(n=still)
         if "repair" in record:
             text += _REPAIR_TEXT[record["repair"]]
+        if record.get("replay_3") == "played":
+            text += " It was played once more."
+        elif record.get("replay_3") == "play_failed":
+            text += " Playing it once more did not finish."
+        if record.get("put_back") == "failed":
+            text += " An earlier version looked better, but it could not be put back."
+        elif record.get("kept_round", 0) < record.get("last_round", 0):
+            text += (
+                f" The version played in round {record['kept_round']} looked better than the"
+                " last one, so it was put back."
+            )
         if record.get("checks"):
             text += f" While they worked, the page was played {record['checks']} more time(s)."
     text = f"\nCompletion pass: {text}\n"
@@ -626,10 +695,11 @@ async def complete_after_run(
                 with contextlib.suppress(asyncio.CancelledError):
                     await server
 
-    async def play_and_look(
-        script: PlayScript, browser: str, round_no: int, before: tuple[str, ...] = ()
-    ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
-        """One play of ``script``: its status, the visible defects and the shots."""
+    # Each round's shots and report, by round; a round that did not play is absent.
+    played: dict[int, tuple[tuple[str, ...], PlayReport]] = {}
+
+    async def play_round(script: PlayScript, browser: str, round_no: int) -> PlayReport | None:
+        """One play of ``script``, its shots in ``round-<round_no>``; ``None`` if it failed."""
         stage = "play" if round_no == 1 else f"play_{round_no}"
         await _announce(event_store, execution_id, stage, PLAY_BOUND_SECONDS, attempt=1)
         out = working_dir / PLAYTEST_DIR / f"round-{round_no}"
@@ -642,8 +712,21 @@ async def complete_after_run(
             log.warning(
                 "execution.completion_pass.play_failed", error=str(exc) or type(exc).__name__
             )
-            return "play_failed", (), ()
+            return None
         if not report.shots:
+            return None
+        played[round_no] = (
+            tuple(path.relative_to(working_dir).as_posix() for path in report.shots),
+            report,
+        )
+        return report
+
+    async def play_and_look(
+        script: PlayScript, browser: str, round_no: int, before: tuple[str, ...] = ()
+    ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        """One play of ``script``: its status, the visible defects and the shots."""
+        report = await play_round(script, browser, round_no)
+        if report is None:
             return "play_failed", (), ()
         look = await review(
             "play_review" if round_no == 1 else f"play_review_{round_no}",
@@ -652,8 +735,27 @@ async def complete_after_run(
         if look is None:
             return "look_failed", (), ()
         visible = parse_defects(look)
-        shots = tuple(path.relative_to(working_dir).as_posix() for path in report.shots)
-        return ("found" if visible else "clean"), visible, shots
+        return ("found" if visible else "clean"), visible, played[round_no][0]
+
+    async def prefers_earlier(script: PlayScript, earlier: int, latest: int) -> bool:
+        """Whether a pick in each order prefers round ``earlier``'s version to ``latest``'s."""
+        first = await review(
+            f"pick_{earlier}", build_pick_prompt(seed, script, played[latest], played[earlier])
+        )
+        if parse_pick(first) != 2:
+            return False
+        second = await review(
+            f"pick_{earlier}_swapped",
+            build_pick_prompt(seed, script, played[earlier], played[latest]),
+        )
+        return parse_pick(second) == 1
+
+    async def keep_version() -> app_versions.AppVersion | None:
+        try:
+            return await asyncio.to_thread(app_versions.keep, working_dir)
+        except OSError as exc:
+            log.warning("execution.completion_pass.version_not_kept", error=str(exc))
+            return None
 
     check: str | None = None
     checks: list[str] = []
@@ -694,6 +796,10 @@ async def complete_after_run(
         record["visible_defects"] = list(visible)
         found = (*defects, *visible)[:MAX_DEFECTS]
         if found:
+            # Each played version is kept, so a later one that looks worse can be undone.
+            versions: dict[int, app_versions.AppVersion | None] = {}
+            if 1 in played:
+                versions[1] = await keep_version()
             fixed = await fix("fix", found, shots)
             record["status"] = "fixed" if fixed is not None else "fix_failed"
             # A worker that rewrote a file, or stopped part-way, can break what worked,
@@ -710,9 +816,36 @@ async def complete_after_run(
                 record["replay_2"] = status
                 record["replay_2_defects"] = list(still)
             broken = (*regressions, *still)[:MAX_DEFECTS]
+            latest = 2 if 2 in played else None
             if broken:
+                if latest is not None:
+                    versions[2] = await keep_version()
                 repaired = await fix("repair", broken, shots if still else ())
                 record["repair"] = "repaired" if repaired is not None else "repair_failed"
+                if latest is not None and script is not None and browser is not None:
+                    # Nothing looked at the app after the repair; a repair that raised a
+                    # galaxy's particle count until it was one white slab stayed.
+                    latest = 3 if await play_round(script, browser, 3) is not None else None
+                    record["replay_3"] = "played" if latest is not None else "play_failed"
+            if latest is not None and script is not None:
+                kept = latest
+                for earlier in sorted(versions, reverse=True):
+                    version = versions[earlier]
+                    if earlier >= latest or earlier not in played or version is None:
+                        continue
+                    if await prefers_earlier(script, earlier, latest):
+                        try:
+                            await asyncio.to_thread(app_versions.put_back, working_dir, version)
+                        except OSError as exc:
+                            log.warning(
+                                "execution.completion_pass.version_not_put_back", error=str(exc)
+                            )
+                            record["put_back"] = "failed"
+                        else:
+                            kept = earlier
+                        break
+                record["kept_round"] = kept
+                record["last_round"] = latest
             if checks:
                 record["checks"] = len(checks)
         log.info(
@@ -726,6 +859,7 @@ async def complete_after_run(
             replay=record.get("replay_2"),
             still_visible=len(record.get("replay_2_defects", ())),
             repair=record.get("repair"),
+            kept_round=record.get("kept_round"),
             checks=len(checks),
         )
     await _announce(event_store, execution_id, "done", 0.0, status=record["status"])
@@ -742,6 +876,7 @@ __all__ = [
     "PLAY_LOOK_BEFORE",
     "PLAY_LOOK_FINISH",
     "PLAY_LOOK_PROMPT",
+    "PICK_PROMPT",
     "PLAY_PLAN_PROMPT",
     "PLAYTEST_DIR",
     "RECHECK_PROMPT",
@@ -751,6 +886,7 @@ __all__ = [
     "STAGE_EVENT",
     "WORKER_TOOLS",
     "build_fix_prompt",
+    "build_pick_prompt",
     "check_command",
     "build_play_look_prompt",
     "build_play_plan_prompt",
@@ -758,5 +894,6 @@ __all__ = [
     "build_review_prompt",
     "complete_after_run",
     "parse_defects",
+    "parse_pick",
     "serve_checks",
 ]

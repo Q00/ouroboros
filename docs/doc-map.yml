@@ -163,6 +163,7 @@
 - sources:
     - src/ouroboros/orchestrator/completion_pass.py
     - src/ouroboros/orchestrator/playtest.py
+    - src/ouroboros/orchestrator/app_versions.py
   docs: [docs/architecture.md, docs/events.md, docs/auto-runtime-semantics.md]
   note: >-
     The module docstrings are the contract. architecture.md: "Completion pass"

@@ -131,7 +131,7 @@ the execution.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `stage` | `string` | `review`, `play_plan`, `play`, `play_review`, `fix`, `recheck`, `play_2`, `play_review_2`, `repair`, then `done` |
+| `stage` | `string` | `review`, `play_plan`, `play`, `play_review`, `fix`, `recheck`, `play_2`, `play_review_2`, `repair`, `play_3`, then `pick_<round>` and `pick_<round>_swapped` for each earlier version compared with the last one played, then `done` |
 | `bound_seconds` | `number` | The most the stage can take (`0` for `done`) |
 | `attempt` | `integer` | Which try of the stage (a session that ended in a provider error is tried once more); absent on `done` |
 | `defects` | `integer` | On `fix` and `repair` only: how many defects the worker was given |

@@ -491,16 +491,19 @@ def open_dir_inside(root: Path, sub: Path, *, create: bool = False) -> int:
     return fd
 
 
-def save_in(dir_fd: int, name: str, data: bytes) -> None:
+def save_in(dir_fd: int, name: str, data: bytes, mode: int | None = None) -> None:
     """Write ``data`` as ``name`` in the directory ``dir_fd``, whole or not at all.
 
-    A symlink planted at ``name`` is replaced, never written through.
+    A symlink planted at ``name`` is replaced, never written through. With
+    ``mode``, the file gets exactly those permission bits.
     """
     part = f".part-{uuid.uuid4().hex}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _flag("O_NOFOLLOW")
     fd = os.open(part, flags, 0o644, dir_fd=dir_fd)
     try:
         with os.fdopen(fd, "wb") as handle:
+            if mode is not None:
+                os.fchmod(handle.fileno(), mode)
             handle.write(data)
         os.rename(part, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except BaseException:
@@ -586,6 +589,86 @@ _FIELD_FOCUSED_JS = """(() => {
   if (e.tagName === 'TEXTAREA') return true;
   return e.tagName === 'INPUT' && !/^(button|submit|reset|image|checkbox|radio|range|color|file|hidden)$/i.test(e.type);
 })()"""
+
+
+# What the loaded page's layout says, for the look: rules a stylesheet's browser
+# dropped, and controls placed outside a window the page cannot scroll. A
+# bracket left open in one rule made a galaxy page drop every rule after it, its
+# controls fell below the window, and two workers told "the controls are not
+# visible" each added rules after the break, which the browser dropped too.
+_LAYOUT_JS = """(async () => {
+  const count = (rules) => { let n = 0; for (const r of rules) { n += 1; if (r.cssRules) n += count(r.cssRules); } return n; };
+  const blocks = (text) => (text.replace(/\\/\\*[\\s\\S]*?\\*\\//g, '').replace(/"(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'/g, '').match(/{/g) || []).length;
+  const sheets = [];
+  for (const sheet of document.styleSheets) {
+    let rules, text;
+    try { rules = sheet.cssRules; } catch (e) { continue; }
+    const node = sheet.ownerNode;
+    if (sheet.href) {
+      if (new URL(sheet.href).origin !== location.origin) continue;
+      try { text = await (await fetch(sheet.href)).text(); } catch (e) { continue; }
+    } else { text = node ? node.textContent : ''; }
+    const last = rules.length ? (rules[rules.length - 1].selectorText || rules[rules.length - 1].cssText.slice(0, 60)) : '';
+    sheets.push({name: sheet.href ? new URL(sheet.href).pathname.replace(/^\\//, '') : 'a <style> element', kept: count(rules), written: blocks(text), last});
+  }
+  const root = document.scrollingElement || document.documentElement;
+  const hidden = (e) => /hidden|clip/.test(getComputedStyle(e).overflowY);
+  const fixed = root.scrollHeight <= innerHeight + 1 || hidden(document.documentElement) || hidden(document.body);
+  const scrolls = (e) => { for (let a = e.parentElement; a && a !== document.body; a = a.parentElement) { if (/auto|scroll/.test(getComputedStyle(a).overflowY) && a.scrollHeight > a.clientHeight + 1) return true; } return false; };
+  const outside = [];
+  if (fixed) {
+    for (const e of document.querySelectorAll('button, input:not([type=hidden]), select, textarea, a[href], [role=button]')) {
+      const b = e.getBoundingClientRect();
+      if (!e.getClientRects().length || (b.width === 0 && b.height === 0)) continue;
+      if (e.checkVisibility && !e.checkVisibility({opacityProperty: true, visibilityProperty: true})) continue;
+      if (scrolls(e)) continue;
+      if (b.bottom <= 0 || b.top >= innerHeight || b.right <= 0 || b.left >= innerWidth) {
+        const name = (e.innerText || e.value || e.getAttribute('aria-label') || e.placeholder || e.tagName.toLowerCase()).replace(/\\s+/g, ' ').trim().slice(0, 40);
+        outside.push({name, x: Math.round(b.left), y: Math.round(b.top)});
+      }
+    }
+  }
+  return {sheets, outside, total: document.querySelectorAll('button, input:not([type=hidden]), select, textarea, a[href], [role=button]').length};
+})()"""
+
+MAX_OUTSIDE_NAMES = 5
+
+
+def layout_notes(found: Any) -> list[str]:
+    """What :data:`_LAYOUT_JS` found that a reviewer of the shots should know."""
+    if not isinstance(found, dict):
+        return []
+    notes: list[str] = []
+    for sheet in found.get("sheets") or []:
+        if not isinstance(sheet, dict):
+            continue
+        kept, written = sheet.get("kept"), sheet.get("written")
+        if not isinstance(kept, int) or not isinstance(written, int):
+            continue
+        if written - kept >= 3 and kept < written * 0.8:
+            notes.append(
+                f"the browser kept {kept} of the {written} rules written in {sheet.get('name')};"
+                f" it dropped every rule after the one for `{str(sheet.get('last'))[:60]}`:"
+                " a bracket, parenthesis or quote left open in that rule swallows all the"
+                " rules after it, so they apply nowhere"
+            )
+    outside = [o for o in found.get("outside") or [] if isinstance(o, dict)]
+    if outside:
+        names = ", ".join(
+            f"'{o.get('name')}' at x={o.get('x')}, y={o.get('y')}"
+            for o in outside[:MAX_OUTSIDE_NAMES]
+        )
+        more = (
+            f" and {len(outside) - MAX_OUTSIDE_NAMES} more"
+            if len(outside) > MAX_OUTSIDE_NAMES
+            else ""
+        )
+        notes.append(
+            f"when the page had loaded, {len(outside)} of its {found.get('total')} controls were"
+            f" outside the {VIEWPORT[0]}x{VIEWPORT[1]} window, which the page does not let the"
+            f" user scroll: {names}{more}"
+        )
+    return notes
 
 
 def key_event(name: str, down: bool) -> dict[str, Any] | None:
@@ -796,6 +879,19 @@ def play(
         )
         cdp("Page.navigate", {"url": f"http://127.0.0.1:{server.server_address[1]}/{script.page}"})
         pause(LOAD_SETTLE_SECONDS)
+        try:
+            layout = cdp(
+                "Runtime.evaluate",
+                {"expression": _LAYOUT_JS, "returnByValue": True, "awaitPromise": True},
+            )
+            report.notes.extend(layout_notes(layout.get("result", {}).get("value")))
+        except (
+            RuntimeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):  # the page went away; the play goes on
+            pass
 
         def key(name: str, down: bool) -> None:
             params = key_event(name, down)
