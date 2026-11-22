@@ -191,7 +191,7 @@ def test_frame_rates_note_a_stall_and_a_browser_slower_than_a_users() -> None:
     assert len(many) == playtest.MAX_STALL_NOTES
 
 
-def test_the_frame_counter_starts_in_its_own_world_and_starts_again_after_a_navigation() -> None:
+def test_the_frame_counter_starts_in_its_own_world_and_again_at_once_after_a_navigation() -> None:
     calls: list[str] = []
     answers: list[Any] = [
         {"frameTree": {"frame": {"id": "f"}}},
@@ -199,35 +199,53 @@ def test_the_frame_counter_starts_in_its_own_world_and_starts_again_after_a_navi
         {"result": {"value": 0}},
         {"result": {"value": 42}},
         RuntimeError("Runtime.evaluate: Cannot find context with specified id"),
+        {"frameTree": {"frame": {"id": "g"}}},
+        {"executionContextId": 8},
+        {"result": {"value": 0}},
+        {"frameTree": {"frame": {"id": "h"}}},
+        {"executionContextId": 9},
+        {"result": {"value": 3}},
     ]
+    contexts: list[int] = []
 
     def cdp(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         calls.append(method)
+        if method == "Runtime.evaluate":
+            assert params is not None
+            contexts.append(params["contextId"])
         answer = answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
-        if method == "Runtime.evaluate":
-            assert params is not None and params["contextId"] in (7, 8)
         return answer
 
     counter = playtest._FrameCounter(cdp)
 
-    assert counter.read() is None  # started: nothing to count from yet
-    assert counter.read() == 42
-    assert counter.read() is None  # the world went with a navigation
+    assert counter.read() == (1, 0)  # started in a world of its own
+    assert counter.read() == (1, 42)
+    assert counter.read() == (2, 0)  # the world went with a navigation: a new one, at once
     counter.forget()
-    answers.extend([{"frameTree": {"frame": {"id": "g"}}}, {"executionContextId": 8}, {}])
-    assert counter.read() is None  # a reload: counting starts again in a new world
-    assert calls == [
-        "Page.getFrameTree",
-        "Page.createIsolatedWorld",
-        "Runtime.evaluate",
-        "Runtime.evaluate",
-        "Runtime.evaluate",
-        "Page.getFrameTree",
-        "Page.createIsolatedWorld",
-        "Runtime.evaluate",
-    ]
+    assert counter.read() == (3, 3)  # a reload: counting starts again in a new world
+    assert contexts == [7, 7, 7, 8, 9]
+    assert calls.count("Page.createIsolatedWorld") == 3
+    assert answers == []
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        [RuntimeError("no frame tree"), RuntimeError("no frame tree")],
+        [{"frameTree": {"frame": {"id": "f"}}}, {"executionContextId": 7}, {"result": {}}] * 2,
+    ],
+)
+def test_the_frame_counter_gives_up_after_a_second_failed_start(answers: list[Any]) -> None:
+    def cdp(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    assert playtest._FrameCounter(cdp).read() is None
+    assert answers == []
 
 
 def test_a_key_is_sent_without_a_native_key_code() -> None:
@@ -364,6 +382,50 @@ def test_a_real_browser_notes_the_step_during_which_the_page_stopped_drawing(tmp
     assert len(report.notes) == 1
     assert report.notes[0].startswith("while step 2 (hold Shift for 2000 ms) ran, the page drew")
     assert "its drawing stalled then" in report.notes[0]
+
+
+@pytest.mark.skipif(
+    os.environ.get("OUROBOROS_PLAYTEST_LIVE") != "1",
+    reason="starts a real headless browser; set OUROBOROS_PLAYTEST_LIVE=1",
+)
+def test_a_real_browser_times_the_first_step_after_the_page_navigates(
+    tmp_path, monkeypatch
+) -> None:
+    browser = playtest.installed_browser()
+    if browser is None:
+        pytest.skip("no Chromium-family browser installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text("<a href='game.html'>Start</a>")
+    (site / "game.html").write_text("<p>Race</p>")
+    script = parse_play_script(
+        _reply(
+            [
+                {"wait": 1200},
+                {"click_text": "start"},
+                {"key": "ArrowUp", "hold": 2000},
+                {"reload": True},
+                {"wait": 1200},
+                {"shot": "after"},
+            ]
+        ),
+        site,
+    )
+    assert script is not None
+    timed: list[tuple[int, float]] = []
+    notes = playtest.frame_notes
+
+    def keep(rates: list[tuple[int, dict[str, Any], float]]) -> list[str]:
+        timed.extend((number, rate) for number, _, rate in rates)
+        return notes(rates)
+
+    monkeypatch.setattr(playtest, "frame_notes", keep)
+
+    report = playtest.play(site, script, site / "shots", browser)
+
+    assert [number for number, _ in timed] == [1, 3, 5]
+    assert all(rate > 30 for _, rate in timed)
+    assert report.notes == []
 
 
 def _answer_next_request(check_dir: Path, answer: dict) -> threading.Thread:

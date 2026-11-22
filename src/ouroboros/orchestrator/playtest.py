@@ -622,47 +622,48 @@ _FRAME_COUNTER_JS = """(() => {
 class _FrameCounter:
     """Frames the page has drawn, counted in an isolated world.
 
-    A navigation or reload drops the world; the next read starts a new one and
-    gives ``None``, so the step it would have timed is not timed.
+    A navigation or reload drops the world. A read that finds it gone starts a
+    new one at once, so the step about to run is still timed; a read names the
+    world it counted in, and two reads from different worlds time nothing.
     """
 
     def __init__(self, cdp: Callable[..., dict[str, Any]]) -> None:
         self._cdp = cdp
         self._context: int | None = None
+        self._world = 0
 
     def forget(self) -> None:
         """The page was reloaded: the next read starts counting in a new world."""
         self._context = None
 
-    def read(self) -> int | None:
-        try:
-            if self._context is None:
-                frame = self._cdp("Page.getFrameTree")["frameTree"]["frame"]["id"]
-                world = self._cdp(
-                    "Page.createIsolatedWorld", {"frameId": frame, "worldName": "ouroboros-play"}
-                )
-                self._context = int(world["executionContextId"])
-                self._cdp(
+    def read(self) -> tuple[int, int] | None:
+        """(world, frames drawn since it began), or ``None`` when no world starts."""
+        for _ in range(2):
+            try:
+                if self._context is None:
+                    frame = self._cdp("Page.getFrameTree")["frameTree"]["frame"]["id"]
+                    world = self._cdp(
+                        "Page.createIsolatedWorld",
+                        {"frameId": frame, "worldName": "ouroboros-play"},
+                    )
+                    self._context = int(world["executionContextId"])
+                    self._world += 1
+                found = self._cdp(
                     "Runtime.evaluate",
-                    {"expression": _FRAME_COUNTER_JS, "contextId": self._context},
+                    {
+                        "expression": _FRAME_COUNTER_JS,
+                        "contextId": self._context,
+                        "returnByValue": True,
+                    },
                 )
-                return None
-            found = self._cdp(
-                "Runtime.evaluate",
-                {
-                    "expression": _FRAME_COUNTER_JS,
-                    "contextId": self._context,
-                    "returnByValue": True,
-                },
-            )
-        except (RuntimeError, KeyError, TypeError, ValueError):  # the world went with a navigation
+            except (RuntimeError, KeyError, TypeError, ValueError):  # gone with a navigation
+                self._context = None
+                continue
+            value = found.get("result", {}).get("value")
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                return self._world, int(value)
             self._context = None
-            return None
-        value = found.get("result", {}).get("value")
-        if not isinstance(value, int | float) or isinstance(value, bool):
-            self._context = None
-            return None
-        return int(value)
+        return None
 
 
 def frame_notes(rates: list[tuple[int, dict[str, Any], float]]) -> list[str]:
@@ -829,10 +830,10 @@ def play(
                 _run_step(step, cdp, key, mouse, click, shoot, pause, report)
                 if "reload" in step:
                     counter.forget()
-                    counter.read()
                 after = counter.read() if before is not None else None
-                if before is not None and after is not None and after >= before:
-                    rates.append((number, step, (after - before) / (time.monotonic() - began)))
+                if before is not None and after is not None and after[0] == before[0]:
+                    frames = after[1] - before[1]
+                    rates.append((number, step, frames / (time.monotonic() - began)))
             except Exception as exc:
                 if stop.is_set():  # the killed browser fails whatever call was waiting
                     report.notes.append(STOPPED_NOTE)
