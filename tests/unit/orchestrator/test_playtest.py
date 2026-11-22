@@ -428,6 +428,37 @@ def test_a_real_browser_times_the_first_step_after_the_page_navigates(
     assert report.notes == []
 
 
+@pytest.mark.skipif(
+    os.environ.get("OUROBOROS_PLAYTEST_LIVE") != "1",
+    reason="starts a real headless browser; set OUROBOROS_PLAYTEST_LIVE=1",
+)
+@pytest.mark.parametrize(
+    "name", ["Type to filter", "Search", "Find a task", "filter", "  search  "]
+)
+def test_a_real_browser_reaches_a_field_by_its_placeholder_or_any_label(
+    tmp_path, name: str
+) -> None:
+    browser = playtest.installed_browser()
+    if browser is None:
+        pytest.skip("no Chromium-family browser installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    # The visible <label> sits after the field, so a click on it is not what finds the field.
+    (site / "index.html").write_text(
+        "<button>Go</button>"
+        "<input id=q placeholder='Type to filter' aria-label='Search'>"
+        "<p>between</p><label for=q>Find a task</label>"
+    )
+    script = parse_play_script(
+        _reply([{"click_text": name}, {"type": "milk"}, {"shot": "typed"}]), site
+    )
+    assert script is not None
+
+    report = playtest.play(site, script, site / "shots", browser)
+
+    assert report.notes == []  # the typing reached the field
+
+
 def _answer_next_request(check_dir: Path, answer: dict) -> threading.Thread:
     """A host that answers the first request left in ``check_dir``."""
 

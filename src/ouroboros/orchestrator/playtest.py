@@ -562,15 +562,16 @@ class _SiteHandler(http.server.SimpleHTTPRequestHandler):
 
 
 _CLICK_TEXT_JS = """(() => {
-  const want = %s.toLowerCase();
+  const want = %s.trim().toLowerCase();
   const seen = (e) => { const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0; };
   const field = (e) => e.matches('textarea, [contenteditable=""], [contenteditable=true]')
     || (e.matches('input') && !/^(button|submit|reset|image)$/i.test(e.type));
-  const label = (e) => (field(e)
-    ? e.placeholder || e.getAttribute('aria-label') || (e.labels && e.labels[0] && e.labels[0].innerText) || ''
-    : e.innerText || e.value || e.getAttribute('aria-label') || '').trim().toLowerCase();
+  const names = (e) => (field(e)
+    ? [e.placeholder, e.getAttribute('aria-label'), ...[...(e.labels || [])].map((l) => l.innerText)]
+    : [e.innerText || e.value || e.getAttribute('aria-label')]
+  ).map((n) => (n || '').trim().toLowerCase()).filter(Boolean);
   const all = [...document.querySelectorAll('button, a, [role=button], input, textarea, [contenteditable], label, summary')].filter(seen);
-  const hit = all.find((e) => label(e) === want) || all.find((e) => label(e).includes(want));
+  const hit = all.find((e) => names(e).includes(want)) || all.find((e) => names(e).some((n) => n.includes(want)));
   if (!hit) return null;
   const b = hit.getBoundingClientRect();
   return [b.x + b.width / 2, b.y + b.height / 2];
