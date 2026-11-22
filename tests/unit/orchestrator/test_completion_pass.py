@@ -532,6 +532,52 @@ async def test_the_app_is_played_before_the_fix_and_again_after_it(tmp_path) -> 
     ) in result.text_content
 
 
+def test_only_the_first_lines_marked_unfinished_are_kept() -> None:
+    defects = (
+        "unfinished: the track fills a third of the window",
+        "game.js: ArrowUp does nothing",
+        "Unfinished: the scene is sparse",
+        "unfinished: the HUD crowds the road",
+        "unfinished: the sky is flat",
+        "index.html: the start button is cut off",
+        "unfinished: the karts are boxes",
+    )
+
+    assert completion_pass.bound_unfinished(defects) == defects[:4] + defects[5:6]
+    assert completion_pass.bound_unfinished(defects[1:2]) == defects[1:2]
+    assert completion_pass.bound_unfinished(()) == ()
+
+
+@pytest.mark.asyncio
+async def test_a_look_that_marks_more_than_three_unfinished_lines_passes_on_three(
+    tmp_path,
+) -> None:
+    app = _app(tmp_path)
+    look = "\n".join(
+        [
+            "- game.js: the GO! banner stays on screen during the race",
+            *(f"- unfinished: problem {n}" for n in range(1, 6)),
+        ]
+    )
+    factory = _Factory(["NONE", PLAN, look, "done", "NONE", "NONE", "0"])
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=_Player()
+    )
+
+    kept = [
+        "game.js: the GO! banner stays on screen during the race",
+        "unfinished: problem 1",
+        "unfinished: problem 2",
+        "unfinished: problem 3",
+    ]
+    assert result.meta["completion_pass"]["visible_defects"] == kept
+    fix_prompt = factory.calls[3]["prompt"]
+    assert "- unfinished: problem 3\n" in fix_prompt
+    assert "problem 4" not in fix_prompt and "problem 5" not in fix_prompt
+    assert "Playing it in a browser showed 4 visible problem(s)." in result.text_content
+
+
 def test_the_check_command_asks_with_this_python() -> None:
     command = completion_pass.check_command()
 
@@ -950,6 +996,7 @@ def test_only_the_first_look_asks_what_looks_unfinished(tmp_path: Path) -> None:
 
     finish = completion_pass.PLAY_LOOK_FINISH.strip()
     assert finish.startswith("Then, at most three, what makes the screen look unfinished")
+    assert 'the most noticeable first, each on a line starting with "- unfinished: "' in finish
     assert "a main view that fills only part of the window and leaves the rest empty" in finish
     assert finish in first
     assert "look unfinished" not in second

@@ -29,9 +29,10 @@ judges the finished product:
    cost Auto blind comparisons the play had not looked for. The first look
    also names, at most three, what makes the screen look unfinished next to a
    released product of its kind (a main view that leaves much of the window
-   empty, a sparse scene, panels that crowd the view): blind judges held these
-   against Auto products that worked, and neither look had named them. The
-   second look does not. The play also notes rules a stylesheet's browser
+   empty, a sparse scene, panels that crowd the view), each marked
+   ``unfinished:``: blind judges held these against Auto products that worked,
+   and neither look had named them. Only the first three marked lines of a look
+   reach a worker. The second look does not ask for them. The play also notes rules a stylesheet's browser
    dropped and controls left outside a window the page cannot scroll: a
    bracket left open made one page drop every rule after it, and two workers
    told only that its controls were not visible added rules the browser
@@ -131,6 +132,10 @@ SESSION_ATTEMPTS = 2
 RETRY_DELAY_SECONDS = 30.0
 MAX_DEFECTS = 40
 MAX_DEFECT_CHARS = 400
+# How a look marks what makes a working screen look unfinished, and how many of
+# those lines reach a worker: they are presentation, not breakage.
+UNFINISHED_MARK = "unfinished:"
+MAX_UNFINISHED = 3
 NO_DEFECTS = "NONE"
 STAGE_EVENT = "execution.completion_pass.updated"
 # The play script itself: at most 60 s of waits and holds, plus page loads and
@@ -185,7 +190,7 @@ PLAY_LOOK_BEFORE = """ The same steps were played before the last change, with t
 
 # The first look only: what judges held against Auto products that worked,
 # where the fix that follows can still be played and looked at again.
-PLAY_LOOK_FINISH = """ Then, at most three, what makes the screen look unfinished next to a released product of its kind, the most noticeable first: a main view that fills only part of the window and leaves the rest empty, a scene or page that looks sparse or like a placeholder, panels or text that crowd what the user watches."""
+PLAY_LOOK_FINISH = """ Then, at most three, what makes the screen look unfinished next to a released product of its kind, the most noticeable first, each on a line starting with "- unfinished: ": a main view that fills only part of the window and leaves the rest empty, a scene or page that looks sparse or like a placeholder, panels or text that crowd what the user watches."""
 
 RECHECK_PROMPT = """A worker just changed an app an AI built for this request: {goal}
 
@@ -241,6 +246,19 @@ def parse_defects(reply: str) -> tuple[str, ...]:
         if line.strip().startswith("- ") and line.strip()[2:].strip()
     ]
     return tuple(defects[:MAX_DEFECTS])
+
+
+def bound_unfinished(defects: tuple[str, ...]) -> tuple[str, ...]:
+    """``defects`` with only the first :data:`MAX_UNFINISHED` lines marked unfinished."""
+    kept: list[str] = []
+    marked = 0
+    for defect in defects:
+        if defect.lower().startswith(UNFINISHED_MARK):
+            marked += 1
+            if marked > MAX_UNFINISHED:
+                continue
+        kept.append(defect)
+    return tuple(kept)
 
 
 def build_review_prompt(seed: Seed) -> str:
@@ -734,7 +752,7 @@ async def complete_after_run(
         )
         if look is None:
             return "look_failed", (), ()
-        visible = parse_defects(look)
+        visible = bound_unfinished(parse_defects(look))
         return ("found" if visible else "clean"), visible, played[round_no][0]
 
     async def prefers_earlier(script: PlayScript, earlier: int, latest: int) -> bool:
@@ -870,6 +888,7 @@ __all__ = [
     "CHECK_DIR",
     "FIX_PROMPT",
     "MAX_CHECKS",
+    "MAX_UNFINISHED",
     "NO_DEFECTS",
     "PLAY_BOUND_SECONDS",
     "PLAY_STOP_GRACE_SECONDS",
@@ -884,7 +903,9 @@ __all__ = [
     "REVIEWER_PERMISSION_MODE",
     "REVIEWER_TOOLS",
     "STAGE_EVENT",
+    "UNFINISHED_MARK",
     "WORKER_TOOLS",
+    "bound_unfinished",
     "build_fix_prompt",
     "build_pick_prompt",
     "check_command",
