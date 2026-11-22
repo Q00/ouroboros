@@ -92,6 +92,49 @@ def test_a_put_back_that_fails_part_way_leaves_the_app_as_it_was(tmp_path) -> No
     assert (app / "src").read_text() == "now a file"
 
 
+def test_a_put_back_that_fails_part_way_removes_what_it_made(tmp_path) -> None:
+    app = _app(tmp_path)
+    (app / "lib" / "extra").mkdir(parents=True)
+    (app / "lib" / "extra" / "util.js").write_text("help()")
+    (app / "lib" / "kept.js").write_text("kept()")
+    version = keep(app)
+    assert version is not None
+    (app / "lib" / "extra" / "util.js").unlink()
+    (app / "lib" / "extra").rmdir()
+    (app / "lib" / "kept.js").unlink()
+    (app / "lib").rmdir()
+    (app / "index.html").write_text("<p>new</p>")
+    (app / "src" / "game.js").unlink()
+    (app / "src").rmdir()
+    (app / "src").write_text("now a file")  # written after lib/, and cannot be
+
+    with pytest.raises(OSError):
+        put_back(app, version)
+
+    assert not (app / "lib").exists()
+    assert (app / "index.html").read_text() == "<p>new</p>"
+    assert (app / "src").read_text() == "now a file"
+    assert sorted(p.name for p in app.iterdir()) == ["index.html", "run.sh", "src"]
+
+
+def test_a_failed_put_back_leaves_a_directory_that_held_something_else(tmp_path) -> None:
+    app = _app(tmp_path)
+    (app / "lib").mkdir()
+    (app / "lib" / "util.js").write_text("help()")
+    version = keep(app)
+    assert version is not None
+    (app / "lib" / "util.js").unlink()
+    (app / "lib" / "other.js").write_text("other()")
+    (app / "src" / "game.js").unlink()
+    (app / "src").rmdir()
+    (app / "src").write_text("now a file")
+
+    with pytest.raises(OSError):
+        put_back(app, version)
+
+    assert sorted(p.name for p in (app / "lib").iterdir()) == ["other.js"]
+
+
 def test_a_put_back_never_writes_through_a_planted_link(tmp_path) -> None:
     app = _app(tmp_path)
     version = keep(app)

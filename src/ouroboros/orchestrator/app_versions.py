@@ -11,12 +11,13 @@ in memory, and writes back an earlier one when it looks better than the latest
 Only regular files are kept; a symlink is neither followed nor kept. Each write
 goes through a directory reached from the app's directory without following a
 symlink (:func:`ouroboros.orchestrator.playtest.open_dir_inside`). Files made
-after a version stay when it is put back: nothing is deleted.
+after a version stay when it is put back: nothing is deleted. When a write
+fails part-way, the app is returned to how it was before the put-back.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import contextlib
 from dataclasses import dataclass
 import errno
@@ -80,9 +81,10 @@ def keep(working_dir: Path) -> AppVersion | None:
 def put_back(working_dir: Path, version: AppVersion) -> int:
     """Write ``version``'s files back where they differ now; the number written.
 
-    When a write fails part-way, each file written over is put back as it was and
-    the error is raised, so the app is not left a mix of two versions. When the
-    app's files now cannot all be kept, nothing is written.
+    When a write fails part-way, each file written over is put back as it was,
+    each file and directory the put-back made is removed, and the error is
+    raised, so the app is not left a mix of two versions. When the app's files
+    now cannot all be kept, nothing is written.
     """
     now = keep(working_dir)
     if now is None:
@@ -92,18 +94,45 @@ def put_back(working_dir: Path, version: AppVersion) -> int:
         for rel, (data, mode) in sorted(version.files.items())
         if now.files.get(rel) != (data, mode)
     ]
+    made_dirs = _missing_dirs(working_dir, [rel for rel, _, _ in changed])
     written: list[str] = []
     try:
         for rel, data, mode in changed:
             _write(working_dir, rel, data, mode)
             written.append(rel)
     except OSError:
-        for rel in written:
-            if rel in now.files:
-                with contextlib.suppress(OSError):
+        for rel in reversed(written):
+            with contextlib.suppress(OSError):
+                if rel in now.files:
                     _write(working_dir, rel, *now.files[rel])
+                else:
+                    _remove(working_dir, rel, os.unlink)
+        for rel in made_dirs:  # deepest first; one that is not empty stays
+            with contextlib.suppress(OSError):
+                _remove(working_dir, rel, os.rmdir)
         raise
     return len(written)
+
+
+def _missing_dirs(working_dir: Path, rels: list[str]) -> list[str]:
+    """The directories on the way to ``rels`` that do not exist now, deepest first."""
+    missing: set[str] = set()
+    for rel in rels:
+        parts = PurePosixPath(rel).parts[:-1]
+        for depth in range(1, len(parts) + 1):
+            prefix = PurePosixPath(*parts[:depth]).as_posix()
+            if prefix not in missing and not os.path.lexists(working_dir / prefix):
+                missing.add(prefix)
+    return sorted(missing, key=lambda rel: (-len(PurePosixPath(rel).parts), rel))
+
+
+def _remove(working_dir: Path, rel: str, remove: Callable[..., None]) -> None:
+    path = PurePosixPath(rel)
+    fd = open_dir_inside(working_dir, Path(*path.parts[:-1]))
+    try:
+        remove(path.name, dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 def _write(working_dir: Path, rel: str, data: bytes, mode: int) -> None:
