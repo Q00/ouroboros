@@ -347,14 +347,15 @@ criteria. So after a run of such a Seed completes, and before evaluation,
 4. A second read-only code review lists what now stops the app from loading or
    working, and the app is played and looked at once more.
 5. A worker repairs what step 4 found, once, and the app is played again.
-6. The version played last is compared with each earlier played version, the
-   one just before it first (`orchestrator/app_versions.py` keeps their
-   regular files in memory, outside `.ouroboros/`, `.git` and
-   `node_modules`). A read-only reviewer says which of two plays' screenshots
-   a first-time user would rather get, then again with the two named the
-   other way round. When both prefer the earlier version, its files are
-   written back; files made after it stay, and a write that fails part-way is
-   undone.
+6. The played versions are compared to keep the best
+   (`orchestrator/app_versions.py` keeps their regular files in memory,
+   outside `.ouroboros/`, `.git` and `node_modules`). Starting from the
+   version played last, each earlier played version, the one just before it
+   first, is compared with the best so far: a read-only reviewer says which of
+   two plays' screenshots a first-time user would rather get, then again with
+   the two named the other way round, and when both prefer the earlier
+   version it becomes the best so far. The best is written back at the end;
+   files made after it stay, and a write that fails part-way is undone.
 
 Each play is bounded (180 s, then the browser is killed); each session has a
 hang guard and one retry after a provider error. A delegated run's parent

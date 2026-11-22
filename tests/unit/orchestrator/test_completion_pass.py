@@ -1109,7 +1109,18 @@ async def test_the_latest_version_stays_unless_both_picks_prefer_an_earlier_one(
 async def test_a_repair_that_looks_worse_gives_way_to_the_version_before_it(tmp_path) -> None:
     app = _app(tmp_path)
     factory = _Factory(
-        ["NONE", PLAN, "- app.js: not drawn", "done", "NONE", "- app.js: dim", "done", "2", "1"]
+        [
+            "NONE",
+            PLAN,
+            "- app.js: not drawn",
+            "done",
+            "NONE",
+            "- app.js: dim",
+            "done",
+            "2",
+            "1",
+            "1",
+        ]
     )
     factory.actions[3] = _rewrites(app, index__html="<p>fixed</p>")
     factory.actions[6] = _rewrites(app, index__html="<p>one white slab</p>")
@@ -1121,11 +1132,56 @@ async def test_a_repair_that_looks_worse_gives_way_to_the_version_before_it(tmp_
 
     assert (app / "index.html").read_text() == "<p>fixed</p>"
     assert len(player.calls) == 3
-    # The version before the repair keeps the fix: the first is not asked about.
-    assert len(factory.created) == 9
+    # The first version is then compared with the fix, which a pick prefers.
+    assert len(factory.created) == 10
+    last = factory.calls[9]["prompt"]
+    assert "Version 1, its screenshots in order: .ouroboros/playtest/round-2/01-shot.png" in last
+    assert "Version 2, its screenshots in order: .ouroboros/playtest/round-1/01-shot.png" in last
     record = result.meta["completion_pass"]
     assert (record["replay_3"], record["kept_round"], record["last_round"]) == ("played", 2, 3)
     assert "The version played in round 2 looked better than the last one" in result.text_content
+
+
+@pytest.mark.asyncio
+async def test_a_first_build_that_beats_the_fix_kept_over_the_repair_is_put_back(
+    tmp_path,
+) -> None:
+    app = _app(tmp_path)
+    factory = _Factory(
+        [
+            "NONE",
+            PLAN,
+            "- app.js: not drawn",
+            "done",
+            "NONE",
+            "- app.js: dim",
+            "done",
+            "2",
+            "1",
+            "2",
+            "1",
+        ]
+    )
+    factory.actions[3] = _rewrites(app, index__html="<p>a narrower track</p>", extra__js="x")
+    factory.actions[6] = _rewrites(app, index__html="<p>narrower still</p>")
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=_Player()
+    )
+
+    assert (app / "index.html").read_text() == "<canvas></canvas>"
+    assert (app / "extra.js").read_text() == "x"  # nothing is deleted
+    assert len(factory.created) == 11
+    first, second = factory.calls[9]["prompt"], factory.calls[10]["prompt"]
+    assert "Version 1, its screenshots in order: .ouroboros/playtest/round-2/01-shot.png" in first
+    assert "Version 1, its screenshots in order: .ouroboros/playtest/round-1/01-shot.png" in second
+    record = result.meta["completion_pass"]
+    assert (record["kept_round"], record["last_round"]) == (1, 3)
+    assert "put_back" not in record
+    assert (
+        "The version played in round 1 looked better than the last one, so it was put back."
+        in result.text_content
+    )
 
 
 @pytest.mark.asyncio
