@@ -40,6 +40,7 @@ import { useShortPath } from "../core/paths";
 import { invalidate, useResource } from "../core/resource";
 import { href, navigate } from "../core/router";
 import { useSnapshotStream } from "../core/stream";
+import { clearNewChatDraft, newChatDraft, rememberNewChatDraft } from "../core/ui";
 import type { AutoView, BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatProject, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, FolderProbe, ModelRejection, Readiness, RunTile } from "../core/types";
 import type { Tone } from "../ui/bits";
 import { Chip, CopyButton, Empty, Field, LoadError, LogView, Notice, Skeleton } from "../ui/bits";
@@ -221,12 +222,13 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
   const { t, tx } = useT();
   const shortPath = useShortPath();
   const ids = useId();
-  const [goal, setGoal] = useState("");
+  const savedDraft = newChatDraft.get();
+  const [goal, setGoal] = useState(savedDraft.goal);
   const [mode, setMode] = useState<ChatMode>("interview");
   // A new project by default: the console's launch folder says nothing about
   // what the user is building, so reading it as the project must be a choice.
   const [project, setProject] = useState<ChatProject>("new");
-  const [cwd, setCwd] = useState("");
+  const [cwd, setCwd] = useState(savedDraft.cwd);
   const [backend, setBackend] = useState(FOLLOW);
   const [model, setModel] = useState("");
   const goalRef = useRef<HTMLTextAreaElement>(null);
@@ -251,6 +253,7 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
         backend: backend === FOLLOW ? "" : backend,
         model: mode === "ask" ? model : "",
       });
+      clearNewChatDraft();
       invalidate("/api/chat/sessions");
       // Auto runs as a console job: list it in Activity with the others.
       if (mode === "auto") void adoptRunningJobs();
@@ -299,7 +302,11 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
           rows={4}
           value={goal}
           placeholder={t(`chat.new.placeholder.${mode}`)}
-          onChange={(event) => setGoal(event.target.value)}
+          onChange={(event) => {
+            const value = event.target.value;
+            setGoal(value);
+            rememberNewChatDraft(value, cwd);
+          }}
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && goal.trim()) {
               event.preventDefault();
@@ -322,7 +329,9 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
               type="button"
               className="starter"
               onClick={() => {
-                setGoal(t(`chat.new.starter.${key}`));
+                const value = t(`chat.new.starter.${key}`);
+                setGoal(value);
+                rememberNewChatDraft(value, cwd);
                 goalRef.current?.focus();
               }}
             >
@@ -354,7 +363,18 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
           >
             <div className="input-icon">
               <Folder size={15} aria-hidden />
-              <input id={`${ids}-cwd`} className="input input-mono" value={cwd} spellCheck={false} autoComplete="off" onChange={(event) => setCwd(event.target.value)} />
+              <input
+                id={`${ids}-cwd`}
+                className="input input-mono"
+                value={cwd}
+                spellCheck={false}
+                autoComplete="off"
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setCwd(value);
+                  rememberNewChatDraft(goal, value);
+                }}
+              />
             </div>
             <FolderStatus probe={probe} mode={mode} />
           </Field>
