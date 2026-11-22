@@ -46,12 +46,24 @@ class AppVersion:
 def keep(working_dir: Path) -> AppVersion | None:
     """The app's regular files now, or ``None`` when they cannot all be kept.
 
-    Too many files, too many bytes or a file that cannot be read keeps nothing:
-    putting part of a version back would leave a mix that was never played.
+    Too many files, too many bytes, or a file or directory that cannot be read
+    keeps nothing: putting part of a version back would leave a mix that was
+    never played.
     """
+    try:
+        return _keep(working_dir)
+    except OSError:  # a directory the walk could not read
+        return None
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
+def _keep(working_dir: Path) -> AppVersion | None:
     files: dict[str, tuple[bytes, int]] = {}
     total = 0
-    for root, dirs, names in os.walk(working_dir):
+    for root, dirs, names in os.walk(working_dir, onerror=_raise):
         dirs[:] = sorted(d for d in dirs if d not in SKIPPED_DIRS)
         for name in sorted(names):
             path = Path(root) / name
@@ -83,8 +95,10 @@ def put_back(working_dir: Path, version: AppVersion) -> int:
 
     When a write fails part-way, each file written over is put back as it was,
     each file and directory the put-back made is removed, and the error is
-    raised, so the app is not left a mix of two versions. When the app's files
-    now cannot all be kept, nothing is written.
+    raised, so the app is not left a mix of two versions. Nothing is written,
+    and an error is raised, when the app's files now cannot all be kept, or when
+    a path the version holds is now a link, or a directory on its way is not a
+    directory: writing would replace what is there.
     """
     now = keep(working_dir)
     if now is None:
@@ -94,6 +108,8 @@ def put_back(working_dir: Path, version: AppVersion) -> int:
         for rel, (data, mode) in sorted(version.files.items())
         if now.files.get(rel) != (data, mode)
     ]
+    for rel, _, _ in changed:
+        _check_way(working_dir, rel)
     made_dirs = _missing_dirs(working_dir, [rel for rel, _, _ in changed])
     written: list[str] = []
     try:
@@ -112,6 +128,20 @@ def put_back(working_dir: Path, version: AppVersion) -> int:
                 _remove(working_dir, rel, os.rmdir)
         raise
     return len(written)
+
+
+def _check_way(working_dir: Path, rel: str) -> None:
+    """Raise when something other than a directory, or than a file at the end, is on ``rel``'s way."""
+    parts = PurePosixPath(rel).parts
+    for depth in range(1, len(parts) + 1):
+        path = working_dir.joinpath(*parts[:depth])
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            return
+        fits = stat.S_ISREG(mode) if depth == len(parts) else stat.S_ISDIR(mode)
+        if not fits:
+            raise OSError(errno.EEXIST, "a put-back would replace this", str(path))
 
 
 def _missing_dirs(working_dir: Path, rels: list[str]) -> list[str]:

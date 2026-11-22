@@ -56,6 +56,35 @@ def test_an_app_with_a_file_that_cannot_be_read_is_not_kept(tmp_path) -> None:
         (app / "src" / "game.js").chmod(0o644)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_an_app_with_a_directory_that_cannot_be_read_is_not_kept(tmp_path) -> None:
+    app = _app(tmp_path)
+    (app / "src" / "levels").mkdir()
+    (app / "src" / "levels" / "one.json").write_text("{}")
+    (app / "src" / "levels").chmod(0)
+    try:
+        assert keep(app) is None
+    finally:
+        (app / "src" / "levels").chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_nothing_is_put_back_while_a_directory_cannot_be_read(tmp_path) -> None:
+    app = _app(tmp_path)
+    version = keep(app)
+    assert version is not None
+    (app / "index.html").write_text("<p>new</p>")
+    (app / "src" / "levels").mkdir()
+    (app / "src" / "levels").chmod(0)
+    try:
+        with pytest.raises(OSError):
+            put_back(app, version)
+    finally:
+        (app / "src" / "levels").chmod(0o755)
+
+    assert (app / "index.html").read_text() == "<p>new</p>"
+
+
 def test_a_version_put_back_restores_what_changed_and_deletes_nothing(tmp_path) -> None:
     app = _app(tmp_path)
     version = keep(app)
@@ -76,7 +105,7 @@ def test_a_version_put_back_restores_what_changed_and_deletes_nothing(tmp_path) 
     assert put_back(app, version) == 0
 
 
-def test_a_put_back_that_fails_part_way_leaves_the_app_as_it_was(tmp_path) -> None:
+def test_a_put_back_blocked_by_a_file_on_the_way_writes_nothing(tmp_path) -> None:
     app = _app(tmp_path)
     version = keep(app)
     assert version is not None
@@ -92,32 +121,59 @@ def test_a_put_back_that_fails_part_way_leaves_the_app_as_it_was(tmp_path) -> No
     assert (app / "src").read_text() == "now a file"
 
 
-def test_a_put_back_that_fails_part_way_removes_what_it_made(tmp_path) -> None:
+def test_a_put_back_leaves_a_link_where_the_version_had_a_file(tmp_path) -> None:
     app = _app(tmp_path)
-    (app / "lib" / "extra").mkdir(parents=True)
-    (app / "lib" / "extra" / "util.js").write_text("help()")
-    (app / "lib" / "kept.js").write_text("kept()")
     version = keep(app)
     assert version is not None
-    (app / "lib" / "extra" / "util.js").unlink()
-    (app / "lib" / "extra").rmdir()
-    (app / "lib" / "kept.js").unlink()
-    (app / "lib").rmdir()
-    (app / "index.html").write_text("<p>new</p>")
-    (app / "src" / "game.js").unlink()
-    (app / "src").rmdir()
-    (app / "src").write_text("now a file")  # written after lib/, and cannot be
+    outside = tmp_path / "outside.html"
+    outside.write_text("theirs")
+    (app / "index.html").unlink()
+    (app / "index.html").symlink_to(outside)
+    (app / "src" / "game.js").write_text("new()")
 
     with pytest.raises(OSError):
         put_back(app, version)
 
-    assert not (app / "lib").exists()
+    assert (app / "index.html").is_symlink()
+    assert outside.read_text() == "theirs"
+    assert (app / "src" / "game.js").read_text() == "new()"
+
+
+def _failing_on(monkeypatch, name: str) -> None:
+    real = app_versions.save_in
+
+    def save_in(dir_fd: int, file_name: str, data: bytes, mode: int | None = None) -> None:
+        if file_name == name:
+            raise OSError(28, "No space left on device")
+        real(dir_fd, file_name, data, mode)
+
+    monkeypatch.setattr(app_versions, "save_in", save_in)
+
+
+def test_a_put_back_that_fails_part_way_is_undone(tmp_path, monkeypatch) -> None:
+    app = _app(tmp_path)
+    (app / "lib" / "extra").mkdir(parents=True)
+    (app / "lib" / "extra" / "util.js").write_text("help()")
+    version = keep(app)
+    assert version is not None
+    (app / "lib" / "extra" / "util.js").unlink()
+    (app / "lib" / "extra").rmdir()
+    (app / "lib").rmdir()
+    (app / "index.html").write_text("<p>new</p>")
+    (app / "src" / "game.js").unlink()
+    (app / "src").rmdir()
+    _failing_on(monkeypatch, "game.js")  # written last: index.html, lib/, then src/
+
+    with pytest.raises(OSError):
+        put_back(app, version)
+
     assert (app / "index.html").read_text() == "<p>new</p>"
-    assert (app / "src").read_text() == "now a file"
-    assert sorted(p.name for p in app.iterdir()) == ["index.html", "run.sh", "src"]
+    assert sorted(p.name for p in app.iterdir()) == ["index.html", "run.sh"]
 
 
-def test_a_failed_put_back_leaves_a_directory_that_held_something_else(tmp_path) -> None:
+def test_a_failed_put_back_leaves_a_directory_that_held_something_else(
+    tmp_path, monkeypatch
+) -> None:
     app = _app(tmp_path)
     (app / "lib").mkdir()
     (app / "lib" / "util.js").write_text("help()")
@@ -125,14 +181,14 @@ def test_a_failed_put_back_leaves_a_directory_that_held_something_else(tmp_path)
     assert version is not None
     (app / "lib" / "util.js").unlink()
     (app / "lib" / "other.js").write_text("other()")
-    (app / "src" / "game.js").unlink()
-    (app / "src").rmdir()
-    (app / "src").write_text("now a file")
+    (app / "src" / "game.js").write_text("new()")
+    _failing_on(monkeypatch, "game.js")
 
     with pytest.raises(OSError):
         put_back(app, version)
 
     assert sorted(p.name for p in (app / "lib").iterdir()) == ["other.js"]
+    assert (app / "src" / "game.js").read_text() == "new()"
 
 
 def test_a_put_back_never_writes_through_a_planted_link(tmp_path) -> None:
