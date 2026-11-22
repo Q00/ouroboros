@@ -800,11 +800,21 @@ def test_a_real_browser_stops_when_told(tmp_path) -> None:
     site = _site(tmp_path)
     script = PlayScript(page="index.html", steps=({"shot": "a"}, {"wait": 5000}, {"shot": "b"}))
     stop = threading.Event()
-    threading.Timer(2.5, stop.set).start()
-    started = time.monotonic()
+    stopped_at: list[float] = []
+
+    def stop_once_the_first_shot_is_saved() -> None:
+        # A fixed timer raced the browser's start on a loaded machine.
+        deadline = time.monotonic() + 60
+        while not (site / "shots" / "01-a.png").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        stopped_at.append(time.monotonic())
+        stop.set()
+
+    threading.Thread(target=stop_once_the_first_shot_is_saved, daemon=True).start()
 
     report = playtest.play(site, script, site / "shots", browser, stop)
 
-    assert time.monotonic() - started < 8
+    assert stopped_at
+    assert time.monotonic() - stopped_at[0] < 3
     assert [p.name for p in report.shots] == ["01-a.png"]
     assert report.notes == [playtest.STOPPED_NOTE]
