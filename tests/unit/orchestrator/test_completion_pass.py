@@ -455,20 +455,21 @@ async def test_the_app_is_played_before_the_fix_and_again_after_it(tmp_path) -> 
     app = _app(tmp_path)
     player = _Player()
     visible = "- game.js: the GO! banner stays on screen during the race"
-    factory = _Factory(["- (core) no lap count", PLAN, visible, "done", "NONE", "NONE"])
+    factory = _Factory(["- (core) no lap count", PLAN, visible, "done", "NONE", "NONE", "0"])
 
     result = await _complete(
         factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=player
     )
 
-    reviewer, planner, looker, fixer, rechecker, relooker = factory.created
-    for session in (reviewer, planner, looker, rechecker, relooker):
+    reviewer, planner, looker, fixer, rechecker, relooker, picker = factory.created
+    for session in (reviewer, planner, looker, rechecker, relooker, picker):
         assert session["permission_mode"] == "default"
     assert [call["tools"] for call in factory.calls] == [
         list(REVIEWER_TOOLS),
         list(REVIEWER_TOOLS),
         list(REVIEWER_TOOLS),
         list(WORKER_TOOLS),
+        list(REVIEWER_TOOLS),
         list(REVIEWER_TOOLS),
         list(REVIEWER_TOOLS),
     ]
@@ -495,7 +496,14 @@ async def test_the_app_is_played_before_the_fix_and_again_after_it(tmp_path) -> 
     assert "never make the page detect that browser or behave differently in it" in fix_prompt
     saved = json.loads((app / ".ouroboros/playtest/script.json").read_text())
     assert saved == {"page": "index.html", "steps": [dict(step) for step in script.steps]}
-    assert ".ouroboros/playtest/round-2/01-shot.png" in factory.calls[5]["prompt"]
+    relook = factory.calls[5]["prompt"]
+    assert ".ouroboros/playtest/round-2/01-shot.png" in relook
+    assert (
+        "with these screenshots, in the same order: .ouroboros/playtest/round-1/01-shot.png,"
+        " .ouroboros/playtest/round-1/02-shot.png. Open them too"
+    ) in relook
+    assert "look unfinished" in look and "look unfinished" not in relook
+    assert "played before the last change" not in look
     assert result.meta["completion_pass"] == {
         "status": "fixed",
         "defects": 1,
@@ -506,12 +514,68 @@ async def test_the_app_is_played_before_the_fix_and_again_after_it(tmp_path) -> 
         "regressions": [],
         "replay_2": "clean",
         "replay_2_defects": [],
+        "kept_round": 2,
+        "last_round": 2,
     }
+    pick = factory.calls[6]["prompt"]
+    assert (
+        "Version 1, its screenshots in order: .ouroboros/playtest/round-2/01-shot.png,"
+        " .ouroboros/playtest/round-2/02-shot.png\nIts page logged or met these problems:\n"
+        "- TypeError: lap is undefined\nVersion 2, its screenshots in order:"
+        " .ouroboros/playtest/round-1/01-shot.png"
+    ) in pick
+    assert (app / "index.html").read_text() == "<canvas></canvas>"
     assert (
         "a code review found 1 defect(s). Playing it in a browser showed 1 visible problem(s)."
         " A worker fixed them. A second code review found nothing broken. Played again, it"
         " showed nothing broken."
     ) in result.text_content
+
+
+def test_only_the_first_lines_marked_unfinished_are_kept() -> None:
+    defects = (
+        "unfinished: the track fills a third of the window",
+        "game.js: ArrowUp does nothing",
+        "Unfinished: the scene is sparse",
+        "unfinished: the HUD crowds the road",
+        "unfinished: the sky is flat",
+        "index.html: the start button is cut off",
+        "unfinished: the karts are boxes",
+    )
+
+    assert completion_pass.bound_unfinished(defects) == defects[:4] + defects[5:6]
+    assert completion_pass.bound_unfinished(defects[1:2]) == defects[1:2]
+    assert completion_pass.bound_unfinished(()) == ()
+
+
+@pytest.mark.asyncio
+async def test_a_look_that_marks_more_than_three_unfinished_lines_passes_on_three(
+    tmp_path,
+) -> None:
+    app = _app(tmp_path)
+    look = "\n".join(
+        [
+            "- game.js: the GO! banner stays on screen during the race",
+            *(f"- unfinished: problem {n}" for n in range(1, 6)),
+        ]
+    )
+    factory = _Factory(["NONE", PLAN, look, "done", "NONE", "NONE", "0"])
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=_Player()
+    )
+
+    kept = [
+        "game.js: the GO! banner stays on screen during the race",
+        "unfinished: problem 1",
+        "unfinished: problem 2",
+        "unfinished: problem 3",
+    ]
+    assert result.meta["completion_pass"]["visible_defects"] == kept
+    fix_prompt = factory.calls[3]["prompt"]
+    assert "- unfinished: problem 3\n" in fix_prompt
+    assert "problem 4" not in fix_prompt and "problem 5" not in fix_prompt
+    assert "Playing it in a browser showed 4 visible problem(s)." in result.text_content
 
 
 def test_the_check_command_asks_with_this_python() -> None:
@@ -744,13 +808,16 @@ async def test_a_worker_without_a_shell_gets_no_check_command(tmp_path) -> None:
 async def test_what_the_recheck_and_the_replay_find_go_to_one_repair(tmp_path) -> None:
     regression = "- index.html: game.js reads #lapTotal, which the page does not have"
     still = "- app.js: the galaxy is still a white blob"
-    factory = _Factory(["NONE", PLAN, "- app.js: not drawn", "done", regression, still, "done"])
+    factory = _Factory(
+        ["NONE", PLAN, "- app.js: not drawn", "done", regression, still, "done", "0", "1"]
+    )
+    player = _Player()
 
     result = await _complete(
-        factory, working_dir=_app(tmp_path), browser_finder=lambda: "/bin/chrome", player=_Player()
+        factory, working_dir=_app(tmp_path), browser_finder=lambda: "/bin/chrome", player=player
     )
 
-    assert len(factory.created) == 7
+    assert len(factory.created) == 9
     repair_prompt = factory.calls[6]["prompt"]
     assert factory.calls[6]["tools"] == list(WORKER_TOOLS)
     assert f"{regression}\n{still}" in repair_prompt
@@ -763,8 +830,24 @@ async def test_what_the_recheck_and_the_replay_find_go_to_one_repair(tmp_path) -
         "repaired",
     )
     assert record["replay_2_defects"] == [still[2:]]
-    assert "Played again, it still showed 1 problem(s). A worker repaired them." in (
-        result.text_content
+    # The repair is played too, and compared with each version before it.
+    assert player.calls[2][2] == tmp_path / ".ouroboros/playtest/round-3"
+    assert (
+        "Version 1, its screenshots in order: .ouroboros/playtest/round-3/01-shot.png"
+        in (factory.calls[7]["prompt"])
+    )
+    assert (
+        "Version 2, its screenshots in order: .ouroboros/playtest/round-2/01-shot.png"
+        in (factory.calls[7]["prompt"])
+    )
+    assert (
+        "Version 2, its screenshots in order: .ouroboros/playtest/round-1/01-shot.png"
+        in (factory.calls[8]["prompt"])
+    )
+    assert (record["replay_3"], record["kept_round"], record["last_round"]) == ("played", 3, 3)
+    assert (
+        "Played again, it still showed 1 problem(s). A worker repaired them."
+        " It was played once more." in result.text_content
     )
 
 
@@ -791,7 +874,9 @@ async def test_a_clean_review_and_a_clean_play_run_no_worker(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_what_only_the_screen_shows_is_fixed(tmp_path) -> None:
-    factory = _Factory(["NONE", PLAN, "- app.js: the galaxy is not drawn", "done", "NONE", "NONE"])
+    factory = _Factory(
+        ["NONE", PLAN, "- app.js: the galaxy is not drawn", "done", "NONE", "NONE", "0"]
+    )
 
     result = await _complete(
         factory, working_dir=_app(tmp_path), browser_finder=lambda: "/bin/chrome", player=_Player()
@@ -841,7 +926,7 @@ async def test_no_browser_means_no_play_and_no_extra_session(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_the_play_stages_are_announced_with_their_bounds(tmp_path) -> None:
     events = _Events()
-    factory = _Factory(["NONE", PLAN, "- game.js: banner stays", "done", "NONE", "NONE"])
+    factory = _Factory(["NONE", PLAN, "- game.js: banner stays", "done", "NONE", "NONE", "0"])
 
     await _complete(
         factory,
@@ -862,6 +947,7 @@ async def test_the_play_stages_are_announced_with_their_bounds(tmp_path) -> None
         ("recheck", bound),
         ("play_2", play),
         ("play_review_2", bound),
+        ("pick_1", bound),
         ("done", 0.0),
     ]
 
@@ -898,3 +984,259 @@ def test_the_play_prompts_say_what_to_write_and_what_to_look_for() -> None:
         "A step the notes say missed its target tells nothing about the app."
         in completion_pass.PLAY_LOOK_PROMPT
     )
+
+
+def test_only_the_first_look_asks_what_looks_unfinished(tmp_path: Path) -> None:
+    seed = Seed.from_dict(yaml.safe_load(_seed_content()))
+    script = playtest.PlayScript(page="index.html", steps=({"shot": "start"},))
+    report = playtest.PlayReport(shots=[tmp_path / "round-1" / "01-start.png"])
+
+    first = completion_pass.build_play_look_prompt(seed, script, report, tmp_path, 1)
+    second = completion_pass.build_play_look_prompt(seed, script, report, tmp_path, 2)
+
+    finish = completion_pass.PLAY_LOOK_FINISH.strip()
+    assert finish.startswith("Then, at most three, what makes the screen look unfinished")
+    assert 'the most noticeable first, each on a line starting with "- unfinished: "' in finish
+    assert "a main view that fills only part of the window and leaves the rest empty" in finish
+    assert finish in first
+    assert "look unfinished" not in second
+    assert first.endswith("Reply with the list only, or the single word NONE.")
+    assert second.endswith("Reply with the list only, or the single word NONE.")
+    assert completion_pass.build_play_look_prompt(seed, script, report, tmp_path) == first
+
+
+def test_the_second_look_compares_with_the_first_play(tmp_path: Path) -> None:
+    seed = Seed.from_dict(yaml.safe_load(_seed_content()))
+    script = playtest.PlayScript(page="index.html", steps=({"shot": "start"},))
+    report = playtest.PlayReport(shots=[tmp_path / ".ouroboros/playtest/round-2/01-start.png"])
+    before = (".ouroboros/playtest/round-1/01-start.png",)
+
+    second = completion_pass.build_play_look_prompt(seed, script, report, tmp_path, 2, before)
+    alone = completion_pass.build_play_look_prompt(seed, script, report, tmp_path, 2)
+
+    assert (
+        "The same steps were played before the last change, with these screenshots, in the same"
+        " order: .ouroboros/playtest/round-1/01-start.png. Open them too, and also list what looks"
+        " worse now than in them: a control that responded and no longer does"
+    ) in second
+    assert "played before the last change" not in alone
+    assert second.endswith("Reply with the list only, or the single word NONE.")
+
+
+def test_the_plan_uses_every_control_and_the_fix_keeps_what_a_rewrite_had() -> None:
+    seed = Seed.from_dict(yaml.safe_load(_seed_content()))
+    plan = completion_pass.build_play_plan_prompt(seed)
+    fix = completion_pass.build_fix_prompt(seed, ("the kart does not move",))
+
+    assert (
+        "When the code takes more than one control for the same action (arrow keys and letter"
+        " keys, say), use each of them in some step: a later change can drop one"
+    ) in plan
+    assert (
+        "Keep everything that already works: before you rewrite a whole file, note every"
+        " control, screen and feature it has, and check that the new file still has each."
+    ) in fix
+
+
+def _rewrites(app: Path, **files: str | None) -> Callable[[], Awaitable[None]]:
+    """What a worker session does while it runs: write (or, for ``None``, delete) files."""
+
+    async def act() -> None:
+        for name, text in files.items():
+            path = app / name.replace("__", ".")
+            if text is None:
+                path.unlink()
+            else:
+                path.write_text(text)
+
+    return act
+
+
+FIXED = ["NONE", PLAN, "- app.js: the galaxy is not drawn", "done", "NONE", "NONE"]
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_version_both_picks_prefer_is_put_back(tmp_path) -> None:
+    app = _app(tmp_path)
+    (app / "styles.css").write_text("body{}")
+    (app / "run.sh").write_text("#!/bin/sh\n")
+    (app / "run.sh").chmod(0o755)
+    factory = _Factory([*FIXED, "2", "1"])
+    factory.actions[3] = _rewrites(
+        app, index__html="<p>flat</p>", styles__css=None, run__sh="echo", extra__js="x"
+    )
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=_Player()
+    )
+
+    assert (app / "index.html").read_text() == "<canvas></canvas>"
+    assert (app / "styles.css").read_text() == "body{}"
+    assert (app / "run.sh").read_text() == "#!/bin/sh\n"
+    assert (app / "run.sh").stat().st_mode & 0o777 == 0o755
+    assert (app / "extra.js").read_text() == "x"  # a file the fix made stays: nothing is deleted
+    first, second = factory.calls[6]["prompt"], factory.calls[7]["prompt"]
+    assert "Version 1, its screenshots in order: .ouroboros/playtest/round-2/01-shot.png" in first
+    assert "Version 1, its screenshots in order: .ouroboros/playtest/round-1/01-shot.png" in second
+    record = result.meta["completion_pass"]
+    assert (record["kept_round"], record["last_round"]) == (1, 2)
+    assert (
+        "The version played in round 1 looked better than the last one, so it was put back."
+        in result.text_content
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("picks", [["2", "2"], ["1"], ["0"], ["2", "0"], [None, None]])
+async def test_the_latest_version_stays_unless_both_picks_prefer_an_earlier_one(
+    tmp_path, picks
+) -> None:
+    app = _app(tmp_path)
+    factory = _Factory([*FIXED, *picks])
+    factory.actions[3] = _rewrites(app, index__html="<p>new</p>")
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=_Player()
+    )
+
+    assert (app / "index.html").read_text() == "<p>new</p>"
+    assert len(factory.created) == 6 + len(picks)
+    assert result.meta["completion_pass"]["kept_round"] == 2
+    assert "put back" not in result.text_content
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_looks_worse_gives_way_to_the_version_before_it(tmp_path) -> None:
+    app = _app(tmp_path)
+    factory = _Factory(
+        ["NONE", PLAN, "- app.js: not drawn", "done", "NONE", "- app.js: dim", "done", "2", "1"]
+    )
+    factory.actions[3] = _rewrites(app, index__html="<p>fixed</p>")
+    factory.actions[6] = _rewrites(app, index__html="<p>one white slab</p>")
+    player = _Player()
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=player
+    )
+
+    assert (app / "index.html").read_text() == "<p>fixed</p>"
+    assert len(player.calls) == 3
+    # The version before the repair keeps the fix: the first is not asked about.
+    assert len(factory.created) == 9
+    record = result.meta["completion_pass"]
+    assert (record["replay_3"], record["kept_round"], record["last_round"]) == ("played", 2, 3)
+    assert "The version played in round 2 looked better than the last one" in result.text_content
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_cannot_be_played_again_is_left_as_it_is(tmp_path) -> None:
+    app = _app(tmp_path)
+    factory = _Factory(
+        ["NONE", PLAN, "- app.js: not drawn", "done", "NONE", "- app.js: dim", "done"]
+    )
+    factory.actions[6] = _rewrites(app, index__html="<p>repaired</p>")
+
+    class _FailsThird(_Player):
+        def __call__(
+            self,
+            site: Path,
+            script: Any,
+            out_dir: Path,
+            browser: str,
+            stop: threading.Event | None = None,
+        ) -> Any:
+            if len(self.calls) == 2:
+                self.calls.append((site, script, out_dir, browser))
+                raise RuntimeError("browser closed the pipe")
+            return super().__call__(site, script, out_dir, browser, stop)
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=_FailsThird()
+    )
+
+    assert (app / "index.html").read_text() == "<p>repaired</p>"
+    assert len(factory.created) == 7
+    record = result.meta["completion_pass"]
+    assert record["replay_3"] == "play_failed"
+    assert "kept_round" not in record
+    assert "Playing it once more did not finish." in result.text_content
+
+
+@pytest.mark.asyncio
+async def test_a_version_too_large_to_keep_is_never_asked_about(tmp_path, monkeypatch) -> None:
+    from ouroboros.orchestrator import app_versions
+
+    monkeypatch.setattr(app_versions, "MAX_FILES", 0)
+    app = _app(tmp_path)
+    factory = _Factory(list(FIXED))
+    factory.actions[3] = _rewrites(app, index__html="<p>new</p>")
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=_Player()
+    )
+
+    assert len(factory.created) == 6
+    assert (app / "index.html").read_text() == "<p>new</p>"
+    assert result.meta["completion_pass"]["kept_round"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_version_that_cannot_be_put_back_leaves_the_latest(tmp_path, monkeypatch) -> None:
+    from ouroboros.orchestrator import app_versions
+
+    def refuse(working_dir: Path, version: Any) -> int:
+        raise OSError("the app's files cannot all be kept")
+
+    monkeypatch.setattr(app_versions, "put_back", refuse)
+    app = _app(tmp_path)
+    factory = _Factory([*FIXED, "2", "1"])
+    factory.actions[3] = _rewrites(app, index__html="<p>new</p>")
+
+    result = await _complete(
+        factory, working_dir=app, browser_finder=lambda: "/bin/chrome", player=_Player()
+    )
+
+    record = result.meta["completion_pass"]
+    assert (record["put_back"], record["kept_round"]) == ("failed", 2)
+    assert "An earlier version looked better, but it could not be put back." in (
+        result.text_content
+    )
+
+
+def test_a_pick_compares_what_is_drawn_and_answers_with_one_number(tmp_path: Path) -> None:
+    seed = Seed.from_dict(yaml.safe_load(_seed_content()))
+    script = playtest.PlayScript(page="index.html", steps=({"shot": "start"},))
+    first = (("r2/01-start.png",), playtest.PlayReport(notes=["the browser kept 9 of 106 rules"]))
+    second = (("r1/01-start.png",), playtest.PlayReport())
+
+    pick = completion_pass.build_pick_prompt(seed, script, first, second)
+
+    assert GOAL in pick
+    assert (
+        "Version 1, its screenshots in order: r2/01-start.png\nIts page logged or met these"
+        " problems:\n- the browser kept 9 of 106 rules\nVersion 2, its screenshots in order:"
+        " r1/01-start.png\nIts page logged no errors."
+    ) in pick
+    assert "Do not modify any file." in pick
+    drawn = "Compare what is drawn, not counts or claims the page writes about itself."
+    assert drawn in pick
+    assert drawn in completion_pass.PLAY_LOOK_BEFORE
+    assert pick.endswith("Reply with 1 or 2 only, or 0 when neither is clearly better.")
+
+
+@pytest.mark.parametrize(
+    ("reply", "picked"),
+    [
+        ("1", 1),
+        ("2", 2),
+        ("0", 0),
+        ("Version 2.", 2),
+        ("2 - version 2 beats version 1", 2),
+        ("", 0),
+        (None, 0),
+        ("neither", 0),
+        ("12", 0),
+    ],
+)
+def test_a_pick_reads_the_first_number_it_answers(reply: str | None, picked: int) -> None:
+    assert completion_pass.parse_pick(reply) == picked

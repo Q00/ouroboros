@@ -191,6 +191,33 @@ def test_frame_rates_note_a_stall_and_a_browser_slower_than_a_users() -> None:
     assert len(many) == playtest.MAX_STALL_NOTES
 
 
+def test_layout_notes_name_dropped_rules_and_controls_outside_a_fixed_window() -> None:
+    found = {
+        "sheets": [
+            {"name": "styles.css", "kept": 9, "written": 106, "last": ".vignette"},
+            {"name": "a <style> element", "kept": 4, "written": 4, "last": "body"},
+            {"name": "theme.css", "kept": 1, "written": 3, "last": "p"},  # too few to tell
+        ],
+        "outside": [{"name": f"control {n}", "x": 0, "y": 1200 + n} for n in range(7)],
+        "total": 9,
+    }
+
+    notes = playtest.layout_notes(found)
+
+    assert notes == [
+        "the browser kept 9 of the 106 rules written in styles.css; it dropped every rule after"
+        " the one for `.vignette`: a bracket, parenthesis or quote left open in that rule"
+        " swallows all the rules after it, so they apply nowhere",
+        "when the page had loaded, 7 of its 9 controls were outside the 1280x800 window, which"
+        " the page does not let the user scroll: 'control 0' at x=0, y=1200, 'control 1' at"
+        " x=0, y=1201, 'control 2' at x=0, y=1202, 'control 3' at x=0, y=1203, 'control 4' at"
+        " x=0, y=1204 and 2 more",
+    ]
+    assert playtest.layout_notes({"sheets": [], "outside": [], "total": 3}) == []
+    assert playtest.layout_notes(None) == []
+    assert playtest.layout_notes({"sheets": [{"kept": "9"}], "outside": ["x"]}) == []
+
+
 def test_the_frame_counter_starts_in_its_own_world_and_again_at_once_after_a_navigation() -> None:
     calls: list[str] = []
     answers: list[Any] = [
@@ -351,6 +378,43 @@ def test_a_real_browser_plays_a_page(tmp_path) -> None:
         "no text field had focus when the play typed 'lost', so the text went nowhere:"
         " the play's earlier click missed the field",
         "no visible control labelled 'missing'",
+    ]
+
+
+@pytest.mark.skipif(
+    os.environ.get("OUROBOROS_PLAYTEST_LIVE") != "1",
+    reason="starts a real headless browser; set OUROBOROS_PLAYTEST_LIVE=1",
+)
+def test_a_real_browser_notes_rules_a_stylesheet_lost_and_controls_it_pushed_away(
+    tmp_path,
+) -> None:
+    browser = playtest.installed_browser()
+    if browser is None:
+        pytest.skip("no Chromium-family browser installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    rules = "".join(f".p{n}{{color:red}}" for n in range(12))
+    (site / "styles.css").write_text(
+        "/* { not a rule } */ html,body{height:100%;margin:0;overflow:hidden}"
+        ' .scene{height:100%;content:"{"} .vignette{background:linear-gradient(90deg,red,blue}'
+        f" .controls{{position:fixed;top:10px}}{rules}"
+    )
+    (site / "ok.css").write_text("p{color:blue} @media (min-width:1px){p{color:red}}")
+    (site / "index.html").write_text(
+        '<link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="ok.css">'
+        '<div class="scene"></div><div class="controls"><button>Reset view</button></div>'
+    )
+    script = parse_play_script(_reply([{"shot": "open"}]), site)
+    assert script is not None
+
+    report = playtest.play(site, script, site / "shots", browser)
+
+    assert report.notes == [
+        "the browser kept 3 of the 16 rules written in styles.css; it dropped every rule after"
+        " the one for `.vignette`: a bracket, parenthesis or quote left open in that rule"
+        " swallows all the rules after it, so they apply nowhere",
+        "when the page had loaded, 1 of its 1 controls were outside the 1280x800 window, which"
+        " the page does not let the user scroll: 'Reset view' at x=0, y=800",
     ]
 
 
@@ -736,11 +800,21 @@ def test_a_real_browser_stops_when_told(tmp_path) -> None:
     site = _site(tmp_path)
     script = PlayScript(page="index.html", steps=({"shot": "a"}, {"wait": 5000}, {"shot": "b"}))
     stop = threading.Event()
-    threading.Timer(2.5, stop.set).start()
-    started = time.monotonic()
+    stopped_at: list[float] = []
+
+    def stop_once_the_first_shot_is_saved() -> None:
+        # A fixed timer raced the browser's start on a loaded machine.
+        deadline = time.monotonic() + 60
+        while not (site / "shots" / "01-a.png").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        stopped_at.append(time.monotonic())
+        stop.set()
+
+    threading.Thread(target=stop_once_the_first_shot_is_saved, daemon=True).start()
 
     report = playtest.play(site, script, site / "shots", browser, stop)
 
-    assert time.monotonic() - started < 8
+    assert stopped_at
+    assert time.monotonic() - stopped_at[0] < 3
     assert [p.name for p in report.shots] == ["01-a.png"]
     assert report.notes == [playtest.STOPPED_NOTE]

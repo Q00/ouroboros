@@ -26,7 +26,17 @@ judges the finished product:
    one had a fix count three laps in a second and a repair end the race at
    once. An app that keeps what the user makes is reloaded once near the end,
    and the look counts text a drag left selected and what a reload lost: both
-   cost Auto blind comparisons the play had not looked for;
+   cost Auto blind comparisons the play had not looked for. The first look
+   also names, at most three, what makes the screen look unfinished next to a
+   released product of its kind (a main view that leaves much of the window
+   empty, a sparse scene, panels that crowd the view), each marked
+   ``unfinished:``: blind judges held these against Auto products that worked,
+   and neither look had named them. Only the first three marked lines of a look
+   reach a worker. The second look does not ask for them. The play also notes rules a stylesheet's browser
+   dropped and controls left outside a window the page cannot scroll: a
+   bracket left open made one page drop every rule after it, and two workers
+   told only that its controls were not visible added rules the browser
+   dropped too;
 3. a worker with the run's tools and permission mode fixes what steps 1 and 2
    listed, basic use first. It gets the screenshots and, when it has a shell,
    a command that has the script played again so it can look at the page after
@@ -36,8 +46,21 @@ judges the finished product:
    runs (:func:`serve_checks`);
 4. a second read-only code review lists what now stops the app from loading or
    its basic use from working (a fix that rewrites a file can break what
-   worked), and the script is played and looked at once more;
-5. a worker repairs what step 4 found, once.
+   worked), and the script is played and looked at once more. This look also
+   opens the first play's screenshots and lists what looks worse than in them:
+   fixes that rewrote a file had dropped the arrow keys, or flattened a scene
+   the first play showed, and a look at the new screenshots alone found neither.
+   For the same reason the script uses every control the code takes for one
+   action, and the fix is told to keep what a file it rewrites had;
+5. a worker repairs what step 4 found, once, and the script is played again;
+6. the version played last is compared with each version played before it
+   (:mod:`ouroboros.orchestrator.app_versions` keeps their files), the one just
+   before it first. A read-only reviewer sees both plays' screenshots and says
+   which a first-time user would rather get, then again with the two named the
+   other way round; when both answers prefer the earlier version, its files are
+   written back. A fix had broken the shaders of a galaxy the first play showed,
+   and a repair raised another's particle count until it was one white slab:
+   both stayed, as nothing compared them with what came before.
 
 A parent session that delegated the run (``_ooo_parent_*`` arguments) bounds
 both sessions as it bounded the run: its permission mode is the worker's, and
@@ -79,6 +102,7 @@ import yaml
 from ouroboros.core.seed import Seed
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator import app_versions
 from ouroboros.orchestrator import playtest as playtest_module
 from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
@@ -108,6 +132,10 @@ SESSION_ATTEMPTS = 2
 RETRY_DELAY_SECONDS = 30.0
 MAX_DEFECTS = 40
 MAX_DEFECT_CHARS = 400
+# How a look marks what makes a working screen look unfinished, and how many of
+# those lines reach a worker: they are presentation, not breakage.
+UNFINISHED_MARK = "unfinished:"
+MAX_UNFINISHED = 3
 NO_DEFECTS = "NONE"
 STAGE_EVENT = "execution.completion_pass.updated"
 # The play script itself: at most 60 s of waits and holds, plus page loads and
@@ -138,11 +166,11 @@ FIX_PROMPT = """This project was built for this request: {goal}
 A reviewer read the code and found these defects:
 {defects}
 
-Fix every defect above, the ones about the request's basic use first.{seen} Keep everything that already works. Do not add a server, network service, account, payment or personal-data feature unless the request asks for it. When you are done, check that every element, file, function and asset the running code uses exists, and run the project's tests if it has any."""
+Fix every defect above, the ones about the request's basic use first.{seen} Keep everything that already works: before you rewrite a whole file, note every control, screen and feature it has, and check that the new file still has each. Do not add a server, network service, account, payment or personal-data feature unless the request asks for it. When you are done, check that every element, file, function and asset the running code uses exists, and run the project's tests if it has any."""
 
 PLAY_PLAN_PROMPT = """An AI built an app for this request: {goal}
 
-Read the code paths that run. Do not modify any file. If the app runs in a web browser from a static page in this directory, with no build step and no server code of its own, write a short script that plays it the way a first-time user would for about half a minute: open it, start it, and use its main features with the controls the code really listens to. Act as that user does: click a text field before typing into it, with click_text naming its placeholder or label, since a click by position guessed from the code can miss the field and send the typing nowhere; after typing into a one-line field, submit it by pressing Enter, as most people do, not by clicking a button. If the app keeps what the user makes or changes, reload the page once near the end and take a screenshot after it, as a user who comes back later would. Take a screenshot after each meaningful moment, at most {max_shots}, and name each for what the user has just done (for example "after-typing-a-task" or "after-holding-up-5s"), not for what the app should show by then: half a minute rarely reaches the end of anything that takes a real user longer.
+Read the code paths that run. Do not modify any file. If the app runs in a web browser from a static page in this directory, with no build step and no server code of its own, write a short script that plays it the way a first-time user would for about half a minute: open it, start it, and use its main features with the controls the code really listens to. When the code takes more than one control for the same action (arrow keys and letter keys, say), use each of them in some step: a later change can drop one, and users press either. Act as that user does: click a text field before typing into it, with click_text naming its placeholder or label, since a click by position guessed from the code can miss the field and send the typing nowhere; after typing into a one-line field, submit it by pressing Enter, as most people do, not by clicking a button. If the app keeps what the user makes or changes, reload the page once near the end and take a screenshot after it, as a user who comes back later would. Take a screenshot after each meaningful moment, at most {max_shots}, and name each for what the user has just done (for example "after-typing-a-task" or "after-holding-up-5s"), not for what the app should show by then: half a minute rarely reaches the end of anything that takes a real user longer.
 
 Reply with one JSON object only: {{"page": "<page path in this directory>", "steps": [...]}}. Each step is one of: {{"wait": ms}}, {{"shot": "name"}}, {{"key": "ArrowUp", "hold": ms}}, {{"keys": ["ArrowUp", "ArrowLeft"], "hold": ms}}, {{"press": "Enter"}}, {{"type": "text"}}, {{"click_text": "visible label or a field's placeholder"}}, {{"click": [x, y]}}, {{"drag": [x0, y0, x1, y1, ms]}}, {{"wheel": [x, y, dy]}}, {{"reload": true}}. The window is 1280x800. A step waits or holds at most 5000 ms. Keys: the arrow keys, Enter, Escape, Space, Shift, Tab, Backspace or one character.
 If the app does not run that way, reply with the single word {none}."""
@@ -153,13 +181,35 @@ The app was opened in a 1280x800 browser and played the way a first-time user wo
 {steps}
 The screenshots taken at the screenshot steps, in order: {shots}
 {errors}
-Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, text a drag or click left selected, what the user made that a reload lost, blank or garbled areas, error messages. Do not list missing features. The play lasted about half a minute, and a screenshot's name says what the user had just done, not what the app must show: that something a real user needs longer to reach did not happen in it is not a defect, and nothing should happen faster than it would for a real user. A step the notes say missed its target tells nothing about the app.
+Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, text a drag or click left selected, what the user made that a reload lost, blank or garbled areas, error messages. Do not list missing features. The play lasted about half a minute, and a screenshot's name says what the user had just done, not what the app must show: that something a real user needs longer to reach did not happen in it is not a defect, and nothing should happen faster than it would for a real user. A step the notes say missed its target tells nothing about the app.{finish}{before}
 Reply with the list only, or the single word {none}."""
+
+# The second look only: the same steps were played before the fix, and a fix that
+# rewrote a file had dropped arrow keys or flattened a scene that the first play showed.
+PLAY_LOOK_BEFORE = """ The same steps were played before the last change, with these screenshots, in the same order: {shots}. Open them too, and also list what looks worse now than in them: a control that responded and no longer does, a view or scene drawn less fully, something that showed and is gone. Compare what is drawn, not counts or claims the page writes about itself."""
+
+# The first look only: what judges held against Auto products that worked,
+# where the fix that follows can still be played and looked at again.
+PLAY_LOOK_FINISH = """ Then, at most three, what makes the screen look unfinished next to a released product of its kind, the most noticeable first, each on a line starting with "- unfinished: ": a main view that fills only part of the window and leaves the rest empty, a scene or page that looks sparse or like a placeholder, panels or text that crowd what the user watches."""
 
 RECHECK_PROMPT = """A worker just changed an app an AI built for this request: {goal}
 
 Read the code paths that run, as a strict reviewer. Do not modify any file. List only what stops the app from loading or its basic use from working for a first-time user, one per line starting with "- ", naming the file: an error on load or in the main loop, an element, file, function, asset or module the running code uses that does not exist or is not loaded, a control that does nothing. Do not list missing features.
 Reply with the list only, or the single word {none}."""
+
+
+# Which of two played versions a user would rather get. Asked in both orders;
+# an earlier version is put back only when both answers prefer it.
+PICK_PROMPT = """An AI built an app for this request: {goal}
+
+Two versions of the app were each opened in a 1280x800 browser and played with the same steps:
+{steps}
+Version 1, its screenshots in order: {first}
+{first_notes}
+Version 2, its screenshots in order: {second}
+{second_notes}
+Open every screenshot. Do not modify any file. Which version would a first-time user rather get? Judge what the screenshots show: the main view drawn fully and clearly, controls that visibly respond, nothing blank, washed out, broken, overlapping or cut off. Compare what is drawn, not counts or claims the page writes about itself.
+Reply with 1 or 2 only, or 0 when neither is clearly better."""
 
 
 def _expected_seed(seed_content: str) -> Seed | None:
@@ -198,6 +248,19 @@ def parse_defects(reply: str) -> tuple[str, ...]:
     return tuple(defects[:MAX_DEFECTS])
 
 
+def bound_unfinished(defects: tuple[str, ...]) -> tuple[str, ...]:
+    """``defects`` with only the first :data:`MAX_UNFINISHED` lines marked unfinished."""
+    kept: list[str] = []
+    marked = 0
+    for defect in defects:
+        if defect.lower().startswith(UNFINISHED_MARK):
+            marked += 1
+            if marked > MAX_UNFINISHED:
+                continue
+        kept.append(defect)
+    return tuple(kept)
+
+
 def build_review_prompt(seed: Seed) -> str:
     scope = seed.sourced_scope
     assert scope is not None
@@ -220,7 +283,12 @@ def build_play_plan_prompt(seed: Seed) -> str:
 
 
 def build_play_look_prompt(
-    seed: Seed, script: PlayScript, report: PlayReport, working_dir: Path
+    seed: Seed,
+    script: PlayScript,
+    report: PlayReport,
+    working_dir: Path,
+    round_no: int = 1,
+    before: tuple[str, ...] = (),
 ) -> str:
     scope = seed.sourced_scope
     assert scope is not None
@@ -236,8 +304,41 @@ def build_play_look_prompt(
         steps=script.describe(),
         shots=shots,
         errors=errors,
+        finish=PLAY_LOOK_FINISH if round_no == 1 else "",
+        before=PLAY_LOOK_BEFORE.format(shots=", ".join(before)) if before else "",
         none=NO_DEFECTS,
     )
+
+
+def _play_notes(report: PlayReport) -> str:
+    lines = [*report.errors, *report.notes]
+    if not lines:
+        return "Its page logged no errors."
+    return "Its page logged or met these problems:\n" + "\n".join(f"- {line}" for line in lines)
+
+
+def build_pick_prompt(
+    seed: Seed,
+    script: PlayScript,
+    first: tuple[tuple[str, ...], PlayReport],
+    second: tuple[tuple[str, ...], PlayReport],
+) -> str:
+    scope = seed.sourced_scope
+    assert scope is not None
+    return PICK_PROMPT.format(
+        goal=scope.goal or seed.goal,
+        steps=script.describe(),
+        first=", ".join(first[0]),
+        first_notes=_play_notes(first[1]),
+        second=", ".join(second[0]),
+        second_notes=_play_notes(second[1]),
+    )
+
+
+def parse_pick(reply: str | None) -> int:
+    """The version a pick preferred, 1 or 2; 0 for neither or no answer."""
+    found = re.search(r"\b([012])\b", reply or "")
+    return int(found.group(1)) if found else 0
 
 
 def build_fix_prompt(
@@ -505,6 +606,17 @@ def _with_record(run_result: MCPToolResult, record: dict[str, Any]) -> MCPToolRe
             text += _REPLAY_TEXT[record["replay_2"]].format(n=still)
         if "repair" in record:
             text += _REPAIR_TEXT[record["repair"]]
+        if record.get("replay_3") == "played":
+            text += " It was played once more."
+        elif record.get("replay_3") == "play_failed":
+            text += " Playing it once more did not finish."
+        if record.get("put_back") == "failed":
+            text += " An earlier version looked better, but it could not be put back."
+        elif record.get("kept_round", 0) < record.get("last_round", 0):
+            text += (
+                f" The version played in round {record['kept_round']} looked better than the"
+                " last one, so it was put back."
+            )
         if record.get("checks"):
             text += f" While they worked, the page was played {record['checks']} more time(s)."
     text = f"\nCompletion pass: {text}\n"
@@ -601,10 +713,11 @@ async def complete_after_run(
                 with contextlib.suppress(asyncio.CancelledError):
                     await server
 
-    async def play_and_look(
-        script: PlayScript, browser: str, round_no: int
-    ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
-        """One play of ``script``: its status, the visible defects and the shots."""
+    # Each round's shots and report, by round; a round that did not play is absent.
+    played: dict[int, tuple[tuple[str, ...], PlayReport]] = {}
+
+    async def play_round(script: PlayScript, browser: str, round_no: int) -> PlayReport | None:
+        """One play of ``script``, its shots in ``round-<round_no>``; ``None`` if it failed."""
         stage = "play" if round_no == 1 else f"play_{round_no}"
         await _announce(event_store, execution_id, stage, PLAY_BOUND_SECONDS, attempt=1)
         out = working_dir / PLAYTEST_DIR / f"round-{round_no}"
@@ -617,18 +730,50 @@ async def complete_after_run(
             log.warning(
                 "execution.completion_pass.play_failed", error=str(exc) or type(exc).__name__
             )
-            return "play_failed", (), ()
+            return None
         if not report.shots:
+            return None
+        played[round_no] = (
+            tuple(path.relative_to(working_dir).as_posix() for path in report.shots),
+            report,
+        )
+        return report
+
+    async def play_and_look(
+        script: PlayScript, browser: str, round_no: int, before: tuple[str, ...] = ()
+    ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        """One play of ``script``: its status, the visible defects and the shots."""
+        report = await play_round(script, browser, round_no)
+        if report is None:
             return "play_failed", (), ()
         look = await review(
             "play_review" if round_no == 1 else f"play_review_{round_no}",
-            build_play_look_prompt(seed, script, report, working_dir),
+            build_play_look_prompt(seed, script, report, working_dir, round_no, before),
         )
         if look is None:
             return "look_failed", (), ()
-        visible = parse_defects(look)
-        shots = tuple(path.relative_to(working_dir).as_posix() for path in report.shots)
-        return ("found" if visible else "clean"), visible, shots
+        visible = bound_unfinished(parse_defects(look))
+        return ("found" if visible else "clean"), visible, played[round_no][0]
+
+    async def prefers_earlier(script: PlayScript, earlier: int, latest: int) -> bool:
+        """Whether a pick in each order prefers round ``earlier``'s version to ``latest``'s."""
+        first = await review(
+            f"pick_{earlier}", build_pick_prompt(seed, script, played[latest], played[earlier])
+        )
+        if parse_pick(first) != 2:
+            return False
+        second = await review(
+            f"pick_{earlier}_swapped",
+            build_pick_prompt(seed, script, played[earlier], played[latest]),
+        )
+        return parse_pick(second) == 1
+
+    async def keep_version() -> app_versions.AppVersion | None:
+        try:
+            return await asyncio.to_thread(app_versions.keep, working_dir)
+        except OSError as exc:
+            log.warning("execution.completion_pass.version_not_kept", error=str(exc))
+            return None
 
     check: str | None = None
     checks: list[str] = []
@@ -669,6 +814,10 @@ async def complete_after_run(
         record["visible_defects"] = list(visible)
         found = (*defects, *visible)[:MAX_DEFECTS]
         if found:
+            # Each played version is kept, so a later one that looks worse can be undone.
+            versions: dict[int, app_versions.AppVersion | None] = {}
+            if 1 in played:
+                versions[1] = await keep_version()
             fixed = await fix("fix", found, shots)
             record["status"] = "fixed" if fixed is not None else "fix_failed"
             # A worker that rewrote a file, or stopped part-way, can break what worked,
@@ -681,13 +830,40 @@ async def complete_after_run(
             record["regressions"] = list(regressions)
             still: tuple[str, ...] = ()
             if script is not None and browser is not None:
-                status, still, shots = await play_and_look(script, browser, 2)
+                status, still, shots = await play_and_look(script, browser, 2, shots)
                 record["replay_2"] = status
                 record["replay_2_defects"] = list(still)
             broken = (*regressions, *still)[:MAX_DEFECTS]
+            latest = 2 if 2 in played else None
             if broken:
+                if latest is not None:
+                    versions[2] = await keep_version()
                 repaired = await fix("repair", broken, shots if still else ())
                 record["repair"] = "repaired" if repaired is not None else "repair_failed"
+                if latest is not None and script is not None and browser is not None:
+                    # Nothing looked at the app after the repair; a repair that raised a
+                    # galaxy's particle count until it was one white slab stayed.
+                    latest = 3 if await play_round(script, browser, 3) is not None else None
+                    record["replay_3"] = "played" if latest is not None else "play_failed"
+            if latest is not None and script is not None:
+                kept = latest
+                for earlier in sorted(versions, reverse=True):
+                    version = versions[earlier]
+                    if earlier >= latest or earlier not in played or version is None:
+                        continue
+                    if await prefers_earlier(script, earlier, latest):
+                        try:
+                            await asyncio.to_thread(app_versions.put_back, working_dir, version)
+                        except OSError as exc:
+                            log.warning(
+                                "execution.completion_pass.version_not_put_back", error=str(exc)
+                            )
+                            record["put_back"] = "failed"
+                        else:
+                            kept = earlier
+                        break
+                record["kept_round"] = kept
+                record["last_round"] = latest
             if checks:
                 record["checks"] = len(checks)
         log.info(
@@ -701,6 +877,7 @@ async def complete_after_run(
             replay=record.get("replay_2"),
             still_visible=len(record.get("replay_2_defects", ())),
             repair=record.get("repair"),
+            kept_round=record.get("kept_round"),
             checks=len(checks),
         )
     await _announce(event_store, execution_id, "done", 0.0, status=record["status"])
@@ -711,10 +888,14 @@ __all__ = [
     "CHECK_DIR",
     "FIX_PROMPT",
     "MAX_CHECKS",
+    "MAX_UNFINISHED",
     "NO_DEFECTS",
     "PLAY_BOUND_SECONDS",
     "PLAY_STOP_GRACE_SECONDS",
+    "PLAY_LOOK_BEFORE",
+    "PLAY_LOOK_FINISH",
     "PLAY_LOOK_PROMPT",
+    "PICK_PROMPT",
     "PLAY_PLAN_PROMPT",
     "PLAYTEST_DIR",
     "RECHECK_PROMPT",
@@ -722,8 +903,11 @@ __all__ = [
     "REVIEWER_PERMISSION_MODE",
     "REVIEWER_TOOLS",
     "STAGE_EVENT",
+    "UNFINISHED_MARK",
     "WORKER_TOOLS",
+    "bound_unfinished",
     "build_fix_prompt",
+    "build_pick_prompt",
     "check_command",
     "build_play_look_prompt",
     "build_play_plan_prompt",
@@ -731,5 +915,6 @@ __all__ = [
     "build_review_prompt",
     "complete_after_run",
     "parse_defects",
+    "parse_pick",
     "serve_checks",
 ]
