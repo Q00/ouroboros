@@ -898,3 +898,21 @@ def test_the_play_prompts_say_what_to_write_and_what_to_look_for() -> None:
         "A step the notes say missed its target tells nothing about the app."
         in completion_pass.PLAY_LOOK_PROMPT
     )
+
+
+def test_only_the_first_look_asks_what_looks_unfinished(tmp_path: Path) -> None:
+    seed = Seed.from_dict(yaml.safe_load(_seed_content()))
+    script = playtest.PlayScript(page="index.html", steps=({"shot": "start"},))
+    report = playtest.PlayReport(shots=[tmp_path / "round-1" / "01-start.png"])
+
+    first = completion_pass.build_play_look_prompt(seed, script, report, tmp_path, 1)
+    second = completion_pass.build_play_look_prompt(seed, script, report, tmp_path, 2)
+
+    finish = completion_pass.PLAY_LOOK_FINISH.strip()
+    assert finish.startswith("Then, at most three, what makes the screen look unfinished")
+    assert "a main view that fills only part of the window and leaves the rest empty" in finish
+    assert finish in first
+    assert "look unfinished" not in second
+    assert first.endswith("Reply with the list only, or the single word NONE.")
+    assert second.endswith("Reply with the list only, or the single word NONE.")
+    assert completion_pass.build_play_look_prompt(seed, script, report, tmp_path) == first

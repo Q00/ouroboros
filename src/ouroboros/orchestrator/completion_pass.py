@@ -26,7 +26,12 @@ judges the finished product:
    one had a fix count three laps in a second and a repair end the race at
    once. An app that keeps what the user makes is reloaded once near the end,
    and the look counts text a drag left selected and what a reload lost: both
-   cost Auto blind comparisons the play had not looked for;
+   cost Auto blind comparisons the play had not looked for. The first look
+   also names, at most three, what makes the screen look unfinished next to a
+   released product of its kind (a main view that leaves much of the window
+   empty, a sparse scene, panels that crowd the view): blind judges held these
+   against Auto products that worked, and neither look had named them. The
+   second look does not, as nothing plays after the repair it feeds;
 3. a worker with the run's tools and permission mode fixes what steps 1 and 2
    listed, basic use first. It gets the screenshots and, when it has a shell,
    a command that has the script played again so it can look at the page after
@@ -153,8 +158,12 @@ The app was opened in a 1280x800 browser and played the way a first-time user wo
 {steps}
 The screenshots taken at the screenshot steps, in order: {shots}
 {errors}
-Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, text a drag or click left selected, what the user made that a reload lost, blank or garbled areas, error messages. Do not list missing features. The play lasted about half a minute, and a screenshot's name says what the user had just done, not what the app must show: that something a real user needs longer to reach did not happen in it is not a defect, and nothing should happen faster than it would for a real user. A step the notes say missed its target tells nothing about the app.
+Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, text a drag or click left selected, what the user made that a reload lost, blank or garbled areas, error messages. Do not list missing features. The play lasted about half a minute, and a screenshot's name says what the user had just done, not what the app must show: that something a real user needs longer to reach did not happen in it is not a defect, and nothing should happen faster than it would for a real user. A step the notes say missed its target tells nothing about the app.{finish}
 Reply with the list only, or the single word {none}."""
+
+# The first look only: what judges held against Auto products that worked,
+# where the fix that follows can still be played and looked at again.
+PLAY_LOOK_FINISH = """ Then, at most three, what makes the screen look unfinished next to a released product of its kind, the most noticeable first: a main view that fills only part of the window and leaves the rest empty, a scene or page that looks sparse or like a placeholder, panels or text that crowd what the user watches."""
 
 RECHECK_PROMPT = """A worker just changed an app an AI built for this request: {goal}
 
@@ -220,7 +229,7 @@ def build_play_plan_prompt(seed: Seed) -> str:
 
 
 def build_play_look_prompt(
-    seed: Seed, script: PlayScript, report: PlayReport, working_dir: Path
+    seed: Seed, script: PlayScript, report: PlayReport, working_dir: Path, round_no: int = 1
 ) -> str:
     scope = seed.sourced_scope
     assert scope is not None
@@ -236,6 +245,7 @@ def build_play_look_prompt(
         steps=script.describe(),
         shots=shots,
         errors=errors,
+        finish=PLAY_LOOK_FINISH if round_no == 1 else "",
         none=NO_DEFECTS,
     )
 
@@ -622,7 +632,7 @@ async def complete_after_run(
             return "play_failed", (), ()
         look = await review(
             "play_review" if round_no == 1 else f"play_review_{round_no}",
-            build_play_look_prompt(seed, script, report, working_dir),
+            build_play_look_prompt(seed, script, report, working_dir, round_no),
         )
         if look is None:
             return "look_failed", (), ()
@@ -714,6 +724,7 @@ __all__ = [
     "NO_DEFECTS",
     "PLAY_BOUND_SECONDS",
     "PLAY_STOP_GRACE_SECONDS",
+    "PLAY_LOOK_FINISH",
     "PLAY_LOOK_PROMPT",
     "PLAY_PLAN_PROMPT",
     "PLAYTEST_DIR",
