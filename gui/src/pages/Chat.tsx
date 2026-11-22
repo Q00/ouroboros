@@ -1054,6 +1054,11 @@ function Thread({ id }: { id: string }) {
   type Action = "seed" | "run" | "suggest" | "accept" | "dismiss" | "stop" | "retry_default";
   const [act, acting] = useAction(
     async (action: Action, extra: Record<string, unknown> = {}) => {
+      if (action === "run") {
+        // Remove a stale preparation offer as soon as this hand-off starts.
+        // A needs_git refusal below restores the offer with its new reason.
+        setGitOffer(null);
+      }
       try {
         const next = await post<ChatSession>(`${path}/actions`, { action, ...extra });
         setSession(next);
@@ -1066,7 +1071,6 @@ function Thread({ id }: { id: string }) {
         throw failure;
       }
       if (action === "run") {
-        setGitOffer(null);
         invalidate("/api/runs", "/api/overview");
       }
     },
