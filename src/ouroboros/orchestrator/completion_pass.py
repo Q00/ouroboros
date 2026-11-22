@@ -41,7 +41,12 @@ judges the finished product:
    runs (:func:`serve_checks`);
 4. a second read-only code review lists what now stops the app from loading or
    its basic use from working (a fix that rewrites a file can break what
-   worked), and the script is played and looked at once more;
+   worked), and the script is played and looked at once more. This look also
+   opens the first play's screenshots and lists what looks worse than in them:
+   fixes that rewrote a file had dropped the arrow keys, or flattened a scene
+   the first play showed, and a look at the new screenshots alone found neither.
+   For the same reason the script uses every control the code takes for one
+   action, and the fix is told to keep what a file it rewrites had;
 5. a worker repairs what step 4 found, once.
 
 A parent session that delegated the run (``_ooo_parent_*`` arguments) bounds
@@ -143,11 +148,11 @@ FIX_PROMPT = """This project was built for this request: {goal}
 A reviewer read the code and found these defects:
 {defects}
 
-Fix every defect above, the ones about the request's basic use first.{seen} Keep everything that already works. Do not add a server, network service, account, payment or personal-data feature unless the request asks for it. When you are done, check that every element, file, function and asset the running code uses exists, and run the project's tests if it has any."""
+Fix every defect above, the ones about the request's basic use first.{seen} Keep everything that already works: before you rewrite a whole file, note every control, screen and feature it has, and check that the new file still has each. Do not add a server, network service, account, payment or personal-data feature unless the request asks for it. When you are done, check that every element, file, function and asset the running code uses exists, and run the project's tests if it has any."""
 
 PLAY_PLAN_PROMPT = """An AI built an app for this request: {goal}
 
-Read the code paths that run. Do not modify any file. If the app runs in a web browser from a static page in this directory, with no build step and no server code of its own, write a short script that plays it the way a first-time user would for about half a minute: open it, start it, and use its main features with the controls the code really listens to. Act as that user does: click a text field before typing into it, with click_text naming its placeholder or label, since a click by position guessed from the code can miss the field and send the typing nowhere; after typing into a one-line field, submit it by pressing Enter, as most people do, not by clicking a button. If the app keeps what the user makes or changes, reload the page once near the end and take a screenshot after it, as a user who comes back later would. Take a screenshot after each meaningful moment, at most {max_shots}, and name each for what the user has just done (for example "after-typing-a-task" or "after-holding-up-5s"), not for what the app should show by then: half a minute rarely reaches the end of anything that takes a real user longer.
+Read the code paths that run. Do not modify any file. If the app runs in a web browser from a static page in this directory, with no build step and no server code of its own, write a short script that plays it the way a first-time user would for about half a minute: open it, start it, and use its main features with the controls the code really listens to. When the code takes more than one control for the same action (arrow keys and letter keys, say), use each of them in some step: a later change can drop one, and users press either. Act as that user does: click a text field before typing into it, with click_text naming its placeholder or label, since a click by position guessed from the code can miss the field and send the typing nowhere; after typing into a one-line field, submit it by pressing Enter, as most people do, not by clicking a button. If the app keeps what the user makes or changes, reload the page once near the end and take a screenshot after it, as a user who comes back later would. Take a screenshot after each meaningful moment, at most {max_shots}, and name each for what the user has just done (for example "after-typing-a-task" or "after-holding-up-5s"), not for what the app should show by then: half a minute rarely reaches the end of anything that takes a real user longer.
 
 Reply with one JSON object only: {{"page": "<page path in this directory>", "steps": [...]}}. Each step is one of: {{"wait": ms}}, {{"shot": "name"}}, {{"key": "ArrowUp", "hold": ms}}, {{"keys": ["ArrowUp", "ArrowLeft"], "hold": ms}}, {{"press": "Enter"}}, {{"type": "text"}}, {{"click_text": "visible label or a field's placeholder"}}, {{"click": [x, y]}}, {{"drag": [x0, y0, x1, y1, ms]}}, {{"wheel": [x, y, dy]}}, {{"reload": true}}. The window is 1280x800. A step waits or holds at most 5000 ms. Keys: the arrow keys, Enter, Escape, Space, Shift, Tab, Backspace or one character.
 If the app does not run that way, reply with the single word {none}."""
@@ -158,8 +163,12 @@ The app was opened in a 1280x800 browser and played the way a first-time user wo
 {steps}
 The screenshots taken at the screenshot steps, in order: {shots}
 {errors}
-Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, text a drag or click left selected, what the user made that a reload lost, blank or garbled areas, error messages. Do not list missing features. The play lasted about half a minute, and a screenshot's name says what the user had just done, not what the app must show: that something a real user needs longer to reach did not happen in it is not a defect, and nothing should happen faster than it would for a real user. A step the notes say missed its target tells nothing about the app.{finish}
+Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, text a drag or click left selected, what the user made that a reload lost, blank or garbled areas, error messages. Do not list missing features. The play lasted about half a minute, and a screenshot's name says what the user had just done, not what the app must show: that something a real user needs longer to reach did not happen in it is not a defect, and nothing should happen faster than it would for a real user. A step the notes say missed its target tells nothing about the app.{finish}{before}
 Reply with the list only, or the single word {none}."""
+
+# The second look only: the same steps were played before the fix, and a fix that
+# rewrote a file had dropped arrow keys or flattened a scene that the first play showed.
+PLAY_LOOK_BEFORE = """ The same steps were played before the last change, with these screenshots, in the same order: {shots}. Open them too, and also list what looks worse now than in them: a control that responded and no longer does, a view or scene drawn less fully, something that showed and is gone."""
 
 # The first look only: what judges held against Auto products that worked,
 # where the fix that follows can still be played and looked at again.
@@ -229,7 +238,12 @@ def build_play_plan_prompt(seed: Seed) -> str:
 
 
 def build_play_look_prompt(
-    seed: Seed, script: PlayScript, report: PlayReport, working_dir: Path, round_no: int = 1
+    seed: Seed,
+    script: PlayScript,
+    report: PlayReport,
+    working_dir: Path,
+    round_no: int = 1,
+    before: tuple[str, ...] = (),
 ) -> str:
     scope = seed.sourced_scope
     assert scope is not None
@@ -246,6 +260,7 @@ def build_play_look_prompt(
         shots=shots,
         errors=errors,
         finish=PLAY_LOOK_FINISH if round_no == 1 else "",
+        before=PLAY_LOOK_BEFORE.format(shots=", ".join(before)) if before else "",
         none=NO_DEFECTS,
     )
 
@@ -612,7 +627,7 @@ async def complete_after_run(
                     await server
 
     async def play_and_look(
-        script: PlayScript, browser: str, round_no: int
+        script: PlayScript, browser: str, round_no: int, before: tuple[str, ...] = ()
     ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
         """One play of ``script``: its status, the visible defects and the shots."""
         stage = "play" if round_no == 1 else f"play_{round_no}"
@@ -632,7 +647,7 @@ async def complete_after_run(
             return "play_failed", (), ()
         look = await review(
             "play_review" if round_no == 1 else f"play_review_{round_no}",
-            build_play_look_prompt(seed, script, report, working_dir, round_no),
+            build_play_look_prompt(seed, script, report, working_dir, round_no, before),
         )
         if look is None:
             return "look_failed", (), ()
@@ -691,7 +706,7 @@ async def complete_after_run(
             record["regressions"] = list(regressions)
             still: tuple[str, ...] = ()
             if script is not None and browser is not None:
-                status, still, shots = await play_and_look(script, browser, 2)
+                status, still, shots = await play_and_look(script, browser, 2, shots)
                 record["replay_2"] = status
                 record["replay_2_defects"] = list(still)
             broken = (*regressions, *still)[:MAX_DEFECTS]
@@ -724,6 +739,7 @@ __all__ = [
     "NO_DEFECTS",
     "PLAY_BOUND_SECONDS",
     "PLAY_STOP_GRACE_SECONDS",
+    "PLAY_LOOK_BEFORE",
     "PLAY_LOOK_FINISH",
     "PLAY_LOOK_PROMPT",
     "PLAY_PLAN_PROMPT",

@@ -495,7 +495,14 @@ async def test_the_app_is_played_before_the_fix_and_again_after_it(tmp_path) -> 
     assert "never make the page detect that browser or behave differently in it" in fix_prompt
     saved = json.loads((app / ".ouroboros/playtest/script.json").read_text())
     assert saved == {"page": "index.html", "steps": [dict(step) for step in script.steps]}
-    assert ".ouroboros/playtest/round-2/01-shot.png" in factory.calls[5]["prompt"]
+    relook = factory.calls[5]["prompt"]
+    assert ".ouroboros/playtest/round-2/01-shot.png" in relook
+    assert (
+        "with these screenshots, in the same order: .ouroboros/playtest/round-1/01-shot.png,"
+        " .ouroboros/playtest/round-1/02-shot.png. Open them too"
+    ) in relook
+    assert "look unfinished" in look and "look unfinished" not in relook
+    assert "played before the last change" not in look
     assert result.meta["completion_pass"] == {
         "status": "fixed",
         "defects": 1,
@@ -916,3 +923,36 @@ def test_only_the_first_look_asks_what_looks_unfinished(tmp_path: Path) -> None:
     assert first.endswith("Reply with the list only, or the single word NONE.")
     assert second.endswith("Reply with the list only, or the single word NONE.")
     assert completion_pass.build_play_look_prompt(seed, script, report, tmp_path) == first
+
+
+def test_the_second_look_compares_with_the_first_play(tmp_path: Path) -> None:
+    seed = Seed.from_dict(yaml.safe_load(_seed_content()))
+    script = playtest.PlayScript(page="index.html", steps=({"shot": "start"},))
+    report = playtest.PlayReport(shots=[tmp_path / ".ouroboros/playtest/round-2/01-start.png"])
+    before = (".ouroboros/playtest/round-1/01-start.png",)
+
+    second = completion_pass.build_play_look_prompt(seed, script, report, tmp_path, 2, before)
+    alone = completion_pass.build_play_look_prompt(seed, script, report, tmp_path, 2)
+
+    assert (
+        "The same steps were played before the last change, with these screenshots, in the same"
+        " order: .ouroboros/playtest/round-1/01-start.png. Open them too, and also list what looks"
+        " worse now than in them: a control that responded and no longer does"
+    ) in second
+    assert "played before the last change" not in alone
+    assert second.endswith("Reply with the list only, or the single word NONE.")
+
+
+def test_the_plan_uses_every_control_and_the_fix_keeps_what_a_rewrite_had() -> None:
+    seed = Seed.from_dict(yaml.safe_load(_seed_content()))
+    plan = completion_pass.build_play_plan_prompt(seed)
+    fix = completion_pass.build_fix_prompt(seed, ("the kart does not move",))
+
+    assert (
+        "When the code takes more than one control for the same action (arrow keys and letter"
+        " keys, say), use each of them in some step: a later change can drop one"
+    ) in plan
+    assert (
+        "Keep everything that already works: before you rewrite a whole file, note every"
+        " control, screen and feature it has, and check that the new file still has each."
+    ) in fix
