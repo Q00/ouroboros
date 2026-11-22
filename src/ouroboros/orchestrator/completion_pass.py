@@ -53,14 +53,19 @@ judges the finished product:
    For the same reason the script uses every control the code takes for one
    action, and the fix is told to keep what a file it rewrites had;
 5. a worker repairs what step 4 found, once, and the script is played again;
-6. the version played last is compared with each version played before it
-   (:mod:`ouroboros.orchestrator.app_versions` keeps their files), the one just
-   before it first. A read-only reviewer sees both plays' screenshots and says
-   which a first-time user would rather get, then again with the two named the
-   other way round; when both answers prefer the earlier version, its files are
-   written back. A fix had broken the shaders of a galaxy the first play showed,
-   and a repair raised another's particle count until it was one white slab:
-   both stayed, as nothing compared them with what came before.
+6. the versions played are compared to keep the best
+   (:mod:`ouroboros.orchestrator.app_versions` keeps their files): starting from
+   the version played last, each version played before it, the one just before
+   it first, is compared with the best so far. A read-only reviewer sees both
+   plays' screenshots and says which a first-time user would rather get, then
+   again with the two named the other way round; when both answers prefer the
+   earlier version, it becomes the best so far. The best is written back at the
+   end. A fix had broken the shaders of a galaxy the first play showed, and a
+   repair raised another's particle count until it was one white slab: both
+   stayed, as nothing compared them with what came before. Later a fix that
+   rewrote a kart game's renderer drew less than the first build, and it stayed
+   when the repair after it looked worse again, as the first build was compared
+   only with the repair.
 
 A parent session that delegated the run (``_ooo_parent_*`` arguments) bounds
 both sessions as it bounded the run: its permission mode is the worker's, and
@@ -846,22 +851,27 @@ async def complete_after_run(
                     latest = 3 if await play_round(script, browser, 3) is not None else None
                     record["replay_3"] = "played" if latest is not None else "play_failed"
             if latest is not None and script is not None:
-                kept = latest
+                # Each earlier version is compared with the best one so far, not only with
+                # the last: a fix that drew less than the first build stayed when the repair
+                # after it looked worse again, as nothing compared the fix with the first build.
+                best, chosen = latest, None
                 for earlier in sorted(versions, reverse=True):
                     version = versions[earlier]
-                    if earlier >= latest or earlier not in played or version is None:
+                    if earlier >= best or earlier not in played or version is None:
                         continue
-                    if await prefers_earlier(script, earlier, latest):
-                        try:
-                            await asyncio.to_thread(app_versions.put_back, working_dir, version)
-                        except OSError as exc:
-                            log.warning(
-                                "execution.completion_pass.version_not_put_back", error=str(exc)
-                            )
-                            record["put_back"] = "failed"
-                        else:
-                            kept = earlier
-                        break
+                    if await prefers_earlier(script, earlier, best):
+                        best, chosen = earlier, version
+                kept = latest
+                if chosen is not None:
+                    try:
+                        await asyncio.to_thread(app_versions.put_back, working_dir, chosen)
+                    except OSError as exc:
+                        log.warning(
+                            "execution.completion_pass.version_not_put_back", error=str(exc)
+                        )
+                        record["put_back"] = "failed"
+                    else:
+                        kept = best
                 record["kept_round"] = kept
                 record["last_round"] = latest
             if checks:
