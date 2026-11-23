@@ -1,4 +1,4 @@
-import { Menu, RefreshCw, TriangleAlert } from "lucide-react";
+import { Menu, PanelLeft, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useT } from "../i18n";
@@ -9,6 +9,7 @@ import { invalidate, useResource } from "../core/resource";
 import { href, useRoute } from "../core/router";
 import { useStore } from "../core/store";
 import type { Overview } from "../core/types";
+import { sidebarCollapsed, toggleSidebar } from "../core/ui";
 import { IconButton } from "../ui/Button";
 import { Spinner } from "../ui/Mark";
 import { Brand, Drawer } from "./Sidebar";
@@ -19,6 +20,7 @@ export function TopBar() {
   const route = useRoute();
   const overview = useResource<Overview>("/api/overview", { interval: 12_000 });
   const jobState = useStore(jobs);
+  const collapsed = useStore(sidebarCollapsed);
   const [drawer, setDrawer] = useState(false);
   useEffect(() => setDrawer(false), [route.page, route.rest]);
   const data = overview.data;
@@ -32,6 +34,14 @@ export function TopBar() {
       <button type="button" className="icon-btn icon-btn-sm topbar-menu" aria-label={t("shell.menu")} onClick={() => setDrawer(true)}>
         <Menu size={17} aria-hidden />
       </button>
+      <IconButton
+        label={collapsed ? t("shell.expand") : t("shell.collapse")}
+        className="icon-btn-sm topbar-sidebar-toggle"
+        aria-expanded={!collapsed}
+        onClick={toggleSidebar}
+      >
+        <PanelLeft size={16} aria-hidden />
+      </IconButton>
       <span className="topbar-brand">
         <Brand />
       </span>
