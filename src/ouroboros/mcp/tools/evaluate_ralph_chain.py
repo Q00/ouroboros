@@ -359,16 +359,17 @@ async def _claim_or_start_chained_ralph(
                 "Automatic Ralph chaining is not configured: "
                 "StartRalphHandler dependency is missing"
             )
-        started = await start_ralph_handler.handle(
-            {
-                "lineage_id": lineage_id,
-                "execute": True,
-                "parallel": True,
-                "skip_qa": False,
-                "project_dir": arguments.get("working_dir"),
-                "max_generations": bound_max_generations,
-            }
-        )
+        start_arguments: dict[str, Any] = {
+            "lineage_id": lineage_id,
+            "execute": True,
+            "parallel": True,
+            "skip_qa": False,
+            "project_dir": arguments.get("working_dir"),
+            "max_generations": bound_max_generations,
+        }
+        if arguments.get("_auto_in_place") is True:
+            start_arguments["_allow_dirty_in_place"] = True
+        started = await start_ralph_handler.handle(start_arguments)
         if started.is_err:
             raise RuntimeError(started.error.message)
         job_id = started.value.meta.get("job_id")

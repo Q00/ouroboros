@@ -259,6 +259,7 @@ class HandlerRunStarter:
         efficiency_mode: str = "adaptive",
         frugality_assurance: str = "observe",
         frugality_assurance_explicit: bool = False,
+        in_place: bool = False,
     ) -> None:
         self.handler = handler
         self.cwd = cwd
@@ -266,6 +267,7 @@ class HandlerRunStarter:
         self.efficiency_mode = efficiency_mode
         self.frugality_assurance = frugality_assurance
         self.frugality_assurance_explicit = frugality_assurance_explicit
+        self.in_place = in_place
 
     async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:
         seed_yaml = yaml.dump(
@@ -277,6 +279,8 @@ class HandlerRunStarter:
             "use_worktree": self.use_worktree,
             "efficiency_mode": self.efficiency_mode,
         }
+        if self.in_place:
+            arguments["_auto_in_place"] = True
         # No successor override is ever sent: Auto stops at COMPLETE as soon as
         # the run has a durable handle, so the run job's own
         # run → evaluate → ralph chain is the only owner. ``execution.auto_evaluate``
@@ -298,6 +302,8 @@ class HandlerRunStarter:
         }
         if isinstance(meta.get("success"), bool):
             run_meta["success"] = meta["success"]
+        if self.in_place:
+            run_meta["auto_in_place"] = True
         if isinstance(meta.get("_subagent"), dict):
             run_meta["_subagent"] = meta["_subagent"]
         return run_meta

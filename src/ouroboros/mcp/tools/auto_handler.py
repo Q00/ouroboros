@@ -591,6 +591,7 @@ class AutoHandler:
                 start_execute,
                 cwd=state.cwd,
                 use_worktree=False,  # auto's worktree policy alone decides isolation
+                in_place=state.managed_worktree is None,
                 efficiency_mode=state.efficiency_mode,
                 frugality_assurance=state.frugality_assurance,
                 frugality_assurance_explicit=state.frugality_assurance_explicit,

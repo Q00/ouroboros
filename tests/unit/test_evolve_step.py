@@ -3651,6 +3651,52 @@ class TestEvolveStepHandler:
         assert order == [f"checkpoint:{source}", f"restore:{source}"]
 
     @pytest.mark.asyncio
+    async def test_in_place_auto_handoff_skips_lineage_worktree_for_dirty_source(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Automatic in-place Ralph continues in the evaluated checkout."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed()
+        gen_result = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        handler = EvolveStepHandler(evolutionary_loop=make_loop(store, gen_result=gen_result))
+        source = tmp_path / "dirty"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+        (source / "product.txt").write_text("evaluated product\n", encoding="utf-8")
+        import yaml
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.checkpoint_managed_worktree",
+                side_effect=AssertionError("in-place handoff must not checkpoint a worktree"),
+            ),
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+                side_effect=AssertionError("in-place handoff must not create a worktree"),
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_in_place",
+                    "seed_content": yaml.dump(seed.to_dict()),
+                    "project_dir": str(source),
+                    "_allow_dirty_in_place": True,
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_ok
+
+    @pytest.mark.asyncio
     async def test_public_benchmark_control_isolation_gates_fail_closed(
         self,
         tmp_path: Path,
