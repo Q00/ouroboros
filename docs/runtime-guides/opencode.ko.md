@@ -16,6 +16,17 @@ OpenCode 1.x LLM 완료 응답은 네이티브 `step_finish` 이벤트의 토큰
 프로세스 경로를 사용하려면 `ouroboros setup --runtime opencode --opencode-mode subprocess`를
 실행하세요. 이 경로는 호스트 내 자식 Task 전달을 활성화하지 않습니다.
 
+설정에서 CLI 버전을 확인하지 못하면 플러그인 호환성이 검증되지 않았다는
+경고를 표시한 뒤 V1 브리지를 계속 사용합니다. 사용하기 전에 버전을
+확인하세요. 인식할 수 없는 2.x 호스트에서는 이 브리지를 불러올 수 없습니다.
+
+V2의 `plugins` 목록에 브리지 디렉터리를 직접 등록했다면
+`ouroboros uninstall`은 현재 OpenCode 설정 디렉터리에 해당하는 항목을
+삭제합니다. 다른 디렉터리의 항목은 그대로 둡니다. V2 설정에 JSONC 주석,
+후행 쉼표 또는 중복 키가 있으면 uninstall은 OpenCode 설정과 브리지
+디렉터리를 보존하고 Ouroboros 항목을 직접 제거하라고 안내합니다. 설정이
+조용히 폐기되지 않도록 하기 위한 동작입니다.
+
 V2는 디렉터리 플러그인 항목과 다른 setup, tool-hook, session permission,
 completion, interruption API를 사용합니다. 항목 이름을 바꾸거나 `setup` export만
 추가해도 호환되는 것은 아닙니다. 남은 포팅 작업은 [#2529](https://github.com/Q00/ouroboros/issues/2529)에서 추적합니다.
