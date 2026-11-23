@@ -4770,10 +4770,9 @@ async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence
     the interview state.  The driver must consult ``is_session_persisted``
     to confirm before saving the id on auto state.
 
-    ``backend.start`` times out on every bounded transient retry attempt
-    (same 0.5s sleep vs. 0.001s timeout each time), so it is called
-    ``_INTERVIEW_TRANSIENT_ATTEMPTS`` times with the SAME pre-allocated id
-    before the driver falls through to the safe-default closure.
+    ``backend.start`` times out after the interview state is persisted. The
+    reconciliation probe must stop the retry loop instead of issuing another
+    start with the same pre-allocated id before the safe-default closure.
     """
     monkeypatch.setattr(interview_recovery, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
     received_ids: list[str | None] = []
@@ -4807,12 +4806,8 @@ async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence
     assert result.status == "seed_ready"
     assert state.interview_session_id, "probe-confirmed id must be saved on auto state"
     assert state.interview_closure_mode == "safe_default_no_backend"
-    assert (
-        received_ids
-        == [state.interview_session_id] * interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
-    ), (
-        "backend.start must receive the pre-allocated interview_id on every "
-        "retry attempt so the persisted interview file matches auto state"
+    assert received_ids == [state.interview_session_id], (
+        "a persisted interview must not be started again after reconciliation cannot resume it"
     )
 
     reloaded = store.load(state.auto_session_id)
