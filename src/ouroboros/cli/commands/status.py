@@ -810,7 +810,10 @@ def _codex_auth_file_exists() -> bool:
     if not auth_base:
         home = os.environ.get("HOME")
         if not home:
-            return False
+            try:
+                home = str(Path.home())
+            except RuntimeError:
+                return False
         auth_base = str(Path(home).expanduser() / ".codex")
     return (Path(auth_base).expanduser() / "auth.json").is_file()
 
