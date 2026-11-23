@@ -54,6 +54,14 @@ class EventStream:
             self._on_close()
 
 
+class FileBody:
+    """A file the server sends as it is: its bytes and their content type."""
+
+    def __init__(self, data: bytes, content_type: str) -> None:
+        self.data = data
+        self.content_type = content_type
+
+
 class ConsoleState:
     """Process-wide state shared by every request."""
 
@@ -592,6 +600,32 @@ def post_chat_action(
         raise _refused(exc, 409, "not_ready") from exc
 
 
+def get_chat_playtest_shot(
+    state: ConsoleState,
+    session_id: str,
+    round_dir: str,
+    name: str,
+    *,
+    query: dict[str, str],
+    body: Any,
+) -> FileBody:
+    """A screenshot the completion pass's play saved in this chat's folder.
+
+    Only a ``.ouroboros/playtest/round-<n>/<nn>-<step>.png`` file of a chat
+    this console has, read as :func:`completion_view.read_shot` allows.
+    """
+    from ouroboros.gui import completion_view
+
+    session = state.harness.get(session_id)
+    cwd = str((session or {}).get("cwd") or "")
+    if session is None or not cwd:
+        raise ApiError(404, "Screenshot not found", "not_found")
+    try:
+        return FileBody(completion_view.read_shot(cwd, round_dir, name), "image/png")
+    except OSError:
+        raise ApiError(404, "Screenshot not found", "not_found") from None
+
+
 def get_chat_stream(
     state: ConsoleState, session_id: str, *, query: dict[str, str], body: Any
 ) -> Any:
@@ -755,6 +789,11 @@ ROUTES: list[tuple[str, re.Pattern[str], Any]] = [
     _r("POST", rf"/api/chat/sessions/{_ID}/messages", post_chat_message),
     _r("POST", rf"/api/chat/sessions/{_ID}/actions", post_chat_action),
     _r("GET", rf"/api/chat/sessions/{_ID}/stream", get_chat_stream),
+    _r(
+        "GET",
+        rf"/api/chat/sessions/{_ID}/playtest/(round-[1-9])/(\d{{2}}-[A-Za-z0-9_-]{{1,32}}\.png)",
+        get_chat_playtest_shot,
+    ),
     _r("GET", r"/api/components", get_components),
     _r("POST", rf"/api/components/{_ID}/install", post_component_install),
     _r("GET", r"/api/daemon", get_daemon),

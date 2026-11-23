@@ -331,6 +331,33 @@ export interface RunTile {
   depth: number;
 }
 
+/** A step on the completion pass's line (gui/completion_view.py). */
+export type CompletionStep =
+  | { kind: "review" }
+  | { kind: "play"; round: number }
+  | { kind: "fix" | "repair"; defects: number | null }
+  | { kind: "pick" };
+
+/**
+ * The completion pass after an Auto run's criteria pass: it plays the app in a
+ * browser, fixes what it found and plays it again (orchestrator/completion_pass.py),
+ * as its stage events say (gui/completion_view.py).
+ */
+export interface CompletionPass {
+  /** The last stage announced: `review`, `play_plan`, `play`, `play_review_2`, `fix`, `pick_1_swapped`, `done`, … */
+  stage: string;
+  /** The play the stage is about, for a play and the look at it. */
+  round: number | null;
+  /** What the last fix or repair was given. */
+  defects: number | null;
+  /** How the pass ended, once `done`. */
+  status: "clean" | "fixed" | "fix_failed" | "review_failed" | null;
+  done: boolean;
+  steps: CompletionStep[];
+  /** The latest play's screenshots in the chat's folder. */
+  shots: { round: number; names: string[] } | null;
+}
+
 export interface RunProgress {
   tiles: RunTile[];
   status: string;
@@ -339,6 +366,8 @@ export interface RunProgress {
   done: number;
   phase: string | null;
   activity: string | null;
+  /** Only on an Auto run's card, from the pass's first stage on. */
+  completion?: CompletionPass | null;
 }
 
 /** A model the agent said it cannot use (src/ouroboros/gui/model_refusal.py). */

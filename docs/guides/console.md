@@ -102,7 +102,15 @@ and Spanish (side rail → language).
     minutes, the card says it is preparing them. An Auto Seed runs one
     worker attempt for all of its criteria, so every tile shows as executing
     while that attempt runs, and each one settles as its criterion is judged
-    after it; the done count moves then.
+    after it; the done count moves then;
+  - under the tiles, once the criteria pass, the completion pass: the run job
+    uses the app in a browser like a first-time user, fixes what it found and
+    uses it again, which can take 10 to 25 minutes. The card says the stage it
+    is on ("Using it in a browser · round 2", "Fixing 16 problems"), a line of
+    steps so far (Review, Try 1, Fix 16, Try 2, …, Pick) and the latest play's
+    screenshots from the folder's `.ouroboros/playtest/round-<n>/`, each opening
+    large. The Verify step names the stage too. It ends with how the pass
+    ended (*Tried it and fixed it*, *Checked it: nothing to fix*, …).
 
   The header and side pane name the agent and Execute model the job runs
   on, resolved as `ouroboros auto` resolves them when the chat starts: the

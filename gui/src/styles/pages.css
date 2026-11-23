@@ -2031,6 +2031,172 @@
   overflow-wrap: anywhere;
 }
 
+/* The completion pass on an Auto run's card (CompletionPass.tsx): it uses the app, fixes it, uses it again. */
+.pass {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.pass-head strong {
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.pass-now {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.pass-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  color: var(--text-mute);
+}
+
+.pass[data-state="done"] .pass-mark {
+  color: var(--ok);
+}
+
+.pass[data-state="warn"] .pass-mark {
+  color: var(--warn);
+}
+
+.pass-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pass-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  color: var(--text-soft);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .pass-step {
+  background: var(--raised);
+}
+
+.pass-step[data-kind="fix"],
+.pass-step[data-kind="repair"] {
+  border-color: var(--warn-soft);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.pass-step[data-current] {
+  border-color: var(--text);
+  color: var(--text);
+  box-shadow: 0 0 0 3px var(--hover);
+}
+
+.pass-shots {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.pass-strip {
+  display: grid;
+  grid-auto-columns: minmax(148px, 1fr);
+  grid-auto-flow: column;
+  gap: 8px;
+  margin: 0;
+  padding: 2px 2px 6px;
+  overflow-x: auto;
+  list-style: none;
+  scroll-snap-type: x proximity;
+}
+
+.pass-strip > li {
+  min-width: 0;
+  scroll-snap-align: start;
+}
+
+.pass-shot {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: zoom-in;
+}
+
+.pass-shot img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--sunk);
+  transition:
+    transform var(--base) var(--ease-out),
+    box-shadow var(--base) var(--ease-out);
+}
+
+.pass-shot:hover img {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-2);
+}
+
+.pass-shot:focus-visible {
+  outline: none;
+}
+
+.pass-shot:focus-visible img {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.pass-shot-name {
+  overflow: hidden;
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pass-shots figcaption {
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+}
+
+.pass-shot-large {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pass-shot img {
+    transition: none;
+  }
+}
+
 .file-list {
   display: grid;
   gap: 2px;

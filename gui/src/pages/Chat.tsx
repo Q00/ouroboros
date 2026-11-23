@@ -49,6 +49,7 @@ import { Modal } from "../ui/Modal";
 import { Picker } from "../ui/Picker";
 import { Segmented } from "../ui/Segmented";
 import { AutoInterview, AutoLog, AutoStepper, autoActivity, autoEnding } from "./AutoView";
+import { CompletionPassView } from "./CompletionPass";
 import { Progress, RunStatus, activityLabel, phaseLabel, runPreparing } from "./Runs";
 import { EASE_OUT, GLIDE, SETTLE } from "../core/motion";
 
@@ -422,7 +423,7 @@ function Tile({ tile }: { tile: RunTile }) {
   );
 }
 
-function RunCard({ message }: { message: ChatMessage }) {
+function RunCard({ message, chatId, live }: { message: ChatMessage; chatId: string | null; live: boolean }) {
   const { t } = useT();
   const progress = message.progress;
   const status = message.run_status ?? "running";
@@ -460,6 +461,7 @@ function RunCard({ message }: { message: ChatMessage }) {
               ))}
             </ul>
           ) : null}
+          {progress.completion ? <CompletionPassView pass={progress.completion} chatId={chatId} live={live} /> : null}
         </>
       ) : (
         <p className="run-card-activity">
@@ -721,7 +723,7 @@ function AnswerProvenance({ message, onCorrect }: { message: ChatMessage; onCorr
   );
 }
 
-function MessageView({ message, running, questionNumber, onCorrect, auto, onRetry, retrying }: { message: ChatMessage; running: boolean; questionNumber: number; onCorrect?: (message: ChatMessage) => void; auto?: AutoView | null; onRetry?: () => void; retrying?: boolean }) {
+function MessageView({ message, running, questionNumber, onCorrect, auto, onRetry, retrying, chatId }: { message: ChatMessage; running: boolean; questionNumber: number; onCorrect?: (message: ChatMessage) => void; auto?: AutoView | null; onRetry?: () => void; retrying?: boolean; chatId?: string }) {
   const { t, tx } = useT();
   let body: ReactNode;
   let shape = "left";
@@ -752,7 +754,7 @@ function MessageView({ message, running, questionNumber, onCorrect, auto, onRetr
       body = <SeedCard message={message} />;
       break;
     case "run":
-      body = <RunCard message={message} />;
+      body = <RunCard message={message} chatId={chatId ?? null} live={running} />;
       break;
     case "result":
       body = <ResultCard message={message} />;
@@ -1201,6 +1203,7 @@ function Thread({ id }: { id: string }) {
                 running={status === "running"}
                 questionNumber={questionNumber}
                 auto={auto}
+                chatId={session.id}
                 onRetry={retryable && message === lastMessage ? () => void run("retry_default") : undefined}
                 retrying={busyAction("retry_default")}
                 onCorrect={canType ? (target) => {

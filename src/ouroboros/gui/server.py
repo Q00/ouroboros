@@ -157,6 +157,16 @@ class _Handler(BaseHTTPRequestHandler):
             if isinstance(result, api.EventStream):
                 self._stream(result)
                 return
+            if isinstance(result, api.FileBody):
+                self._send_bytes(
+                    result.data,
+                    result.content_type,
+                    headers={
+                        "Cache-Control": "private, no-cache",
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+                return
             self._send_json(result)
             return
         self._send_json({"error": "Not found", "code": "not_found"}, status=404)
