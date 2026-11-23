@@ -21,6 +21,10 @@ as ``SourcedScope.expected_experience``:
 - The prompt (``build_prompt``) names no domain: the goal verbatim, a short
   list of what a typical current product of the kind includes, limited to what
   a single local install can do, then the URLs read, in the goal's language.
+  When the request describes the product ("a simple to-do app"), the list is
+  for a typical product of that description, not the fullest of its kind.
+  Researched against the fullest products, one simple to-do app opened on a
+  five-field form and a row of filters.
 - The reply is sanitized without a model (``sanitize_reply``): only ``- `` lines,
   links and URLs stripped, at most ``MAX_LINES`` lines of ``MAX_LINE_CHARS``
   characters; the URLs after ``Sources:`` are kept apart (at most
@@ -133,6 +137,10 @@ def build_prompt(goal: str) -> str:
             "capabilities a user would expect and how it looks and feels in use (presentation, "
             "motion, feedback), most expected first, 6–12 short lines starting "
             "with '- ', each marked (core) or (common).",
+            "When the request describes the product it wants (simple, minimal, for one person, "
+            "and so on), describe a typical current product of that description, not the "
+            "fullest of its kind: a simple one does its main task well and keeps its first "
+            "screen about that task.",
             "Only include what the product itself can do in a single local install: nothing "
             "that needs a server, network service, account, payment, purchase or personal data.",
             "After the list, one line 'Sources:' with URLs you actually read, if any.",

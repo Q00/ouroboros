@@ -85,6 +85,12 @@ def test_the_prompt_names_the_goal_the_list_the_local_limit_and_the_language() -
         "with '- ', each marked (core) or (common)."
     ) in prompt
     assert (
+        "When the request describes the product it wants (simple, minimal, for one person, "
+        "and so on), describe a typical current product of that description, not the "
+        "fullest of its kind: a simple one does its main task well and keeps its first "
+        "screen about that task."
+    ) in prompt
+    assert (
         "Only include what the product itself can do in a single local install: nothing "
         "that needs a server, network service, account, payment, purchase or personal data."
     ) in prompt
