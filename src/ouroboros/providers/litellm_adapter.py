@@ -1201,6 +1201,9 @@ class LiteLLMAdapter:
             kwargs["stop"] = config.stop
 
         if config.response_format:
+            deepseek_json_schema = (
+                "deepseek" in model_lower and config.response_format.get("type") == "json_schema"
+            )
             if (
                 native_claude
                 and not openrouter_native
@@ -1215,6 +1218,19 @@ class LiteLLMAdapter:
                         "content": response_format_instruction(config.response_format),
                     },
                 ]
+            elif deepseek_json_schema:
+                # DeepSeek's API accepts JSON mode but rejects OpenAI's
+                # json_schema response format. Keep the caller's schema
+                # instruction in the prompt while downgrading the wire
+                # format to the provider-supported JSON object mode.
+                kwargs["messages"] = [
+                    *kwargs["messages"],
+                    {
+                        "role": "system",
+                        "content": response_format_instruction(config.response_format),
+                    },
+                ]
+                kwargs["response_format"] = {"type": "json_object"}
             else:
                 kwargs["response_format"] = _litellm_response_format(config.response_format)
 

@@ -291,6 +291,27 @@ class TestLiteLLMAdapterBuildCompletionKwargs:
 
         assert kwargs["response_format"] == response_format
 
+    @pytest.mark.parametrize(
+        "model", ["deepseek/deepseek-chat", "openrouter/deepseek/deepseek-chat"]
+    )
+    def test_downgrades_deepseek_json_schema_to_json_object(self, model: str) -> None:
+        """DeepSeek accepts JSON mode but rejects the json_schema wire format."""
+        adapter = LiteLLMAdapter()
+        schema = {"type": "object", "properties": {"approved": {"type": "boolean"}}}
+        config = CompletionConfig(
+            model=model,
+            response_format={"type": "json_schema", "json_schema": schema},
+        )
+
+        with patch.dict("os.environ", {}, clear=True):
+            kwargs = adapter._build_completion_kwargs(
+                [Message(role=MessageRole.USER, content="Hello")], config
+            )
+
+        assert kwargs["response_format"] == {"type": "json_object"}
+        assert kwargs["messages"][-1]["role"] == "system"
+        assert schema["type"] in kwargs["messages"][-1]["content"]
+
     def test_claude_5_5_json_schema_uses_instruction_not_response_format(self) -> None:
         """The Claude 5.5 instruction path is not affected by the wrapper."""
         adapter = LiteLLMAdapter()
