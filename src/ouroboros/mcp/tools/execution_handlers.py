@@ -37,6 +37,7 @@ from ouroboros.core.execution_preferences import (
     ResolvedExecutionPreferences,
     resolve_execution_preferences,
 )
+from ouroboros.core.project_identity import ProjectIdentityUnavailableError
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.core.seed import Seed, ac_texts
@@ -1758,7 +1759,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     background_started = True
                     try:
 
-                        async def _mark_background_failed(error_message: str) -> Any:
+                        async def _mark_background_failed(error: str | Exception) -> Any:
                             """Persist fallback failure through Foundation B's terminal plan."""
                             acceptance_finalizations: list[dict[str, Any]] | None = None
                             try:
@@ -1780,24 +1781,23 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                     execution_id=_tracker.execution_id,
                                     error=str(exc),
                                 )
-                            mark_failed_kwargs: dict[str, Any] = {
-                                "error_message": error_message,
-                            }
+                            mark_failed_kwargs: dict[str, Any] = {"error_message": str(error)}
+                            cause = error.__cause__ if isinstance(error, Exception) else None
+                            if (
+                                isinstance(cause, ProjectIdentityUnavailableError)
+                                and cause.git_query
+                            ):
+                                mark_failed_kwargs["error_details"] = {"git_query": cause.git_query}
                             try:
-                                supports_plan = (
-                                    "acceptance_finalizations"
-                                    in inspect.signature(_session_repo.mark_failed).parameters
-                                )
+                                parameters = inspect.signature(_session_repo.mark_failed).parameters
+                                supports_plan = "acceptance_finalizations" in parameters
                             except (TypeError, ValueError):
                                 supports_plan = False
                             if supports_plan:
-                                # An explicit empty plan is valid for historical
-                                # zero-root sessions and is rejected by current
-                                # EventStore sessions whose durable roots differ.
+                                # Historical zero-root sessions accept an empty plan.
+                                # Current sessions reject one when durable roots differ.
                                 mark_failed_kwargs["acceptance_finalizations"] = (
-                                    acceptance_finalizations
-                                    if acceptance_finalizations is not None
-                                    else []
+                                    acceptance_finalizations or []
                                 )
                             return await _session_repo.mark_failed(
                                 _tracker.session_id,
@@ -1826,7 +1826,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                     resume_blocked=result.error.details.get("resume_blocked"),
                                 )
                                 return
-                            mark_result = await _mark_background_failed(str(result.error))
+                            mark_result = await _mark_background_failed(result.error)
                             if mark_result.is_err:
                                 log.error(
                                     "mcp.tool.execute_seed.background_mark_failed_error",
