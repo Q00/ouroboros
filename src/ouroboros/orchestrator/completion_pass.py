@@ -26,7 +26,10 @@ judges the finished product:
    one had a fix count three laps in a second and a repair end the race at
    once. An app that keeps what the user makes is reloaded once near the end,
    and the look counts text a drag left selected and what a reload lost: both
-   cost Auto blind comparisons the play had not looked for. The first look
+   cost Auto blind comparisons the play had not looked for. It also counts text
+   too small or faint to read at a glance and a control the user needs that
+   shows only under the pointer: blind judges named these on most Auto to-do
+   apps that worked, and the play had not looked for them either. The first look
    also names, at most three, what makes the screen look unfinished next to a
    released product of its kind (a main view that leaves much of the window
    empty, a sparse scene, panels that crowd the view), each marked
@@ -186,7 +189,7 @@ The app was opened in a 1280x800 browser and played the way a first-time user wo
 {steps}
 The screenshots taken at the screenshot steps, in order: {shots}
 {errors}
-Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, text a drag or click left selected, what the user made that a reload lost, blank or garbled areas, error messages. Do not list missing features. The play lasted about half a minute, and a screenshot's name says what the user had just done, not what the app must show: that something a real user needs longer to reach did not happen in it is not a defect, and nothing should happen faster than it would for a real user. A step the notes say missed its target tells nothing about the app.{finish}{before}
+Open and look at every screenshot. Do not modify any file. List what that user sees that is broken, wrong or confusing, most serious first, one per line starting with "- ", naming the file to change when you can: a main view that does not show what the user needs to act, something that does not respond, text or overlays that stay, overlap or are cut off, text too small or too faint to read at a glance, a control the user needs that shows only while the pointer is over it, text a drag or click left selected, what the user made that a reload lost, blank or garbled areas, error messages. Do not list missing features. The play lasted about half a minute, and a screenshot's name says what the user had just done, not what the app must show: that something a real user needs longer to reach did not happen in it is not a defect, and nothing should happen faster than it would for a real user. A step the notes say missed its target tells nothing about the app.{finish}{before}
 Reply with the list only, or the single word {none}."""
 
 # The second look only: the same steps were played before the fix, and a fix that
