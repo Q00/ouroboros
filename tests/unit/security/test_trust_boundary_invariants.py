@@ -456,10 +456,10 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "os.environ + NO_COLOR; the shared `ouroboros mcp serve` must see the same "
         "config and agent logins as a host-launched stdio server."
     ),
-    ("src/ouroboros/gui/harness.py", "_run_result", "subprocess.run", 1586, 18): (
+    ("src/ouroboros/gui/harness.py", "_run_result", "subprocess.run", 1599, 18): (
         "implicit inherit; read-only `git worktree list`."
     ),
-    ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 1607, 19): (
+    ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 1620, 19): (
         "implicit inherit; read-only `git diff --name-only` / `git status`."
     ),
     ("src/ouroboros/gui/workspace.py", "_git", "subprocess.run", 51, 11): (
