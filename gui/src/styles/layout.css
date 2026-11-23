@@ -413,6 +413,10 @@ body {
   display: none;
 }
 
+.topbar-sidebar-toggle {
+  flex: none;
+}
+
 .topbar-chips {
   flex: 1;
   min-width: 0;
@@ -1274,6 +1278,10 @@ body {
 
   .topbar-menu {
     display: inline-grid;
+  }
+
+  .topbar-sidebar-toggle {
+    display: none;
   }
 
   .topbar-brand {

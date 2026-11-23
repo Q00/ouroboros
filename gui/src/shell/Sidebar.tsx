@@ -9,7 +9,6 @@ import {
   Monitor,
   Moon,
   Network,
-  PanelLeft,
   Plug,
   Power,
   RotateCw,
@@ -36,7 +35,7 @@ import type { ThemeMode } from "../core/theme";
 import { setThemeMode, useThemeMode } from "../core/theme";
 import { toast } from "../core/toast";
 import type { Overview } from "../core/types";
-import { paletteOpen, sidebarCollapsed, toggleSidebar } from "../core/ui";
+import { paletteOpen, sidebarCollapsed } from "../core/ui";
 import { Button, IconButton } from "../ui/Button";
 import { Mark, Spinner } from "../ui/Mark";
 import { Modal } from "../ui/Modal";
@@ -246,15 +245,11 @@ export function Brand() {
 
 /** The side rail on wide windows: full labels, or icons only when collapsed. */
 export function Sidebar() {
-  const { t } = useT();
   const collapsed = useStore(sidebarCollapsed);
   return (
     <aside className="side" data-collapsed={collapsed || undefined}>
       <div className="side-head">
         <Brand />
-        <IconButton label={collapsed ? t("shell.expand") : t("shell.collapse")} className="icon-btn-sm side-toggle" aria-expanded={!collapsed} onClick={toggleSidebar}>
-          <PanelLeft size={16} aria-hidden />
-        </IconButton>
       </div>
       <Nav layoutKey="side" />
       <Footer />
