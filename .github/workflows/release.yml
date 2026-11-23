@@ -104,7 +104,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3.0.3
+        uses: softprops/action-gh-release@v3.0.4
         with:
           files: dist/*
           draft: false
@@ -254,7 +254,7 @@ jobs:
           merge-multiple: true
 
       - name: Attach binaries to release
-        uses: softprops/action-gh-release@v3.0.3
+        uses: softprops/action-gh-release@v3.0.4
         with:
           # Unset, the action uses github.ref_name, which on a dispatch is the
           # branch: it would create a release named after it.
