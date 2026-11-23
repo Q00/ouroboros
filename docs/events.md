@@ -404,6 +404,30 @@ size-bounded, and both reject replay-unsafe names (``stdout``, ``stderr``,
 ``prompt``, ``api_key``, ``token`` and similar secret/raw-output names) so
 durable lifecycle history can be replayed without leaking raw payload material.
 
+## I/O journal preview settings
+
+Set `OUROBOROS_IO_JOURNAL_PREVIEWS` in the environment of the process that
+records tool and LLM calls. Previews help explain a run while limiting how much
+input and output the journal stores.
+
+| Value | Preview recorded |
+|-------|------------------|
+| `on` (default when unset) | Retains a size-limited excerpt. It may contain sensitive text. |
+| `off` | Omits the preview field. |
+| `redacted` | Replaces the preview text with a length marker such as `<redacted len=42>`. |
+
+An unrecognized value falls back to `off`. Hashes and call metadata remain
+available in all three modes.
+
+To omit previews, set the variable before starting a new diagnostic run.
+
+```bash
+export OUROBOROS_IO_JOURNAL_PREVIEWS=off
+```
+
+The setting applies to previews in newly recorded events. Review existing
+records and other event fields separately before sharing them.
+
 ## Adding new event types
 
 When introducing a new event type:
