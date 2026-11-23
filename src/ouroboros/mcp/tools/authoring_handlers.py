@@ -49,7 +49,7 @@ from ouroboros.bigbang.requirement_distillation import (
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.bigbang.turn_planner import InterviewTurnPlanner
-from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
@@ -70,6 +70,7 @@ from ouroboros.mcp.tools.advisory_dispatch import (
     echo_carries_dispatch,
     strip_bridge_notice,
 )
+from ouroboros.mcp.tools.authoring_backend import resolve_backend
 from ouroboros.mcp.tools.first_question_parameters import (
     first_question_parameters,
     normalize_first_selections,
@@ -263,25 +264,6 @@ def _interview_allowed_tools(runtime_backend: str | None) -> list[str] | None:
             session_role=PolicySessionRole.INTERVIEW,
             execution_phase=PolicyExecutionPhase.INTERVIEW,
         )
-    )
-
-
-def _handler_llm_backend(
-    configured_backend: str | None,
-    role: str,
-    *,
-    fallback_runtime_backend: str | None = None,
-) -> str:
-    """Resolve a handler's internal-LLM backend from its role and runtime.
-
-    Auto authoring supplies the selected runtime as the fallback so an
-    explicit ``--runtime`` choice also selects interview and seed-generation
-    calls when no separate LLM backend override is configured.
-    """
-    return get_llm_backend_for_role(
-        role,
-        explicit_backend=configured_backend,
-        fallback_runtime_backend=fallback_runtime_backend,
     )
 
 
@@ -1215,10 +1197,8 @@ class GenerateSeedHandler:
         # Fall-through: real in-process seed generation (subprocess / non-opencode runtimes).
 
         try:
-            backend = _handler_llm_backend(
-                self.llm_backend,
-                "seed_generation",
-                fallback_runtime_backend=self.agent_runtime_backend,
+            backend = resolve_backend(
+                self.llm_backend, "seed_generation", self.agent_runtime_backend
             )
             # Use injected or create services.
             # ``allowed_tools=[]`` paired with ``max_turns=1``: any tool-use
@@ -1543,11 +1523,7 @@ class InterviewHandler:
                 transient scoring failure without losing it; in practice
                 no live caller does.
         """
-        backend = _handler_llm_backend(
-            self.llm_backend,
-            "clarification",
-            fallback_runtime_backend=self.agent_runtime_backend,
-        )
+        backend = resolve_backend(self.llm_backend, "clarification", self.agent_runtime_backend)
         scorer = AmbiguityScorer(
             llm_adapter=llm_adapter,
             model=get_llm_model_for_role("clarification", backend=backend),
@@ -2307,11 +2283,7 @@ class InterviewHandler:
         """Construct the in-process interview engine and its LLM adapter."""
         # One sealed turn makes MCP a pure question generator and prevents a
         # child runtime from rediscovering this MCP server recursively (#765).
-        backend = _handler_llm_backend(
-            self.llm_backend,
-            "interview",
-            fallback_runtime_backend=self.agent_runtime_backend,
-        )
+        backend = resolve_backend(self.llm_backend, "interview", self.agent_runtime_backend)
         llm_adapter = self.llm_adapter or create_llm_adapter(
             backend=backend,
             max_turns=1,
@@ -3152,10 +3124,8 @@ class InterviewHandler:
                 engine, InterviewEngine
             )
             if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT and supports_atomic_turn:
-                backend = _handler_llm_backend(
-                    self.llm_backend,
-                    "clarification",
-                    fallback_runtime_backend=self.agent_runtime_backend,
+                backend = resolve_backend(
+                    self.llm_backend, "clarification", self.agent_runtime_backend
                 )
                 scorer = AmbiguityScorer(
                     llm_adapter=llm_adapter,

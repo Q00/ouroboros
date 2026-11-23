@@ -139,7 +139,7 @@ async def test_nested_mcp_interview_handler_uses_selected_runtime_without_llm_ov
 
     with (
         patch(
-            "ouroboros.mcp.tools.authoring_handlers.get_llm_backend_for_role",
+            "ouroboros.mcp.tools.authoring_backend.get_llm_backend_for_role",
             return_value="codex",
         ) as resolve_backend,
         patch(
