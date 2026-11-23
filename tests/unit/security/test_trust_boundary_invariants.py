@@ -916,9 +916,9 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/codex_plugin.py",
         "inspect_codex_plugin",
         "subprocess.run",
-        146,
+        156,
         17,
-    ): "Operator-selected Codex executable with literal plugin list --marketplace ouroboros --json, no shell; inherited CODEX_HOME intentionally selects the operator profile and is denied from project .env with PATH/loader controls. 5s timeout; spawn/nonzero/invalid inventory yields advisory unknown.",
+    ): "Operator-selected Codex executable with literal plugin list --marketplace ouroboros --json, no shell; CODEX_HOME is inherited or explicitly set to the diagnostic profile in the child only and is denied from project .env with PATH/loader controls. 5s timeout; spawn/nonzero/invalid inventory yields advisory unknown.",
     (
         "src/ouroboros/providers/worker_process_tree.py",
         "_scan_ps",

@@ -5,12 +5,26 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
+from ouroboros.cli import codex_plugin
 from ouroboros.cli.commands import doctor
 from ouroboros.cli.main import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def unavailable_codex_inventory(monkeypatch):
+    monkeypatch.setattr(doctor, "detect_backend_cli", lambda _: None)
+    monkeypatch.setattr(
+        codex_plugin,
+        "inspect_codex_plugin",
+        lambda *_args, **_kwargs: codex_plugin.CodexPluginVersion(
+            "unknown", reason="Codex unavailable"
+        ),
+    )
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -105,7 +119,7 @@ def test_install_doctor_reports_current_surfaces(monkeypatch, tmp_path: Path) ->
 
     statuses = {surface.name: surface.status for surface in surfaces}
     assert statuses["python_package"] == "pass"
-    assert statuses["codex_personal_plugin"] == "pass"
+    assert statuses["codex_personal_plugin"] == "warn"
     assert statuses["claude_plugin_marketplace"] == "pass"
     assert statuses["claude_plugin_launcher"] == "pass"
     assert statuses["claude_user_mcp_duplicate"] == "pass"
@@ -526,7 +540,7 @@ def test_codex_cache_uses_effective_codex_home(monkeypatch, tmp_path: Path) -> N
         surface for surface in surfaces if surface.name == "codex_personal_plugin_launcher"
     )
 
-    assert launcher.status == "pass"
+    assert launcher.status == "warn"
     assert launcher.path == str(
         codex_home / "plugins" / "cache" / "personal" / "ouroboros" / "1.2.3" / ".mcp.json"
     )
@@ -667,7 +681,7 @@ def test_editable_zero_version_does_not_mark_plugins_stale(monkeypatch, tmp_path
     surfaces = doctor.collect_install_surfaces(home=tmp_path)
     by_name = {surface.name: surface for surface in surfaces}
 
-    assert by_name["codex_personal_plugin"].status == "pass"
+    assert by_name["codex_personal_plugin"].status == "warn"
     assert "stale comparison skipped" in by_name["codex_personal_plugin"].message
     assert by_name["claude_plugin_marketplace"].status == "pass"
 

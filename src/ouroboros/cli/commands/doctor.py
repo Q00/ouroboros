@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -13,6 +13,8 @@ from rich.markup import escape
 import typer
 
 from ouroboros import __version__
+from ouroboros.backends.model_catalog import detect_backend_cli
+from ouroboros.cli import codex_plugin
 from ouroboros.cli.commands.update import _compare_versions
 from ouroboros.codex.home import resolve_codex_home
 
@@ -286,6 +288,100 @@ def _resolve_install_codex_home(home: Path | None) -> Path:
     return resolve_codex_home()
 
 
+def _add_codex_marketplace_surfaces(
+    surfaces: list[InstallSurface],
+    codex_home: Path,
+    expected_version: str,
+    inventory: codex_plugin.CodexPluginVersion,
+) -> bool:
+    """Inspect the official marketplace snapshot, keeping the existing surface IDs."""
+    cache_root = codex_home / "plugins" / "cache" / "ouroboros" / "ouroboros"
+    error = None
+    if inventory.status == "installed":
+        assert inventory.version is not None
+        cache = cache_root / inventory.version
+        try:
+            if not cache.is_dir() and cache_root.is_dir():
+                matches = [
+                    child
+                    for child in cache_root.iterdir()
+                    if child.is_dir()
+                    and codex_plugin.plugin_versions_match(child.name, inventory.version) is True
+                ]
+                if len(matches) == 1:
+                    cache = matches[0]
+                elif len(matches) > 1:
+                    error = "multiple cache snapshots match the installed version"
+        except OSError as exc:
+            error = str(exc)
+    else:
+        cache, error = _latest_versioned_child_with(cache_root, ".codex-plugin/plugin.json")
+    if cache is None and error is None:
+        return False
+
+    launcher_path = cache_root
+    if error is not None:
+        surfaces.append(
+            InstallSurface(
+                name="codex_personal_plugin",
+                status="fail",
+                message=f"could not inspect Codex marketplace cache: {error}",
+                path=str(cache_root),
+            )
+        )
+    else:
+        assert cache is not None
+        manifest = cache / ".codex-plugin" / "plugin.json"
+        _add_manifest_surface(
+            surfaces,
+            name="codex_personal_plugin",
+            path=manifest,
+            expected_version=expected_version,
+        )
+        if not manifest.exists():
+            surfaces.append(
+                InstallSurface(
+                    name="codex_personal_plugin_launcher",
+                    status="warn",
+                    message="installed plugin manifest missing; cannot resolve its MCP launcher",
+                    path=str(manifest),
+                )
+            )
+            return True
+        parsed, error = _read_json(manifest)
+        launcher_path = manifest
+        if error is None:
+            reference = parsed.get("mcpServers", ".mcp.json") if parsed else ".mcp.json"
+            if not isinstance(reference, str) or not reference.strip():
+                error = "mcpServers must be a relative MCP config file path"
+            else:
+                launcher_path = cache / reference
+                try:
+                    if Path(reference).is_absolute() or not launcher_path.resolve().is_relative_to(
+                        cache.resolve()
+                    ):
+                        error = "mcpServers must refer to a file inside the plugin"
+                except (OSError, RuntimeError, ValueError):
+                    error = "mcpServers path could not be resolved"
+
+    if error is not None:
+        surfaces.append(
+            InstallSurface(
+                name="codex_personal_plugin_launcher",
+                status="fail",
+                message=f"could not inspect Codex MCP launcher: {error}",
+                path=str(launcher_path),
+            )
+        )
+    else:
+        _add_launcher_surface(
+            surfaces,
+            name="codex_personal_plugin_launcher",
+            path=launcher_path,
+        )
+    return True
+
+
 def collect_install_surfaces(home: Path | None = None) -> list[InstallSurface]:
     """Collect read-only installation diagnostics from known user-level locations."""
 
@@ -300,41 +396,77 @@ def collect_install_surfaces(home: Path | None = None) -> list[InstallSurface]:
         )
     ]
 
-    codex_manifest = resolved_home / "plugins" / "ouroboros" / ".codex-plugin" / "plugin.json"
-    _add_manifest_surface(
-        surfaces,
-        name="codex_personal_plugin",
-        path=codex_manifest,
-        expected_version=expected_version,
-    )
-
     codex_home = _resolve_install_codex_home(home)
-    codex_cache_root = codex_home / "plugins" / "cache" / "personal" / "ouroboros"
-    codex_cache, codex_cache_error = _latest_versioned_child_with(codex_cache_root, ".mcp.json")
-    if codex_cache_error is not None:
-        surfaces.append(
-            InstallSurface(
-                name="codex_personal_plugin_launcher",
-                status="fail",
-                message=f"could not inspect Codex personal plugin cache: {codex_cache_error}",
-                path=str(codex_cache_root),
-            )
-        )
-    elif codex_cache is None:
-        surfaces.append(
-            InstallSurface(
-                name="codex_personal_plugin_launcher",
-                status="warn",
-                message="Codex personal plugin cache launcher not found",
-                path=str(codex_cache_root),
-            )
-        )
+    try:
+        codex_executable = detect_backend_cli("codex")
+    except Exception:
+        inventory = codex_plugin.CodexPluginVersion("unknown", reason="Codex CLI resolution failed")
     else:
-        _add_launcher_surface(
+        inventory = codex_plugin.inspect_codex_plugin(codex_executable, codex_home=codex_home)
+    codex_start = len(surfaces)
+    if not _add_codex_marketplace_surfaces(surfaces, codex_home, expected_version, inventory):
+        codex_manifest = resolved_home / "plugins" / "ouroboros" / ".codex-plugin" / "plugin.json"
+        _add_manifest_surface(
             surfaces,
-            name="codex_personal_plugin_launcher",
-            path=codex_cache / ".mcp.json",
+            name="codex_personal_plugin",
+            path=codex_manifest,
+            expected_version=expected_version,
         )
+
+        codex_cache_root = codex_home / "plugins" / "cache" / "personal" / "ouroboros"
+        codex_cache, codex_cache_error = _latest_versioned_child_with(codex_cache_root, ".mcp.json")
+        if codex_cache_error is not None:
+            surfaces.append(
+                InstallSurface(
+                    name="codex_personal_plugin_launcher",
+                    status="fail",
+                    message=f"could not inspect Codex personal plugin cache: {codex_cache_error}",
+                    path=str(codex_cache_root),
+                )
+            )
+        elif codex_cache is None:
+            surfaces.append(
+                InstallSurface(
+                    name="codex_personal_plugin_launcher",
+                    status="warn",
+                    message="Codex personal plugin cache launcher not found",
+                    path=str(codex_cache_root),
+                )
+            )
+        else:
+            _add_launcher_surface(
+                surfaces,
+                name="codex_personal_plugin_launcher",
+                path=codex_cache / ".mcp.json",
+            )
+
+    note = None
+    if inventory.status == "unknown":
+        reason = inventory.reason or "Codex inventory unavailable"
+        note = f"installation unconfirmed ({reason}); file inspection only"
+    elif inventory.status == "not_installed":
+        note = "Codex reports ouroboros@ouroboros is not installed; file inspection only"
+    elif inventory.enabled is False:
+        note = "Codex reports the installed plugin is disabled"
+    else:
+        manifest_surface = surfaces[codex_start]
+        if (
+            manifest_surface.version is not None
+            and codex_plugin.plugin_versions_match(
+                manifest_surface.version, inventory.version or ""
+            )
+            is not True
+        ):
+            note = f"Codex reports version {inventory.version}, but the cached manifest differs"
+    if note is not None:
+        for index in range(codex_start, len(surfaces)):
+            surface = surfaces[index]
+            surfaces[index] = replace(
+                surface,
+                status="warn" if surface.status == "pass" else surface.status,
+                message=f"{note}; {surface.message}",
+                remediation=" ".join(filter(None, [surface.remediation, note])),
+            )
 
     claude_manifest = (
         resolved_home
