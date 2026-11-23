@@ -1,0 +1,33 @@
+# Paths Codex should not read or package from this plugin checkout:
+# local secrets, runtime state, caches, and build artifacts.
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local runtime state
+*.db
+*.sqlite
+*.sqlite3
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Build output
+build/
+dist/
+*.egg-info/
+target/
+node_modules/

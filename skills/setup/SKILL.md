@@ -112,8 +112,9 @@ import-compatible. Report what was found, then:
 | No package runner or Ouroboros package | Install uv (below), then re-run `ooo setup` |
 
 Prefer package managers for uv: `pipx install uv`, `pip install --user uv`, or
-`brew install uv`; the vendor one-liner
-`curl -LsSf https://astral.sh/uv/install.sh | sh` is the last resort.
+`brew install uv`. If none is available, point the user to the official uv
+installation guide (https://docs.astral.sh/uv/getting-started/installation/)
+instead of piping a remote script into a shell on their behalf.
 
 Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or `[all,mcp]` together: the
 Claude SDK extras pin MCP 1.x, `[mcp]` pins MCP 2, and the two cannot share one
