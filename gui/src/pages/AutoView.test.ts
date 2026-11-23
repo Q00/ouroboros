@@ -207,3 +207,26 @@ describe("pipeline phases on the five steps", () => {
     expect(autoEnding(chat, failed, t)).toEqual({ title: "auto.end.failed.title", body: "auto.end.other" });
   });
 });
+
+describe("the completion pass after the criteria pass", () => {
+  const passing = (stage: string, extra: Record<string, unknown> = {}) =>
+    ({
+      id: "r",
+      kind: "run",
+      run_status: "completed",
+      progress: { ...progress(2, 2), completion: { stage, round: null, defects: null, status: null, done: false, steps: [], shots: null, ...extra } },
+    }) as Partial<ChatMessage>;
+
+  test("the Verify step names the stage the pass is on", () => {
+    const fixing = autoSteps(session("running", [seed, passing("fix", { defects: 16 })]), view(), t);
+    expect(fixing[3]).toMatchObject({ id: "verify", state: "current", caption: 'auto.caption.pass.fix {"count":16}' });
+    const trying = autoSteps(session("running", [seed, passing("play_2", { round: 2 })]), view(), t);
+    expect(trying[3].caption).toBe('auto.caption.pass.play {"n":2}');
+  });
+
+  test("the line under the thread leaves the pass to the card until it is done", () => {
+    expect(autoActivity(session("running", [seed, passing("fix", { defects: 16 })]), view())).toBeNull();
+    expect(autoActivity(session("running", [seed, passing("done", { done: true, status: "fixed" })]), view())).toBe("auto.activity.finishing");
+    expect(autoActivity(session("running", [seed, finished]), view())).toBe("auto.activity.finishing");
+  });
+});

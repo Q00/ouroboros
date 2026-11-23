@@ -16,6 +16,7 @@ import type { Tone } from "../ui/bits";
 import { LogView } from "../ui/bits";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Mark";
+import { completionCaption } from "./CompletionPass";
 import { runPreparing } from "./Runs";
 
 // ── Steps ────────────────────────────────────────────────────────────
@@ -127,7 +128,12 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
         return state === "current" ? t("auto.caption.starting") : null;
       case "verify":
         if (state === "warn") return t("auto.caption.unverified");
-        if (state === "current") return view.phase === "unstuck_lateral" ? t("auto.caption.unstuck") : t("auto.caption.verifying");
+        if (state === "current") {
+          // After the criteria pass, the run job uses the app and fixes it (the run card's pass).
+          const pass = run?.progress?.completion;
+          if (pass && !pass.done && view.phase !== "unstuck_lateral") return completionCaption(t, pass);
+          return view.phase === "unstuck_lateral" ? t("auto.caption.unstuck") : t("auto.caption.verifying");
+        }
         return state === "done" ? t("auto.caption.verified") : null;
       case "result": {
         // Not verified is said once, on the verify step.
@@ -486,6 +492,8 @@ export function autoActivity(session: ChatSession, view: AutoView): Key | null {
       return run ? null : "auto.activity.run";
     case "complete":
       if (!run) return "auto.activity.run";
+      // The run card says what the completion pass is doing.
+      if (run.progress?.completion && !run.progress.completion.done) return null;
       return run.run_status === "completed" || run.run_status === "failed" ? "auto.activity.finishing" : null;
     case "ralph_handoff":
     case "evaluate":
