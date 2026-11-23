@@ -137,6 +137,9 @@ def build_prompt(goal: str) -> str:
             "capabilities a user would expect and how it looks and feels in use (presentation, "
             "motion, feedback), most expected first, 6–12 short lines starting "
             "with '- ', each marked (core) or (common).",
+            "Where typical products share a level for how it looks or performs (an amount, "
+            "a size, a speed, a color treatment), put that level in the line, so a build can "
+            "be checked against it.",
             "When the request describes the product it wants (simple, minimal, for one person, "
             "and so on), describe a typical current product of that description, not the "
             "fullest of its kind: a simple one does its main task well and keeps its first "
