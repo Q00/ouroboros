@@ -22,9 +22,9 @@ as ``SourcedScope.expected_experience``:
   list of what a typical current product of the kind includes, limited to what
   a single local install can do, then the URLs read, in the goal's language.
   When the request describes the product ("a simple to-do app"), the list is
-  for a typical product of that description, not the fullest of its kind: a
-  list taken from the fullest products made one simple to-do app's first
-  screen a five-field form and a row of filters.
+  for a typical product of that description, not the fullest of its kind.
+  Researched against the fullest products, one simple to-do app opened on a
+  five-field form and a row of filters.
 - The reply is sanitized without a model (``sanitize_reply``): only ``- `` lines,
   links and URLs stripped, at most ``MAX_LINES`` lines of ``MAX_LINE_CHARS``
   characters; the URLs after ``Sources:`` are kept apart (at most
