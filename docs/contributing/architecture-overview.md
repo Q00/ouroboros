@@ -32,13 +32,15 @@ owns the behavior being changed rather than adding another execution layer.
 | Boundary | Packages | Responsibility |
 |----------|----------|----------------|
 | Entry points | `cli/`, `mcp/`, `skills/` | User commands, tool schemas, and skill dispatch |
-| Authoring | `bigbang/`, `auto/`, `pm/` | Interactive requirements, bounded automatic interview, and product requirements |
-| Execution | `orchestrator/` | Runtime adapters, scheduling, workflow execution, and session control |
-| Backend selection | `backends/`, `providers/`, `router/`, `config/` | Capability registry, LLM adapters, model routing, and configuration |
-| Verification | `evaluation/`, `resilience/` | Mechanical/semantic/consensus evaluation and recovery helpers |
-| Shared contracts | `core/` | Seed, result/error types, and shared domain contracts |
+| Authoring | `bigbang/`, `auto/`, `interview_adapters/`, `pm/` | Requirements interviews, automatic authoring, and product requirements |
+| Execution | `orchestrator/`, `execution/`, `strategies/`, `evolution/` | Runtime adapters, scheduling, workflow execution, and refinement loops |
+| Runtime integrations | `codex/`, `copilot/`, `gjc/`, `hermes/`, `kiro/`, `opencode/`, `plugin/`, `runtime/` | Host bridges, worker transports, and runtime lifecycle |
+| Backend selection | `backends/`, `providers/`, `router/`, `profiles/`, `config/` | Capability registry, LLM adapters, model routing, profiles, and configuration |
+| Verification | `evaluation/`, `verification/`, `resilience/` | Mechanical/semantic/consensus evaluation, evidence, and recovery helpers |
+| Boundaries and observability | `boundary/`, `events/`, `observability/` | Workspace isolation, event contracts, and diagnostics |
+| Shared contracts | `core/`, `agents/`, `examples/` | Seed/result types, agent metadata, and example integrations |
 | Durable state | `persistence/` | Events, checkpoints, and state reconstruction |
-| Observation | `tui/` | Terminal views of execution state |
+| User interfaces | `tui/`, `dashboard/`, `dashboard_web/`, `gui/`, `config_tui/` | Terminal, web dashboard, console, and settings views |
 
 The runtime and LLM backend are distinct configuration surfaces. The registry
 and factories decide supported capabilities; this map does not promise equal
