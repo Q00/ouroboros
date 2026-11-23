@@ -2307,8 +2307,9 @@ do not enqueue another background Ralph job."""
         "max_generations": max_generations,
         "delegation_depth": delegation_depth,
         "allow_nested_ouroboros_ralph": allow_nested_ouroboros_ralph,
-        "allow_dirty_in_place": allow_dirty_in_place,
     }
+    if allow_dirty_in_place:
+        context["allow_dirty_in_place"] = True
     if per_iteration_timeout_seconds is not None:
         context["per_iteration_timeout_seconds"] = per_iteration_timeout_seconds
     if max_total_seconds is not None:
