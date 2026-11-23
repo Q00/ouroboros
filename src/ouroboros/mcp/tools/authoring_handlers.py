@@ -266,9 +266,23 @@ def _interview_allowed_tools(runtime_backend: str | None) -> list[str] | None:
     )
 
 
-def _handler_llm_backend(configured_backend: str | None, role: str) -> str:
-    """Resolve a handler's internal-LLM backend from its logical role."""
-    return get_llm_backend_for_role(role, explicit_backend=configured_backend)
+def _handler_llm_backend(
+    configured_backend: str | None,
+    role: str,
+    *,
+    fallback_runtime_backend: str | None = None,
+) -> str:
+    """Resolve a handler's internal-LLM backend from its role and runtime.
+
+    Auto authoring supplies the selected runtime as the fallback so an
+    explicit ``--runtime`` choice also selects interview and seed-generation
+    calls when no separate LLM backend override is configured.
+    """
+    return get_llm_backend_for_role(
+        role,
+        explicit_backend=configured_backend,
+        fallback_runtime_backend=fallback_runtime_backend,
+    )
 
 
 _INTERVIEW_COMPLETION_NEGATIONS = (
@@ -1201,7 +1215,11 @@ class GenerateSeedHandler:
         # Fall-through: real in-process seed generation (subprocess / non-opencode runtimes).
 
         try:
-            backend = _handler_llm_backend(self.llm_backend, "seed_generation")
+            backend = _handler_llm_backend(
+                self.llm_backend,
+                "seed_generation",
+                fallback_runtime_backend=self.agent_runtime_backend,
+            )
             # Use injected or create services.
             # ``allowed_tools=[]`` paired with ``max_turns=1``: any tool-use
             # block emitted by the model would consume the only allowed turn
@@ -1525,7 +1543,11 @@ class InterviewHandler:
                 transient scoring failure without losing it; in practice
                 no live caller does.
         """
-        backend = _handler_llm_backend(self.llm_backend, "clarification")
+        backend = _handler_llm_backend(
+            self.llm_backend,
+            "clarification",
+            fallback_runtime_backend=self.agent_runtime_backend,
+        )
         scorer = AmbiguityScorer(
             llm_adapter=llm_adapter,
             model=get_llm_model_for_role("clarification", backend=backend),
@@ -2285,7 +2307,11 @@ class InterviewHandler:
         """Construct the in-process interview engine and its LLM adapter."""
         # One sealed turn makes MCP a pure question generator and prevents a
         # child runtime from rediscovering this MCP server recursively (#765).
-        backend = _handler_llm_backend(self.llm_backend, "interview")
+        backend = _handler_llm_backend(
+            self.llm_backend,
+            "interview",
+            fallback_runtime_backend=self.agent_runtime_backend,
+        )
         llm_adapter = self.llm_adapter or create_llm_adapter(
             backend=backend,
             max_turns=1,
@@ -3126,7 +3152,11 @@ class InterviewHandler:
                 engine, InterviewEngine
             )
             if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT and supports_atomic_turn:
-                backend = _handler_llm_backend(self.llm_backend, "clarification")
+                backend = _handler_llm_backend(
+                    self.llm_backend,
+                    "clarification",
+                    fallback_runtime_backend=self.agent_runtime_backend,
+                )
                 scorer = AmbiguityScorer(
                     llm_adapter=llm_adapter,
                     model=get_llm_model_for_role("clarification", backend=backend),

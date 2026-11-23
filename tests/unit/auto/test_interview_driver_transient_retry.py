@@ -225,6 +225,99 @@ async def test_partial_start_failure_resumes_persisted_session_without_restart(t
 
 
 @pytest.mark.asyncio
+async def test_persisted_start_failure_keeps_provider_error_without_id_collision_retry(
+    tmp_path,
+) -> None:
+    """A persisted start must not be retried after resume reconciliation fails."""
+    start_calls = 0
+    resume_calls = 0
+    persisted_id: str | None = None
+
+    async def start(goal: str, cwd: str, *, interview_id: str | None = None) -> InterviewTurn:  # noqa: ARG001
+        nonlocal start_calls, persisted_id
+        start_calls += 1
+        assert interview_id is not None
+        persisted_id = interview_id
+        raise PartialInterviewStartError(
+            "ouroboros_interview failed: Not logged in · Please run /login",
+            session_id=interview_id,
+        )
+
+    async def resume(session_id: str) -> InterviewTurn:  # noqa: ARG001
+        nonlocal resume_calls
+        resume_calls += 1
+        raise RuntimeError("Not logged in · Please run /login")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("answer must not run after the failed start")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    ledger.sections["runtime_context"].entries.clear()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(
+            start,
+            answer,
+            resume=resume,
+            is_session_persisted=lambda session_id: session_id == persisted_id,
+        ),
+        store=AutoStore(tmp_path),
+        max_rounds=3,
+        timeout_seconds=5,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert "Not logged in" in result.blocker
+    assert "collides with an existing interview" not in result.blocker
+    assert start_calls == 1
+    assert resume_calls == 1
+    assert state.interview_session_id == persisted_id
+
+
+@pytest.mark.asyncio
+async def test_persistence_probe_error_fails_closed_without_id_collision_retry(tmp_path) -> None:
+    """An inconclusive persistence probe must not authorize another start."""
+    start_calls = 0
+    persisted_id: str | None = None
+
+    async def start(goal: str, cwd: str, *, interview_id: str | None = None) -> InterviewTurn:  # noqa: ARG001
+        nonlocal start_calls, persisted_id
+        start_calls += 1
+        assert interview_id is not None
+        persisted_id = interview_id
+        raise PartialInterviewStartError(
+            "ouroboros_interview failed: Not logged in · Please run /login",
+            session_id=interview_id,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("answer must not run after the failed start")
+
+    def probe(_session_id: str) -> bool:
+        raise OSError("state directory temporarily unavailable")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer, is_session_persisted=probe),
+        store=AutoStore(tmp_path),
+        max_rounds=3,
+        timeout_seconds=5,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert "Not logged in" in result.blocker
+    assert "collides with an existing interview" not in result.blocker
+    assert start_calls == 1
+    assert state.interview_session_id == persisted_id
+
+
+@pytest.mark.asyncio
 async def test_answer_round_exhausts_retries_and_blocks(tmp_path) -> None:
     """A persistently failing ``backend.answer`` blocks without replay."""
     answer_calls = 0

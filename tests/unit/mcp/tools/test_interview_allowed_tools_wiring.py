@@ -124,6 +124,44 @@ async def test_nested_mcp_interview_handler_pins_allowed_tools_to_empty_for_enve
 
 
 @pytest.mark.asyncio
+async def test_nested_mcp_interview_handler_uses_selected_runtime_without_llm_override(
+    tmp_path: Path,
+) -> None:
+    """Auto's runtime choice must select the internal interview backend by default."""
+    engine = _FakeInterviewEngine(state_dir=tmp_path)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        llm_backend=None,
+        agent_runtime_backend="codex",
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    with (
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.get_llm_backend_for_role",
+            return_value="codex",
+        ) as resolve_backend,
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.backend_supports_tool_envelope",
+            return_value=False,
+        ),
+    ):
+        outcome = await handler.handle({"initial_context": "Build a CLI", "cwd": str(tmp_path)})
+
+    assert outcome.is_ok
+    resolve_backend.assert_called_once_with(
+        "interview",
+        explicit_backend=None,
+        fallback_runtime_backend="codex",
+    )
+
+
+@pytest.mark.asyncio
 async def test_nested_mcp_interview_handler_passes_none_for_envelope_unaware_backends(
     tmp_path: Path,
 ) -> None:

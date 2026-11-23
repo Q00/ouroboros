@@ -116,8 +116,16 @@ async def with_transient_retry[T](
                 await asyncio.sleep(backoff)
 
 
-async def reconcile_persisted_session(backend: Any, session_id: str | None) -> Any | None:
-    """Resume a preassigned interview only when persistence is observable."""
+async def reconcile_persisted_session(
+    backend: Any, session_id: str | None
+) -> Any | ReconcileOutcome[Any] | None:
+    """Resume a preassigned interview only when persistence is observable.
+
+    Once the preassigned ID is present on disk, retrying ``start`` is unsafe.
+    A failed resume therefore returns an explicit non-retryable outcome so the
+    original provider error remains visible instead of being replaced by the
+    interview-ID collision from the second start attempt.
+    """
     persisted_id = session_id
     probe = getattr(backend, "is_session_persisted", None)
     if persisted_id and probe is not None:
@@ -125,13 +133,15 @@ async def reconcile_persisted_session(backend: Any, session_id: str | None) -> A
             if not probe(persisted_id):
                 persisted_id = None
         except Exception:
-            persisted_id = None
+            # An inconclusive persistence check must not authorize a second
+            # start with the same caller-supplied id.
+            return ReconcileOutcome()
     if not persisted_id:
         return None
     try:
-        return await backend.resume(persisted_id)
+        return ReconcileOutcome(value=await backend.resume(persisted_id))
     except Exception:
-        return None
+        return ReconcileOutcome()
 
 
 def record_evidence_based_session_id(
