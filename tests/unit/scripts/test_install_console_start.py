@@ -665,6 +665,19 @@ def test_without_any_python_the_start_is_reported_without_a_url(tmp_path: Path) 
     assert elapsed < 8
 
 
+def test_without_any_python_a_failed_start_is_still_reported_as_failed(tmp_path: Path) -> None:
+    no_python = _build_no_python3_path(tmp_path / "no-python")
+    out, _ = _drive(
+        tmp_path,
+        f"_console_start {shlex.quote(str(tmp_path / 'bin' / 'ouroboros'))} 20",
+        path=f"{tmp_path / 'bin'}:{no_python}",
+        env={GUI_START_VAR: "fail"},
+    )
+
+    assert "The Ouroboros console did not start (exit 3)" in out
+    assert "still starting in the background" not in out
+
+
 # --- install.ps1 --------------------------------------------------------------
 
 _PS_LOAD = r"""

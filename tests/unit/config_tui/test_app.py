@@ -629,13 +629,14 @@ async def test_routing_preset_persists_stage_backends_on_save(app_env, monkeypat
     captured: dict[str, object] = {}
     monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
     app = SettingsApp()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(120, 40)) as pilot:
         pilot.app.query_one("#route-claude-verify").scroll_visible(animate=False)
         await pilot.pause()
         await pilot.click("#route-claude-verify")
         await pilot.pause()
         pilot.app.query_one("#save-button").scroll_visible(animate=False)
         await pilot.pause()
+        pilot.app.query_one("#save-button").scroll_visible(animate=False)
         await pilot.click("#save-button")
         await pilot.pause()
     assert captured.get("orchestrator.runtime_profile.stages.evaluate") == "antigravity"
