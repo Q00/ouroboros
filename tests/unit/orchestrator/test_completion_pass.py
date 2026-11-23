@@ -971,6 +971,10 @@ def test_the_play_prompts_say_what_to_write_and_what_to_look_for() -> None:
     assert "not for what the app should show by then" in plan
     assert "Do not list missing features." in completion_pass.PLAY_LOOK_PROMPT
     assert "text or overlays that stay" in completion_pass.PLAY_LOOK_PROMPT
+    assert (
+        "text too small or too faint to read at a glance, "
+        "a control the user needs that shows only while the pointer is over it"
+    ) in completion_pass.PLAY_LOOK_PROMPT
     assert "reload the page once near the end and take a screenshot after it" in plan
     assert (
         "text a drag or click left selected, what the user made that a reload lost"
