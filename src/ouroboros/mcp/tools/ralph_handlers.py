@@ -456,6 +456,7 @@ class RalphHandler:
             conductor_directive=conductor_directive,
             conductor_decision_id=arguments.get("conductor_decision_id"),
             predecessor_execution_id=arguments.get("predecessor_execution_id"),
+            allow_dirty_in_place=arguments.get("_allow_dirty_in_place") is True,
         )
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
@@ -489,6 +490,7 @@ class RalphHandler:
                 ),
                 conductor_decision_id=config.conductor_decision_id,
                 predecessor_execution_id=config.predecessor_execution_id,
+                allow_dirty_in_place=config.allow_dirty_in_place,
             )
             return await dispatch_plugin_terminal(
                 self._event_store,

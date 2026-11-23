@@ -65,6 +65,7 @@ class RalphLoopConfig:
     conductor_directive: ConductorDirective | None = None
     conductor_decision_id: str | None = None
     predecessor_execution_id: str | None = None
+    allow_dirty_in_place: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +201,8 @@ class RalphLoopRunner:
                 arguments["seed_content"] = seed_content
             if config.project_dir:
                 arguments["project_dir"] = config.project_dir
+            if config.allow_dirty_in_place:
+                arguments["_allow_dirty_in_place"] = True
             if config.commit_policy:
                 arguments["commit_policy"] = config.commit_policy
             if config.auto_session_id:

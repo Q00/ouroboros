@@ -2091,6 +2091,7 @@ def build_ralph_subagent(
     predecessor_execution_id: str | None = None,
     delegation_depth: int = 1,
     allow_nested_ouroboros_ralph: bool = False,
+    allow_dirty_in_place: bool = False,
 ) -> SubagentPayload:
     """Build subagent payload for a full Ralph loop in plugin mode.
 
@@ -2306,6 +2307,7 @@ do not enqueue another background Ralph job."""
         "max_generations": max_generations,
         "delegation_depth": delegation_depth,
         "allow_nested_ouroboros_ralph": allow_nested_ouroboros_ralph,
+        "allow_dirty_in_place": allow_dirty_in_place,
     }
     if per_iteration_timeout_seconds is not None:
         context["per_iteration_timeout_seconds"] = per_iteration_timeout_seconds

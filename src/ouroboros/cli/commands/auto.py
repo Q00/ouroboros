@@ -687,6 +687,7 @@ async def _run_auto(
             start_execute,
             cwd=state.cwd,
             use_worktree=False,  # auto's worktree policy alone decides isolation
+            in_place=state.managed_worktree is None,
         ),
         store=store,
         seed_saver=save_seed,

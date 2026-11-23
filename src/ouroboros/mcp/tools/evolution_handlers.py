@@ -833,8 +833,11 @@ class EvolveStepHandler(BridgeAwareMixin):
         )
         effective_source_project_dir = normalized_project_dir or normalized_configured_project_dir
         workspace: TaskWorkspace | None = None
-        if execute and (
-            effective_source_project_dir is None or is_git_repo(effective_source_project_dir)
+        allow_dirty_in_place = arguments.get("_allow_dirty_in_place") is True
+        if (
+            execute
+            and (effective_source_project_dir is None or is_git_repo(effective_source_project_dir))
+            and not allow_dirty_in_place
         ):
             source_cwd = effective_source_project_dir or os.getcwd()
             try:

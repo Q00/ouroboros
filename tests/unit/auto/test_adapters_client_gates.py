@@ -47,6 +47,19 @@ async def test_auto_run_starter_delegates_successors_when_auto_does_not_own_them
 
 
 @pytest.mark.asyncio
+async def test_auto_run_starter_marks_only_in_place_handoffs(tmp_path) -> None:
+    handler = AsyncMock()
+    handler.handle = AsyncMock(
+        return_value=Result.ok(MCPToolResult(meta={"job_id": "job_run", "session_id": "orch_run"}))
+    )
+
+    await HandlerRunStarter(handler, cwd=str(tmp_path), in_place=True)(_FakeSeed())  # type: ignore[arg-type]
+
+    arguments = handler.handle.await_args.args[0]
+    assert arguments["_auto_in_place"] is True
+
+
+@pytest.mark.asyncio
 async def test_auto_interview_backend_ignores_seed_ready_client_gate_metadata(tmp_path) -> None:
     """New seed-ready metadata must not break the in-flight auto driver adapter."""
     handler = AsyncMock()

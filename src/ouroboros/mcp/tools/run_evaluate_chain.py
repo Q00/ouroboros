@@ -101,6 +101,8 @@ def _evaluation_arguments(
         "auto_evolve": auto_evolve,
         "_source_execution_status": result.meta.get("status"),
     }
+    if result.meta.get("auto_in_place") is True:
+        arguments["_auto_in_place"] = True
     try:
         parsed = yaml.safe_load(seed_content)
         if isinstance(parsed, dict):
