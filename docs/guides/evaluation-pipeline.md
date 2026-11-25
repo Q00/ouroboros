@@ -78,7 +78,7 @@ The mechanical verifier runs zero-cost automated shell commands and checks the e
 | Failure mode | Symptom | Cause |
 |---|---|---|
 | **Command not found** | `Check <type> failed` with "Command not found" | Binary missing from PATH; check your environment |
-| **Command timeout** | `Check <type> timed out after Ns` | Command exceeded `timeout_seconds` (default 300 s); increase timeout or fix slow tests |
+| **Command timeout** | `Check <type> timed out after Ns` | Command exceeded `timeout_seconds` (default 300 s), or a process it started, such as a test server that was never closed, still held its output open at the deadline. On POSIX the command runs in its own session and its whole process group is killed. Increase the timeout, fix slow tests, or close what the tests start |
 | **Non-zero exit code** | `Check <type> failed (exit code N)` | Tool found real errors; inspect `stdout_preview`/`stderr_preview` in the event payload |
 | **Coverage below threshold** | `Coverage X.X% below threshold Y.Y%` | Test suite does not meet the minimum coverage requirement; add tests or lower `coverage_threshold` |
 | **Coverage not parseable** | With an enabled threshold, acceptance is unverified and `coverage_score` is `None` | Output is unsupported, malformed, or conflicting; supply a supported measurement row. At `coverage_threshold=0.0`, only command execution is checked |

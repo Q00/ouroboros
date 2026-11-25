@@ -42,8 +42,11 @@ Binding is decided without a model (``auto/evidence_check.py``):
     requester's behalf, never a deferral to the implementer.
 
   Either way the ledger entries are non-binding (``DEFAULTED``) and carry the
-  question, so the worker sees the question only as an open question and the
-  spec stays the user's.
+  question, so the spec stays the user's. A not-settled question stays an open
+  question, which the worker never sees. A refined default is auto's answer
+  (``LedgerEntry.refined``): it reaches the worker as a labelled, non-binding
+  assumption (``Seed.sourced_scope.assumptions``), never as a constraint or
+  criterion.
 
 Order per round: the investigator first; the requester (``auto/requester.py``)
 only for a question the code does not settle. A found answer is not sent to
@@ -99,7 +102,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from ouroboros.auto.answer_text import LANGUAGE_NAMES, answer_language, answer_problems
+from ouroboros.auto.answer_text import (
+    FALLBACK_ANSWERS,
+    LANGUAGE_NAMES,
+    answer_language,
+    answer_problems,
+)
 from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource
 from ouroboros.auto.evidence_check import EvidenceSpan, check_span
 from ouroboros.auto.investigation_workspace import (
@@ -857,11 +865,13 @@ async def settle(
     ``assumption``, skips the refiner, and is routed with the factual reply as
     its draft. Any other question gets the draft's conservative default
     (``default_answer``), refined like an answer that was never investigated,
-    and is routed with that default as its draft.
+    and is routed with that default as its draft. Every entry the refiner
+    rewrote is marked ``refined`` (``mark_refined``).
     """
     result = await _investigate(driver, answer, question, turn, state, round_number)
     if result is None:
-        answer = await driver._refine_answer(answer, question, state, ledger)
+        refined = await driver._refine_answer(answer, question, state, ledger)
+        answer = mark_refined(answer, refined)
         return await ask_requester(driver, answer, question, turn, state, round_number)
     language = answer_language(state.goal)
     path = answer_path(result)
@@ -871,9 +881,39 @@ async def settle(
         answer = not_found_answer(answer, result, question, round_number, language=language)
     else:
         default = default_answer(answer, result, question, round_number)
-        refined = await driver._refine_answer(default, question, state, ledger)
+        refined = mark_refined(
+            default, await driver._refine_answer(default, question, state, ledger)
+        )
         answer = replace(refined, text=_with_code_shown(refined.text, result, language))
     return await ask_requester(driver, answer, question, turn, state, round_number)
+
+
+def mark_refined(draft: AutoAnswer, refined: AutoAnswer) -> AutoAnswer:
+    """``refined`` with ``LedgerEntry.refined`` set on each entry the refiner rewrote.
+
+    ``AutoInterviewDriver._refine_answer`` returns its input unchanged, or the
+    same sections in the same order with each value refined or kept. An entry
+    whose value differs from the draft's is the refiner's answer for this
+    goal. An entry that kept the draft's value holds the answerer's template,
+    and one holding the refiner's fixed fallback (``FALLBACK_ANSWERS``, used
+    when no reply passed its checks) decides nothing for this goal either;
+    both stay unmarked, so neither is presented to the worker as a decision.
+    """
+    if refined is draft:
+        return refined
+    fallbacks = frozenset(FALLBACK_ANSWERS.values())
+    updates = [
+        (
+            section,
+            replace(entry, refined=True)
+            if entry.value != before.value and entry.value not in fallbacks
+            else entry,
+        )
+        for (section, entry), (_, before) in zip(
+            refined.ledger_updates, draft.ledger_updates, strict=True
+        )
+    ]
+    return replace(refined, ledger_updates=updates)
 
 
 CAP_CLOSURE_MODE = "ledger_only"

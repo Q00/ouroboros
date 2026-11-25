@@ -149,7 +149,6 @@ def test_non_authoring_mark_blocked_leaves_last_authoring_backend_unset() -> Non
     # Recover then transition into a non-authoring failure (e.g. run handoff).
     state.recover(AutoPhase.INTERVIEW, "resume")
     state.transition(AutoPhase.SEED_GENERATION, "regen")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "running")
     state.mark_blocked("run start failed: connection refused", tool_name="run_starter")
     # Crucially: the run_starter site does NOT call
@@ -200,7 +199,6 @@ def test_authoring_backend_pipeline_result_is_none_for_non_authoring_blocker(tmp
     state.runtime_backend = "codex"
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "regen")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "running")
     state.mark_blocked("run start failed: connection refused", tool_name="run_starter")
 

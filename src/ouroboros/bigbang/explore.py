@@ -525,18 +525,31 @@ def _has_git_metadata(root: Path) -> bool:
 def detect_brownfield(cwd: str | Path) -> bool:
     """Detect whether a directory is a brownfield project.
 
-    Checks for valid Git metadata or a recognised config file from ``_CONFIG_FILES``.
+    Checks for a recognised config file from ``_CONFIG_FILES``, or valid Git
+    metadata in a checkout that holds something besides hidden entries. A
+    freshly initialised, still empty checkout (only ``.git``, ``.gitignore`` or
+    other dot entries) is a new project, not existing code (#3074).
 
     Args:
         cwd: Directory to inspect.
 
     Returns:
-        ``True`` if valid Git metadata or at least one config file is found,
-        ``False`` otherwise.
+        ``True`` if at least one config file is found, or valid Git metadata
+        is found next to at least one non-hidden entry; ``False`` otherwise.
     """
     try:
         root = Path(cwd)
-        return _has_git_metadata(root) or any((root / name).exists() for name in _CONFIG_FILES)
+        if any((root / name).exists() for name in _CONFIG_FILES):
+            return True
+        return _has_git_metadata(root) and _has_visible_entry(root)
+    except OSError:
+        return False
+
+
+def _has_visible_entry(root: Path) -> bool:
+    """Whether ``root`` holds any entry whose name does not start with a dot."""
+    try:
+        return any(not entry.name.startswith(".") for entry in root.iterdir())
     except OSError:
         return False
 

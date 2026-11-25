@@ -213,7 +213,8 @@ Notes:
   failed the run, derived only from the executor's durable machine-readable
   evidence (never prose, commands, paths, or output). Closed enum:
   `verify_<cause>` (the verify-gate cause that rejected the run at
-  final settlement or exhausted an AC's retries), `worker_evidence_missing`,
+  final settlement, exhausted an AC's retries, or failed an AC judged once
+  from a shared attempt), `worker_evidence_missing`,
   `worker_fabrication_suspected`, `worker_blocked`, `worker_failed` (an AC was
   judged not done and no retry budget or route remained), `dependency_blocked`
   (every judged AC was blocked upstream), `runtime_error` (the orchestrator

@@ -67,14 +67,14 @@ _SAFE_DEFAULTS: dict[str, _DefaultSpec] = {
         "Unspecified inputs can be safely bounded to existing local context.",
     ),
     "outputs": _DefaultSpec(
-        "Produce the smallest observable artifact, state change, or response needed to satisfy "
-        "the goal and make verification possible.",
-        "Unspecified outputs can be safely bounded to observable MVP behavior.",
+        "Produce the observable artifact, state change, or response the goal asks for, at the "
+        "level a user expects, and make verification possible.",
+        "Unspecified outputs follow the goal and must stay observable for verification.",
     ),
     "constraints": _DefaultSpec(
-        "Keep scope to a reversible local MVP, preserve existing project patterns, and avoid new "
-        "dependencies unless explicit acceptance criteria require them.",
-        "Conservative local constraints reduce execution risk.",
+        "Keep changes local and reversible, preserve existing project patterns and the behavior "
+        "the goal does not ask to change, and add a dependency only when the goal needs it.",
+        "Local, reversible changes that keep unrequested behavior reduce execution risk.",
     ),
     "non_goals": _DefaultSpec(
         "Do not perform credential handling, billing, production deployment, legal or medical "
@@ -92,8 +92,9 @@ _SAFE_DEFAULTS: dict[str, _DefaultSpec] = {
         "Verification can be safely scoped to local, non-destructive checks.",
     ),
     "failure_modes": _DefaultSpec(
-        "Failure includes unverified behavior, scope expansion, dependency churn, non-reproducible "
-        "output, or external side effects not authorized by the goal.",
+        "Failure includes unverified behavior, changes the goal does not ask for to existing "
+        "behavior, dependency churn, or external side effects not "
+        "authorized by the goal.",
         "Generic failure boundaries keep the Seed auditable without domain assumptions.",
     ),
     "runtime_context": _DefaultSpec(
@@ -166,7 +167,7 @@ def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
         f"{_AUTO_ANSWER_PREFIX}{_SAFE_DEFAULT_SYNTHESIS_TAG} "
         "Mark the interview complete and hand off for seed generation. "
         "Auto safe-default synthesis (max interview rounds reached). "
-        "The following conservative assumptions close the remaining required "
+        "The following safe default assumptions close the remaining required "
         "Seed sections; treat them as auditable defaults that may be revised "
         "if a stricter answer is required.",
     ]

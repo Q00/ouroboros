@@ -21,6 +21,7 @@ from ouroboros.auto.answer_text import (
     normalize_answer,
 )
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
+from ouroboros.auto.ledger_seed import workspace_has_existing_code
 from ouroboros.bigbang.answer_provenance import ANSWER_PROVENANCE_ARGUMENT, AnswerProvenance
 from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.requirement_candidate import RequirementDistillation
@@ -726,80 +727,6 @@ class HandlerEvaluator:
         )
 
 
-class HandlerSeedQAEvaluator:
-    """Callable Seed QA evaluator backed by ``ouroboros_qa``."""
-
-    def __init__(self, qa_handler: QAHandler) -> None:
-        self.qa_handler = qa_handler
-
-    async def __call__(self, seed: Seed, ledger: Any) -> EvaluateResult:
-        seed_yaml = yaml.dump(
-            seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
-        )
-        ledger_reference = yaml.dump(
-            ledger.to_dict() if hasattr(ledger, "to_dict") else ledger,
-            default_flow_style=False,
-            allow_unicode=True,
-            sort_keys=False,
-        )
-        # The Seed QA gate honestly evaluates ambiguity — it must NOT be hidden
-        # from the judge. The correct fix for a high-ambiguity Seed is to drive
-        # the interview's ambiguity DOWN to the threshold (concrete answers via
-        # the stagnation→lateral convergence path), not to tell the judge to
-        # ignore the metric. A Seed that still reports a high
-        # ``metadata.ambiguity_score`` is genuinely under-specified, so blocking
-        # here is the honest outcome.
-        quality_bar = (
-            "The Seed must be ready for autonomous execution before run starts. "
-            "It must preserve the interview/ledger intent, have ambiguity_score <= 0.20, "
-            "contain concrete acceptance criteria, and preserve constraints, non-goals, "
-            "and runtime context in executable Seed surfaces. The Seed schema has no "
-            "top-level non_goals/runtime_context fields; constraints, ontology fields, "
-            "brownfield_context, or acceptance criteria are valid preservation surfaces. "
-            "Judge acceptance-criterion granularity semantically: each criterion must name "
-            "an observable state of the finished work, not an implementation means. Flag "
-            "and merge a criterion that is intelligible only as a step toward a sibling's "
-            "outcome. Preserve legitimately independent observable outcomes; never merge or "
-            "reject them merely to satisfy a criterion-count target. "
-            "Avoid unsupported assumptions or missing requirements."
-        )
-        result = await self.qa_handler.handle(
-            {
-                "artifact": seed_yaml,
-                "artifact_type": "document",
-                "quality_bar": quality_bar,
-                "reference": ledger_reference,
-                "seed_content": seed_yaml,
-                "pass_threshold": 0.80,
-            }
-        )
-        if result.is_err:
-            return EvaluateResult(
-                passed=False,
-                score=0.0,
-                verdict="fail",
-                error=str(result.error),
-            )
-        meta = result.value.meta or {}
-        if str(meta.get("status", "")) == "delegated_to_subagent":
-            return EvaluateResult(
-                passed=False,
-                score=0.0,
-                verdict="fail",
-                error=(
-                    "QAHandler returned a plugin-delegation envelope; the auto pipeline "
-                    "cannot grade Seed QA via out-of-band subagent dispatch"
-                ),
-            )
-        return EvaluateResult(
-            passed=bool(meta.get("passed", False)),
-            score=float(meta.get("score", 0.0)),
-            verdict=str(meta.get("verdict", "fail")),
-            differences=tuple(meta.get("differences", ()) or ()),
-            suggestions=tuple(meta.get("suggestions", ()) or ()),
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class LateralResult:
     """Structured result returned by :class:`HandlerLateralThinker`.
@@ -1265,9 +1192,45 @@ def _artifact_text(value: object) -> str | None:
 REFINER_LANGUAGE_RULE = "Write the answer in {language} only, and never add a translation."
 # The refiner reads no files. A product decision it writes is a non-binding
 # assumption; a claim about the current code would be a fabricated repo fact.
-REFINER_NO_REPO_FACTS_RULE = (
-    "You have not read the repository: never state what the existing code does "
-    "or contains; state the most conservative reasonable decision instead."
+# Which rule applies depends on whether the workspace already has code
+# (``LLMAnswerRefiner.has_existing_code``): a new product is decided as a
+# typical current product of its kind would decide it and never narrowed (no
+# "first version", no "that is enough", and no identical-replay demand that
+# strips the randomness or animation such products have). Offered options are
+# merged, not picked from: told only to "choose or combine", the model took
+# the smaller option whenever the larger one also named something local-only
+# play cannot have (multiplayer), and kart Seeds said "one track". Told only
+# not to go below such products, the model named no count at all ("no
+# arbitrary limit", "the full variety"), the interview could not converge and
+# ran nine rounds, so counts are named. The parts of one answer are written
+# concurrently and none sees the others: one left online play out while another
+# made "local and online multiplayer working" the visible result, and the next
+# round's "the most recent answer stands" made online play required. So the
+# exclusion holds in every part and over earlier answers. A change to existing
+# code builds what the request names, completely, and nothing else. Unknown
+# counts as existing code.
+REFINER_GREENFIELD_RULE = (
+    "You have not read the repository: never state what the existing code does or contains. "
+    "For what the request newly builds, decide as a typical current product of this kind "
+    "would and never narrow it. When the question offers options or asks what to "
+    "prioritize, include what such products have from every option. Name counts and "
+    "contents concretely, as many as such products have, such as how many tracks and "
+    "racers, even where the question names a smaller one: never one track, level or mode, "
+    'and never only "no limit", "every" or "the full variety", even when the question or an '
+    "earlier answer uses those words. Leave out any part that needs a server, network "
+    "service, account, payment or personal data (sharing or syncing between people or "
+    "devices does) from every part of the answer, including what the result shows and how "
+    "it is checked, even when the question offers it, an earlier answer included it, or the "
+    "question asks to bring it back. Never answer that less is enough or call anything a "
+    "first version or release, and keep the variety such products have, such as randomness "
+    "and animation, instead of requiring the same result on every run. Existing behavior "
+    "and code the request does not mention stay unchanged."
+)
+REFINER_BROWNFIELD_RULE = (
+    "You have not read the repository: never state what the existing code does or contains. "
+    "The project already has code: build what the request names completely and at the level "
+    "a user expects, but add no other feature, option or behavior the request does not name, "
+    "and keep existing behavior and code the request does not mention unchanged."
 )
 # What one answer part covers, in plain words. The model never sees the field
 # names, so it cannot repeat them to the user.
@@ -1303,10 +1266,14 @@ class LLMAnswerRefiner:
     consistent with the earlier answers, which the prompt lists oldest first.
     A reply that breaks a rule (``answer_text.answer_problems``) gets one retry
     that names the problem; if that fails too, the part gets the short
-    conservative answer in the goal's language (``FALLBACK_ANSWERS``). A
+    default answer in the goal's language (``FALLBACK_ANSWERS``). A
     provider failure returns ``None`` for an English goal, so the driver keeps
     its deterministic English answer, and the same short answer otherwise,
     because the deterministic answer is English.
+
+    ``has_existing_code`` picks the scope rule (``REFINER_GREENFIELD_RULE`` or
+    ``REFINER_BROWNFIELD_RULE``). Whoever builds the refiner knows the
+    workspace and sets it; it defaults to ``True``, the brownfield rule.
     """
 
     _SYSTEM = (
@@ -1321,12 +1288,24 @@ class LLMAnswerRefiner:
         "repeating them. If two earlier answers disagree, the most recent one "
         "stands; when the question asks which one holds, answer with the most "
         "recent one and say it replaces the other. "
-        f"{REFINER_LANGUAGE_RULE} {REFINER_NO_REPO_FACTS_RULE}"
+        f"{REFINER_LANGUAGE_RULE}"
     )
 
-    def __init__(self, llm_adapter: LLMAdapter, *, model: str | None = None) -> None:
+    def __init__(
+        self,
+        llm_adapter: LLMAdapter,
+        *,
+        model: str | None = None,
+        has_existing_code: bool = True,
+    ) -> None:
         self.llm_adapter = llm_adapter
         self.model = model
+        self.has_existing_code = has_existing_code
+
+    def system_prompt(self, language: str) -> str:
+        """The system prompt for an answer in ``language`` (a ``LANGUAGE_NAMES`` code)."""
+        rule = REFINER_BROWNFIELD_RULE if self.has_existing_code else REFINER_GREENFIELD_RULE
+        return f"{self._SYSTEM.format(language=LANGUAGE_NAMES[language])} {rule}"
 
     async def __call__(
         self,
@@ -1348,9 +1327,9 @@ class LLMAnswerRefiner:
             f"Interview question: {question}\n\n"
             f"Answer only this part of it: {concern}.\n"
             f"{earlier_block}\n"
-            f"A conservative starting point, to rewrite in your own words: {generic_text}"
+            f"A starting point, to rewrite in your own words: {generic_text}"
         )
-        system = self._SYSTEM.format(language=LANGUAGE_NAMES[language])
+        system = self.system_prompt(language)
         messages = [
             Message(role=MessageRole.SYSTEM, content=system),
             Message(role=MessageRole.USER, content=prompt),
@@ -1404,16 +1383,22 @@ class LLMAnswerRefiner:
         return normalize_answer(result.value.content or "") or None
 
 
-def build_answer_refiner() -> LLMAnswerRefiner | None:
+def build_answer_refiner(cwd: str | Path | None = None) -> LLMAnswerRefiner | None:
     """Best-effort AI answer refiner from the configured interview LLM backend.
 
-    Returns ``None`` (deterministic-only answering) if the provider/config is
-    unavailable so auto never fails to start just because the refiner could not
-    be constructed.
+    ``cwd`` is the auto session's workspace: the refiner uses the greenfield
+    rule only when it is a directory with no existing code
+    (``workspace_has_existing_code``); otherwise, unknown included, the
+    brownfield rule. Returns ``None`` (deterministic-only answering) if the
+    provider/config is unavailable so auto never fails to start just because
+    the refiner could not be constructed.
     """
     try:
         from ouroboros.providers import create_llm_adapter
 
-        return LLMAnswerRefiner(create_llm_adapter(use_case="interview"))
+        return LLMAnswerRefiner(
+            create_llm_adapter(use_case="interview"),
+            has_existing_code=workspace_has_existing_code(cwd),
+        )
     except Exception:  # noqa: BLE001 - refiner is optional; never block auto on it
         return None

@@ -41,7 +41,7 @@ from typing import Any
 
 import pytest
 
-from ouroboros.auto.grade_gate_terminals import DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
+from ouroboros.auto.degraded_seed import DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.state import (

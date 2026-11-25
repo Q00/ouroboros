@@ -48,7 +48,6 @@ async def _noop_run(self, state):  # noqa: ARG001
         status="complete",
         auto_session_id=state.auto_session_id,
         phase="complete",
-        grade="A",
     )
 
 
@@ -76,7 +75,6 @@ def test_run_auto_keeps_authoring_in_process_for_non_opencode_runtimes(
                 resume=None,
                 runtime=runtime,
                 max_interview_rounds=2,
-                max_repair_rounds=1,
                 skip_run=True,
             )
         )
@@ -117,7 +115,6 @@ def test_run_auto_wires_answer_refiner_factory_result_into_driver() -> None:
             status="complete",
             auto_session_id=state.auto_session_id,
             phase="complete",
-            grade="A",
         )
 
     with (
@@ -137,7 +134,6 @@ def test_run_auto_wires_answer_refiner_factory_result_into_driver() -> None:
                 resume=None,
                 runtime="claude",
                 max_interview_rounds=2,
-                max_repair_rounds=1,
                 skip_run=True,
             )
         )
@@ -165,7 +161,6 @@ def test_run_auto_wires_repo_investigator_into_driver() -> None:
             status="complete",
             auto_session_id=state.auto_session_id,
             phase="complete",
-            grade="A",
         )
 
     with (
@@ -182,7 +177,6 @@ def test_run_auto_wires_repo_investigator_into_driver() -> None:
                 resume=None,
                 runtime="claude",
                 max_interview_rounds=2,
-                max_repair_rounds=1,
                 skip_run=True,
             )
         )
@@ -209,7 +203,6 @@ def test_run_auto_gives_every_runtime_an_investigator(runtime: str, expected: st
             status="complete",
             auto_session_id=state.auto_session_id,
             phase="complete",
-            grade="A",
         )
 
     with (
@@ -226,7 +219,6 @@ def test_run_auto_gives_every_runtime_an_investigator(runtime: str, expected: st
                 resume=None,
                 runtime=runtime,
                 max_interview_rounds=2,
-                max_repair_rounds=1,
                 skip_run=True,
             )
         )
@@ -271,7 +263,6 @@ def test_run_auto_demotes_persisted_opencode_plugin_to_subprocess(tmp_path) -> N
                 resume=state.auto_session_id,
                 runtime=None,
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=False,
             )
         )
@@ -320,7 +311,6 @@ def test_run_auto_demotes_fresh_session_opencode_plugin_to_subprocess(tmp_path) 
                 resume=None,
                 runtime="opencode",
                 max_interview_rounds=2,
-                max_repair_rounds=1,
                 skip_run=True,
             )
         )
@@ -367,7 +357,6 @@ def test_run_auto_keeps_opencode_subprocess_in_process(tmp_path) -> None:
                 resume=state.auto_session_id,
                 runtime=None,
                 max_interview_rounds=None,
-                max_repair_rounds=None,
                 skip_run=False,
             )
         )

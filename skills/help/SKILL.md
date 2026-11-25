@@ -58,7 +58,7 @@ Each `ooo <name>` is also the skill `/ouroboros:<name>`, except `run`, `status`,
 | `ooo interview` | Socratic interview that exposes hidden assumptions | MCP, in-session fallback |
 | `ooo idk` | Calibrate interview wording from stated familiarity | MCP, in-session fallback |
 | `ooo seed` | Freeze interview results into a Seed | MCP, in-session fallback |
-| `ooo auto` | Goal to A-grade Seed, then execute and verify in the background | MCP |
+| `ooo auto` | Goal to a Seed, then execute and verify in the background | MCP |
 | `ooo run` | Execute a Seed and verify every acceptance criterion | MCP |
 | `ooo evaluate` | Mechanical checks, semantic review per criterion, consensus when uncertain | MCP, in-session fallback |
 | `ooo evolve` | Start or monitor an evolutionary loop across Seed generations | MCP |

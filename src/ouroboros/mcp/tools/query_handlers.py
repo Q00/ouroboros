@@ -215,8 +215,6 @@ class SessionStatusHandler:
                 answer = str(entry.get("answer", "")).strip()
                 lines.append(f"  round {round_value} [{source}] Q: {question}")
                 lines.append(f"    A: {answer}")
-        if state.last_grade:
-            lines.append(f"Seed grade: {state.last_grade}")
         if is_gap_window:
             lines.append("Pending: starting ralph")
         if ralph_block is not None:

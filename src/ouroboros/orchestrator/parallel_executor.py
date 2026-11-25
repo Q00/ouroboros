@@ -432,6 +432,7 @@ from ouroboros.orchestrator.session_signal_followup import (
 from ouroboros.orchestrator.shadow_replay import isolated_workspace, run_shadow_replay
 from ouroboros.orchestrator.shared_attempt import (
     SHARED_ATTEMPT_ROOT,
+    report_progress,
     settle_from_shared_attempt,
     shares_one_attempt,
 )
@@ -4291,8 +4292,8 @@ class ParallelACExecutor:
                     )
                     continue
 
-                # Mark ACs as executing
-                for ac_idx in executable:
+                # Mark ACs as executing, and those judged from root 0's attempt: it executes them
+                for ac_idx in (*executable, *shared):
                     ac_statuses[ac_idx] = "executing"
 
                 self._console.print(
@@ -4472,6 +4473,9 @@ class ParallelACExecutor:
                     (r for r in stage_ac_results if r.ac_index == SHARED_ATTEMPT_ROOT), None
                 )
                 for ac_idx in shared:
+                    await report_progress(  # what is judged so far, before judging the next
+                        self, session_id, execution_id, seed, ac_statuses, progress_state
+                    )
                     ac_result = await settle_from_shared_attempt(
                         self,
                         seed=seed,

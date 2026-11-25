@@ -36,7 +36,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -44,7 +43,6 @@ from ouroboros.auto.interview_driver import (
 )
 from ouroboros.auto.ledger import LedgerSource, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
-from ouroboros.auto.seed_reviewer import SeedReview
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -75,7 +73,7 @@ _PACKAGED_SKILLS_DIR = Path(__file__).resolve().parents[3] / "skills"
 _PACKAGED_AUTO_SKILL = _PACKAGED_SKILLS_DIR / "auto" / "SKILL.md"
 
 
-def _build_a_grade_seed(goal: str) -> Seed:
+def _build_runnable_seed(goal: str) -> Seed:
     """Return a minimally valid Seed used as the seed_generator output."""
     return Seed(
         goal=goal,
@@ -104,31 +102,6 @@ def _build_a_grade_seed(goal: str) -> Seed:
         ),
         metadata=SeedMetadata(ambiguity_score=0.05),
     )
-
-
-class _AGradeRepairer:
-    """Stub repairer that always returns an A-grade review without mutating the Seed."""
-
-    def converge(
-        self, seed: Seed, *, ledger: SeedDraftLedger
-    ) -> tuple[Seed, SeedReview, list[object]]:
-        review = SeedReview(
-            grade_result=GradeResult(
-                grade=SeedGrade.A,
-                scores={
-                    "coverage": 0.95,
-                    "ambiguity": 0.05,
-                    "testability": 0.95,
-                    "execution_feasibility": 0.95,
-                    "risk": 0.05,
-                },
-                findings=[],
-                blockers=[],
-                may_run=True,
-            ),
-            findings=(),
-        )
-        return seed, review, []
 
 
 def _make_seed_saver(tmp_path: Path) -> tuple[Any, list[str]]:
@@ -173,7 +146,6 @@ def _build_pipeline(
         driver,
         seed_generator,
         store=store,
-        repairer=_AGradeRepairer(),
         seed_saver=seed_saver,
         skip_run=True,
     )
@@ -225,11 +197,6 @@ class _StubStartExecuteSeedHandler:
         self.opencode_mode = kwargs.get("opencode_mode")
 
 
-class _StubSeedRepairer:
-    def __init__(self, **kwargs: Any) -> None:
-        self.kwargs = kwargs
-
-
 def _install_auto_handler_stubs(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -241,9 +208,9 @@ def _install_auto_handler_stubs(
 
     The real ``AutoHandler.handle`` and ``AutoHandler._run`` still execute. Only
     the leaves that would otherwise spawn real LLM/MCP/subprocess work get
-    swapped out: authoring handlers, ``SeedRepairer``, and ``AutoPipeline``.
-    The stub ``AutoPipeline.run`` produces a complete A-grade ``AutoPipelineResult``
-    so the runtime sees a Seed-bearing dispatch result.
+    swapped out: authoring handlers and ``AutoPipeline``. The stub
+    ``AutoPipeline.run`` produces a complete ``AutoPipelineResult`` so the
+    runtime sees a Seed-bearing dispatch result.
     """
 
     monkeypatch.setattr(auto_handler_module, "InterviewHandler", _StubAuthoringHandler)
@@ -252,7 +219,6 @@ def _install_auto_handler_stubs(
     monkeypatch.setattr(
         auto_handler_module, "StartExecuteSeedHandler", _StubStartExecuteSeedHandler
     )
-    monkeypatch.setattr(auto_handler_module, "SeedRepairer", _StubSeedRepairer)
 
     # Also replace the default AutoStore so no auto_*.json files leak into the
     # real $HOME/.ouroboros/data path.
@@ -268,7 +234,6 @@ def _install_auto_handler_stubs(
             *,
             run_starter: Any = None,
             store: Any = None,
-            repairer: Any = None,
             seed_saver: Any = None,
             seed_loader: Any = None,
             skip_run: bool = False,
@@ -278,7 +243,6 @@ def _install_auto_handler_stubs(
             captured["seed_generator"] = seed_generator
             captured["run_starter"] = run_starter
             captured["store"] = store
-            captured["repairer"] = repairer
             captured["seed_saver"] = seed_saver
             captured["seed_loader"] = seed_loader
             captured["skip_run"] = skip_run
@@ -293,17 +257,13 @@ def _install_auto_handler_stubs(
             state.transition(AutoPhase.SEED_GENERATION, "stubbed seed generation")
             state.seed_id = "seed_dispatch_e2e_runtime"
             state.seed_path = seed_path
-            state.transition(AutoPhase.REVIEW, "stubbed seed review")
-            state.last_grade = "A"
             state.transition(AutoPhase.COMPLETE, "stubbed auto pipeline complete")
             return AutoPipelineResult(
                 status="complete",
                 auto_session_id=state.auto_session_id,
                 phase="complete",
-                grade="A",
                 seed_path=seed_path,
                 interview_session_id=state.interview_session_id,
-                last_grade="A",
             )
 
     monkeypatch.setattr(auto_handler_module, "AutoPipeline", _StubAutoPipeline)
@@ -468,7 +428,7 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert final.data.get("tool_name") == "ouroboros_start_auto"
     assert final.data.get("seed_path") == str(seed_path)
     assert final.data.get("status") == "complete"
-    assert final.data.get("grade") == "A"
+    assert "grade" not in final.data["mcp_meta"]
     assert final.data.get("phase") == "complete"
 
 
@@ -570,7 +530,7 @@ async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> No
         )
 
     async def seed_generator(session_id: str) -> Seed:  # noqa: ARG001
-        return _build_a_grade_seed(sparse_goal)
+        return _build_runnable_seed(sparse_goal)
 
     seed_saver, saved_paths = _make_seed_saver(tmp_path)
 
@@ -605,9 +565,9 @@ async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> No
             f"answers must be source-tagged from production answerer; got {prefixed!r}"
         )
 
-    # The pipeline reached Seed: phase moved past INTERVIEW into REVIEW/COMPLETE,
+    # The pipeline reached Seed: the written Seed completed the skip-run session,
     # a Seed id was populated, and a Seed file was written.
-    assert state.phase in {AutoPhase.COMPLETE, AutoPhase.REVIEW}
+    assert state.phase is AutoPhase.COMPLETE
     assert state.phase is not AutoPhase.BLOCKED
     assert state.last_error is None
     assert state.seed_id, "Seed id must be populated after interview-fill path"
@@ -617,7 +577,6 @@ async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> No
     assert seed_path.read_bytes()
     assert state.seed_path == saved_paths[0]
     assert result.status == "complete"
-    assert result.grade == "A"
     assert result.blocker is None
 
     # The persisted ledger must show that the four required sections were

@@ -456,10 +456,10 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "os.environ + NO_COLOR; the shared `ouroboros mcp serve` must see the same "
         "config and agent logins as a host-launched stdio server."
     ),
-    ("src/ouroboros/gui/harness.py", "_run_result", "subprocess.run", 1697, 18): (
+    ("src/ouroboros/gui/harness.py", "_run_result", "subprocess.run", 1709, 18): (
         "implicit inherit; read-only `git worktree list`."
     ),
-    ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 1718, 19): (
+    ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 1730, 19): (
         "implicit inherit; read-only `git diff --name-only` / `git status`."
     ),
     ("src/ouroboros/gui/workspace.py", "_git", "subprocess.run", 51, 11): (
@@ -520,13 +520,6 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         127,
         28,
     ): "Requester argv is explicitly operator-selected; OUROBOROS_AUTO_REQUESTER_COMMAND is denied from project .env; no shell.",
-    (
-        "src/ouroboros/auto/seed_preflight_repair.py",
-        "_git_listed_files",
-        "subprocess.run",
-        108,
-        20,
-    ): "Fixed git ls-files roster; GIT_* and PATH denied from project .env.",
     (
         "src/ouroboros/backends/model_catalog.py",
         "refresh_models",
@@ -713,7 +706,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/evaluation/mechanical.py",
         "run_command",
         "asyncio.create_subprocess_exec",
-        130,
+        177,
         24,
     ): "os.environ.copy() minus _OUROBOROS_NESTED; runs .ouroboros/mechanical.toml commands; the repo already controls the command text, so env from the same repo adds no capability. Not routed through sanitized_verify_environment.",
     (
@@ -1277,6 +1270,7 @@ LOADER_KEY_CATALOG_DENIED: tuple[str, ...] = (
     "OUROBOROS_AGENT_RUNTIME",
     "OUROBOROS_ANTIGRAVITY_CLI_PATH",
     "OUROBOROS_ASSERTION_EXTRACTION_MODEL",
+    "OUROBOROS_AUTO_EXPECTATIONS_TIMEOUT",
     "OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS",
     "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS",
     "OUROBOROS_AUTO_REQUESTER_COMMAND",

@@ -61,8 +61,16 @@ class TestBrownfieldContextFromCwd:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (tmp_path / "app.py").write_text("print(1)\n", encoding="utf-8")
         ctx = brownfield_context_from_cwd(tmp_path)
         assert ctx.project_type == "brownfield"
+
+    def test_empty_git_checkout_is_greenfield(self, tmp_path: Path) -> None:
+        """A just-initialised checkout with only dot entries is a new project (#3074)."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        assert brownfield_context_from_cwd(tmp_path).project_type == "greenfield"
 
     def test_malformed_git_pointer_is_greenfield(self, tmp_path: Path) -> None:
         (tmp_path / ".git").write_text("not-a-gitdir\n", encoding="utf-8")
@@ -86,6 +94,7 @@ class TestBrownfieldContextFromCwd:
         worktree = tmp_path / "linked"
         worktree.mkdir()
         (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+        (worktree / "app.py").write_text("print(1)\n", encoding="utf-8")
 
         ctx = brownfield_context_from_cwd(worktree)
 
@@ -95,10 +104,11 @@ class TestBrownfieldContextFromCwd:
     def test_none_cwd_is_greenfield(self) -> None:
         assert brownfield_context_from_cwd(None).project_type == "greenfield"
 
-    def test_git_only_worktree_is_brownfield_context(self, tmp_path: Path) -> None:
+    def test_git_worktree_without_manifest_is_brownfield_context(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (tmp_path / "notes.txt").write_text("existing\n", encoding="utf-8")
 
         ctx = brownfield_context_from_cwd(tmp_path)
 

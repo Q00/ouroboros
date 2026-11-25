@@ -1,11 +1,10 @@
-"""A1 provenance gate (#1485): source-tagged ledger decisions + low-ambiguity gate.
+"""A1 provenance (#1485): source-tagged ledger decisions.
 
 Covers the decision-origin axis (:class:`DecisionProvenance`) layered onto the
 existing content-authority ``LedgerSource``: derivation for unstamped/legacy
-entries, explicit stamping at the deadline/timeout backstops, the histogram
-surface on ``SeedMetadata``, and the ``unverified_provenance`` grading finding
-that makes the #1485 degraded-seed (question-text pollution) structurally
-impossible to auto-run.
+entries, explicit stamping at the deadline/timeout backstops, and the histogram
+surface on ``SeedMetadata``. The ``unverified_provenance`` grade finding was
+removed with the Seed grade gate (#3064).
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from __future__ import annotations
 import json
 
 from ouroboros.auto.auto_fill import AutoFillProposal, auto_fill_remaining
-from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.auto.ledger import (
     DecisionProvenance,
     LedgerEntry,
@@ -182,53 +180,6 @@ class TestStampSites:
             if entry.provenance is DecisionProvenance.TIMEOUT_DEFAULT
         ]
         assert stamped, "safe-default finalization must stamp timeout_default"
-
-
-class TestUnverifiedProvenanceGate:
-    def _ledger_with_gated_acceptance(self, value: str) -> SeedDraftLedger:
-        ledger = _populate_complete_ledger()
-        for entry in ledger.sections["acceptance_criteria"].entries:
-            entry.status = LedgerStatus.WEAK
-        ledger.add_entry(
-            "acceptance_criteria",
-            LedgerEntry(
-                key="acceptance_criteria.inferred",
-                value=value,
-                source=LedgerSource.INFERENCE,  # -> model_inferred, gated
-                confidence=0.7,
-                status=LedgerStatus.CONFIRMED,
-            ),
-        )
-        return ledger
-
-    def test_clean_model_inferred_entry_passes(self) -> None:
-        ledger = self._ledger_with_gated_acceptance(
-            "CLI exits with code 0 and prints the greeting to stdout."
-        )
-        seed = synthesize_seed_from_ledger(ledger)
-        result = GradeGate().grade_seed(seed, ledger=ledger)
-        assert not any(f.code == "unverified_provenance" for f in result.findings)
-
-    def test_question_text_pollution_produces_finding(self) -> None:
-        # The #1485 signature: raw interview question text in a contract field.
-        ledger = self._ledger_with_gated_acceptance(
-            "What should happen when the argument is missing?"
-        )
-        seed = synthesize_seed_from_ledger(ledger)
-        result = GradeGate().grade_seed(seed, ledger=ledger)
-        provenance_findings = [f for f in result.findings if f.code == "unverified_provenance"]
-        assert provenance_findings
-        assert provenance_findings[0].severity == "medium"
-        # Repairable finding, never a hard blocker -> feeds the repair loop.
-        assert result.can_repair
-        assert not any(b.code == "unverified_provenance" for b in result.blockers)
-        assert result.grade is not SeedGrade.A
-
-    def test_gate_inert_without_ledger(self) -> None:
-        # Legacy/direct grade_seed callers pass no ledger -> no provenance check.
-        seed = synthesize_seed_from_ledger(_populate_complete_ledger())
-        result = GradeGate().grade_seed(seed)
-        assert not any(f.code == "unverified_provenance" for f in result.findings)
 
 
 class TestSeedMetadataSurface:

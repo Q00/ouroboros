@@ -89,10 +89,8 @@ def _primed_run_state(tmp_path) -> AutoPipelineState:
     _fill_ready(ledger)
     state.ledger = ledger.to_dict()
     state.seed_artifact = _seed().to_dict()
-    state.last_grade = "A"
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
-    state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     return state
 

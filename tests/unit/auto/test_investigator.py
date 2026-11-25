@@ -28,7 +28,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ouroboros.auto.evidence_check import EvidenceSpan, check_span
-from ouroboros.auto.grading import _unverified_provenance_findings
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -615,9 +614,9 @@ async def test_all_not_found_interview_converges_like_the_old_answerer(
     workspace: Path, done_after: int | None, kind: str
 ) -> None:
     """Every answer not found: the interview ends the same way it ends without
-    the investigator (backend closure, or the round cap), never blocked, never on
-    the deadline path, and without unverified-provenance grading findings. A
-    product decision gets the very answer the answerer gives without one."""
+    the investigator (backend closure, or the round cap), never blocked, and never
+    on the deadline path. A product decision gets the very answer the answerer
+    gives without one."""
     questions = (
         "Who uses this CLI and what are its inputs and outputs?",
         "Which runtime and project patterns should be used?",
@@ -645,7 +644,6 @@ async def test_all_not_found_interview_converges_like_the_old_answerer(
     assert state_on.last_error_code == state_off.last_error_code
     assert result_on.rounds <= 4
     assert len(sent_on) == len(sent_off)
-    assert _unverified_provenance_findings(ledger_on) == []
     if kind == "intended_behavior":
         # The answerer's own answer, followed by what the checked code shows.
         assert all(on.startswith(off) for on, off in zip(sent_on, sent_off, strict=True))

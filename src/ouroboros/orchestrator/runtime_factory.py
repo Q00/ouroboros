@@ -335,8 +335,14 @@ def create_agent_runtime(
     llm_backend: str | None = None,
     startup_output_timeout_seconds: float | None = None,
     stdout_idle_timeout_seconds: float | None = None,
+    web_search: bool = False,
 ) -> AgentRuntime:
-    """Create an orchestrator agent runtime from config or explicit options."""
+    """Create an orchestrator agent runtime from config or explicit options.
+
+    ``web_search=True`` turns on live web search where the runtime is launched
+    with a flag for it: the ``codex`` CLI runtime only. Every other backend
+    ignores it; Claude gets web tools per call through ``tools``.
+    """
     resolved_backend = resolve_agent_runtime_backend(backend)
     resolved_permission_mode = permission_mode or get_agent_permission_mode(
         backend=resolved_backend
@@ -358,6 +364,8 @@ def create_agent_runtime(
             ),
             "llm_backend": resolved_llm_backend,
         }
+        if web_search and resolved_backend == "codex":
+            runtime_kwargs["web_search"] = True
 
     spec = get_backend_factory_spec(resolved_backend, kind="runtime")
     if spec is None or spec.agent_runtime_factory is None:

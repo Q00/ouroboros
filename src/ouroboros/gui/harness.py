@@ -41,7 +41,7 @@ import uuid
 import yaml
 
 from ouroboros.core.errors import PersistenceError
-from ouroboros.gui import auto_progress, model_refusal, run_recovery, workspace
+from ouroboros.gui import auto_progress, completion_view, model_refusal, run_recovery, workspace
 from ouroboros.gui.answer_language import LANGUAGE_NAMES, goal_language, in_language, plain_answer
 from ouroboros.gui.interview_assist import (
     AUTO_CONFIRMED_PREFIX,
@@ -332,8 +332,7 @@ _ASK_SYSTEM = (
 class Harness:
     """Conversations, their background work, and live subscribers.
 
-    ``jobs`` is the console's job registry, so the ``ouroboros auto`` jobs chats
-    start are listed in Activity with every other job the console runs.
+    ``jobs`` records ``ouroboros auto`` chat jobs alongside other Console jobs in Activity.
     """
 
     def __init__(self, jobs: JobRegistry | None = None) -> None:
@@ -1079,7 +1078,9 @@ class Harness:
         With ``auto_job_id`` the run belongs to that ``ouroboros auto`` job: only
         the card is updated (the Auto job's end decides the chat's status and
         result), and following stops when the Auto job ends, after one last
-        read. A run that had not ended by then is shown as interrupted.
+        read. A run that had not ended by then is shown as interrupted. The
+        run job goes on after its run ends, with the completion pass, so an
+        Auto card also follows the pass's stages until then (``completion``).
         """
         from ouroboros.dashboard_web.kanban import reduce_board
         from ouroboros.dashboard_web.reader import (
@@ -1091,6 +1092,11 @@ class Harness:
         db_path = str(default_db_path())
         tail = EventTail(db_path, execution_id)
         events: list[dict[str, Any]] = []
+        stage_tail = (
+            completion_view.StageTail(db_path, execution_id) if auto_job_id is not None else None
+        )
+        stages: list[dict[str, Any]] = []
+        cwd = str((self.get(session_id) or {}).get("cwd") or "") or None
         last_summary = ""
         while True:
             with self._lock:
@@ -1112,6 +1118,12 @@ class Harness:
                 # Auto's card reads again on the next poll; its loop ends with the job.
             board = reduce_board(events, execution_id=execution_id) if events else {}
             summary = _board_summary(board, events)
+            if stage_tail is not None:
+                stages.extend(stage_tail.read())
+                completion = completion_view.summary(stages, cwd)
+                if completion is not None:
+                    summary["completion"] = completion
+                    summary["key"] += json.dumps(completion, sort_keys=True, default=str)
             job = _job_terminal(db_path, job_id) if job_id else None
             if (
                 job is not None
@@ -1149,7 +1161,7 @@ class Harness:
                             s["messages"].append(_msg("assistant", "result", "", **result))
 
                 self._update(session_id, apply)
-            if summary["status"] in _TERMINAL_RUN or auto_over:
+            if auto_over or (auto_job_id is None and summary["status"] in _TERMINAL_RUN):
                 return
             time.sleep(_RUN_POLL_SEC)
 
@@ -1759,7 +1771,7 @@ def _apply_auto_facts(session: dict[str, Any], facts: dict[str, Any]) -> None:
     """Put the auto session record's facts into an Auto chat.
 
     The Seed is one ``seed`` message, the same kind the interview writes,
-    updated in place when a repair rewrites it.
+    updated in place when the record's Seed changes.
     """
     view = session.get("auto")
     if not isinstance(view, dict):

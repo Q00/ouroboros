@@ -4,13 +4,10 @@ import pytest
 
 from ouroboros.auto.execution_acceptance import (
     _AUTORESEARCH_CANONICAL_AC,
+    OBSERVABLE_CHECK_SEPARATOR,
     _unwrap_seed_repairer_original_requirement,
     is_auto_reporting_acceptance_criterion,
     normalize_execution_acceptance,
-)
-from ouroboros.auto.seed_repairer import (
-    OBSERVABLE_CHECK_SEPARATOR,
-    _observable_preserving_replacement,
 )
 
 _SEED_REPAIRER_WRAPPER = (
@@ -367,7 +364,7 @@ def test_normalize_execution_acceptance_unwraps_repaired_observation_criteria() 
 
 
 def test_normalize_execution_acceptance_unwraps_clause_repaired_observation_criteria() -> None:
-    """#3045: criteria the current repairer annotated normalize like legacy ones."""
+    """#3045: criteria the removed repairer annotated normalize like legacy ones."""
     goal = (
         "Observation run for ooo auto via ouroboros_auto: create hello_auto.py and "
         "tests/test_hello_auto.py; hello_auto returns exactly hello from ooo auto; "
@@ -380,12 +377,13 @@ def test_normalize_execution_acceptance_unwraps_clause_repaired_observation_crit
         "Final observation report plain chat summary including requested unavailable "
         "MCP/auto metadata as not available/not run in this surface when applicable.",
     )
+    # The exact text the Seed repairer wrote before its removal (#3064).
     repaired = tuple(
-        _observable_preserving_replacement(text, index=index, goal=goal)
-        for index, text in enumerate(originals)
+        f"{text.rstrip(' .')}{OBSERVABLE_CHECK_SEPARATOR}verified when the test suite passes"
+        for text in originals
     )
-    # The report line is one the repairer annotates, so the drop below is
-    # the clause-aware wrapper check, not an exact-text match.
+    # The report line carries the clause, so the drop below is the
+    # clause-aware wrapper check, not an exact-text match.
     assert repaired[3] != originals[3]
     seed = _seed(*repaired).model_copy(update={"goal": goal})
 
@@ -770,7 +768,11 @@ def test_normalize_execution_acceptance_drops_wrapped_library_defaults_for_file_
 
 
 def test_normalize_execution_acceptance_drops_clause_repaired_library_defaults() -> None:
-    """#3045: library defaults the current repairer annotated are still dropped."""
+    """#3045: library defaults the removed repairer annotated are still dropped.
+
+    The criteria are the exact text the Seed repairer wrote before it was
+    removed (#3064); Seeds persisted then still carry them.
+    """
     goal = (
         "Create a tiny smoke-test file named pi_auto_smoke.txt. "
         "The file must contain exactly the single line pi-auto-ok."
@@ -783,11 +785,16 @@ def test_normalize_execution_acceptance_drops_clause_repaired_library_defaults()
         "pi_auto_smoke.txt exists at repository root.",
         "pi_auto_smoke.txt full content exactly pi-auto-ok followed by a newline.",
     )
-    repaired = tuple(
-        _observable_preserving_replacement(text, index=index, goal=goal)
-        for index, text in enumerate((*defaults, *kept))
+    clauses = (
+        "verified when an API request returns the expected response",
+        "verified when the test suite passes",
+        "verified when the expected file is written",
+        "verified when the expected file is written",
     )
-    assert all(OBSERVABLE_CHECK_SEPARATOR in text for text in repaired)
+    repaired = tuple(
+        f"{text.rstrip(' .')}{OBSERVABLE_CHECK_SEPARATOR}{clause}"
+        for text, clause in zip((*defaults, *kept), clauses, strict=True)
+    )
     seed = _seed(*repaired).model_copy(
         update={
             "goal": goal,
@@ -1269,17 +1276,26 @@ def test_unwrap_seed_repairer_preserves_case_and_recurses() -> None:
 
 
 @pytest.mark.parametrize(
-    ("criterion", "goal"),
+    ("criterion", "clause"),
     [
-        ("RawStderr.LOG and VAL_BPB must match", "Build a CLI"),
-        ("Pytest tests cover the parser", "Build a CLI"),
-        ("Todos can be created and listed", "Build a REST API"),
-        ("Python CLI가 마크다운 표를 CSV로 변환한다", "CLI를 만든다"),
+        (
+            "RawStderr.LOG and VAL_BPB must match",
+            "verified when running the command prints the expected output",
+        ),
+        ("Pytest tests cover the parser", "verified when the test suite passes"),
+        (
+            "Todos can be created and listed",
+            "verified when an API request returns the expected response",
+        ),
+        (
+            "Python CLI가 마크다운 표를 CSV로 변환한다",
+            "명령을 실행하면 기대한 출력이 나오는지 확인한다",
+        ),
     ],
 )
-def test_unwrap_seed_repairer_strips_the_observation_clause(criterion: str, goal: str) -> None:
-    """#3045: the clause the repairer appends unwraps to the verbatim criterion."""
-    repaired = _observable_preserving_replacement(criterion, index=0, goal=goal)
+def test_unwrap_seed_repairer_strips_the_observation_clause(criterion: str, clause: str) -> None:
+    """#3045: the clause the removed repairer appended unwraps to the verbatim criterion."""
+    repaired = f"{criterion}{OBSERVABLE_CHECK_SEPARATOR}{clause}"
 
     assert repaired != criterion
     assert _unwrap_seed_repairer_original_requirement(repaired) == criterion

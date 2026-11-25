@@ -11,9 +11,11 @@ The MechanicalVerifier is stateless and produces immutable results.
 """
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import signal
 from typing import Any
 
 from ouroboros.core.errors import ValidationError
@@ -99,6 +101,51 @@ class CommandResult:
     executed_command: tuple[str, ...] | None = None
 
 
+# How long cleanup waits for a killed command to be reaped. asyncio resolves
+# ``Process.wait()`` only once every pipe the command was given has closed, so
+# a descendant that escaped the kill and still holds one would otherwise block
+# the caller forever.
+_KILL_REAP_SECONDS = 5.0
+
+
+def _running_on_windows() -> bool:
+    return os.name == "nt"
+
+
+def _spawn_kwargs() -> dict[str, Any]:
+    """Make a POSIX command the leader of its own session and process group.
+
+    A test runner can leave descendants behind, such as a server a test never
+    closed, that keep the stdout/stderr pipes open. As a group leader the
+    command and every such descendant can be signalled at once.
+    """
+    if _running_on_windows():
+        return {}
+    return {"start_new_session": True}
+
+
+async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
+    """Kill the command and its process group, then reap it within a bound."""
+    if _running_on_windows():
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+    else:
+        # Signal the group even when the command itself already exited: its
+        # descendants keep the group alive and may still hold the pipes.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=_KILL_REAP_SECONDS)
+    except TimeoutError:
+        # A descendant left the group and still holds a pipe. Make sure the
+        # command itself is dead, then stop waiting instead of hanging.
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(process.wait(), timeout=1.0)
+
+
 async def run_command(
     command: tuple[str, ...],
     timeout: int,
@@ -133,6 +180,7 @@ async def run_command(
             stderr=asyncio.subprocess.PIPE,
             cwd=working_dir,
             env=env,
+            **_spawn_kwargs(),
         )
 
         try:
@@ -147,8 +195,7 @@ async def run_command(
                 executed_command=prepared_command,
             )
         except TimeoutError:
-            process.kill()
-            await process.wait()
+            await _kill_and_reap(process)
             return CommandResult(
                 return_code=-1,
                 stdout="",
@@ -157,9 +204,7 @@ async def run_command(
                 executed_command=prepared_command,
             )
         except asyncio.CancelledError:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+            await _kill_and_reap(process)
             raise
     except FileNotFoundError as e:
         return CommandResult(

@@ -119,6 +119,38 @@ Fail-closed marker for a provider boundary whose effects may have occurred but
 whose terminal result is not yet durable. Recovery must not redispatch a sealed
 attempt; a later terminal lifecycle event supersedes the seal.
 
+### execution.completion_pass.updated
+
+Written by the completion pass (`orchestrator/completion_pass.py`) after
+`execution.terminal`, while the run job is still open, each time a stage
+starts. A session stage retried after a provider error is announced again with
+`attempt` 2, so a stage name can appear twice; `done` is written once, last. A
+pass that is skipped (see [architecture](./architecture.md#phase-2-execution))
+writes none. A waiter uses it to keep the process alive until stage `done`. The aggregate is
+the execution.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stage` | `string` | `review`, `play_plan`, `play`, `play_review`, `fix`, `recheck`, `play_2`, `play_review_2`, `repair`, `play_3`, then `pick_<round>` and `pick_<round>_swapped` for each earlier version compared with the best one so far, then `done` |
+| `bound_seconds` | `number` | The most the stage can take (`0` for `done`) |
+| `attempt` | `integer` | Which try of the stage (a session that ended in a provider error is tried once more); absent on `done` |
+| `defects` | `integer` | On `fix` and `repair` only: how many defects the worker was given |
+| `status` | `string` | On `done` only: `clean`, `fixed`, `fix_failed` or `review_failed` |
+
+### auto.expectations.researched
+
+Written once per `ooo auto` session after the interview, by
+`auto/expectations.py`, with the outcome of the research on what a typical
+current product of the requested kind includes.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `auto_session_id` | `string` | The auto session |
+| `outcome` | `string` | `ok`, `timeout`, `failed`, `skipped_brownfield` or `disabled` |
+| `line_count` | `integer` | Lines the Seed carries as `SourcedScope.expected_experience` |
+| `elapsed_seconds` | `number` | Time the research took |
+| `timeout_seconds` | `number` | The bound it ran under |
+
 ### mcp.job.acceptance_pending_observed
 
 Emitted when a detached start exceeds its acceptance deadline while its worker

@@ -16,8 +16,10 @@ user's language, short, and in plain product words (#3050):
   non-Latin answer (``latin_prose``), more than ``MAX_ANSWER_PART_CHARS`` characters, or internal
   vocabulary (field names such as ``acceptance_criteria``). Text inside inline
   code is not checked for script, since identifiers and literals may use any.
-- ``FALLBACK_ANSWERS`` holds one short, conservative answer per language, used
-  when a model reply still has problems after one retry.
+- ``FALLBACK_ANSWERS`` holds one short answer per language, the default policy
+  in one sentence (do what a typical current product of the kind does, keep
+  existing behavior the request does not mention, follow the project's
+  conventions), used when a model reply still has problems after one retry.
 """
 
 from __future__ import annotations
@@ -90,15 +92,21 @@ _INTERNAL_SEED_TERMS = re.compile(r"\b(?:the|this|a)\s+Seed\b|\bSeed\s+(?:sectio
 
 FALLBACK_ANSWERS: Mapping[str, str] = {
     "en": (
-        "Take the most conservative option: keep the change small and follow "
-        "the project's existing conventions."
+        "Do what a typical current product of this kind does, keep existing behavior "
+        "the request does not mention, and follow the project's conventions."
     ),
-    "ko": "가장 보수적인 선택을 따른다: 변경을 작게 유지하고 프로젝트의 기존 관례를 따른다.",
-    "ja": "最も保守的な選択をとる: 変更は小さく保ち、プロジェクトの既存の慣習に従う。",
-    "zh": "采用最保守的做法：改动保持最小，并遵循项目现有的惯例。",
+    "ko": (
+        "이런 종류의 일반적인 최신 제품이 하는 대로 하고, 요청에 없는 기존 동작은 "
+        "그대로 두며, 프로젝트의 관례를 따른다."
+    ),
+    "ja": (
+        "この種の一般的な最新の製品と同じようにし、依頼にない既存の動作はそのまま残し、"
+        "プロジェクトの慣習に従う。"
+    ),
+    "zh": "参照同类产品当前的常见做法，保留请求未提到的现有行为，并遵循项目的惯例。",
     "ru": (
-        "Выбираем самый осторожный вариант: изменение минимальное, "
-        "существующие соглашения проекта сохраняются."
+        "Делаем так, как это делает типичный современный продукт такого рода, сохраняем "
+        "существующее поведение, о котором запрос не говорит, и следуем соглашениям проекта."
     ),
 }
 

@@ -10,6 +10,10 @@ a Seed runs one worker attempt (root 0, whose task is the sourced objective),
 and every other criterion is judged from that attempt against its own text:
 the typed evidence, the legacy verifier, its own verify command and the check
 package gate, exactly once per criterion (:func:`settle_from_shared_attempt`).
+Because every criterion is judged from it, root 0's prompt lists each
+criterion's text and expected artifacts, never its verify command (#3072).
+Progress reports every criterion ``executing`` while root 0's attempt runs,
+and each one's status as soon as it is judged (:func:`report_progress`).
 
 The decision reads structure only: whether the Seed carries ``sourced_scope``,
 how many criteria it has, and whether the binding criteria equal the Seed's
@@ -18,6 +22,7 @@ criteria as lists. Nothing classifies text.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 import os
 from typing import TYPE_CHECKING, Any
@@ -213,6 +218,17 @@ async def settle_from_shared_attempt(
         execution_id=execution_id,
         ac_index=ac_index,
     )
+    if (
+        verify_gate_outcome is not None
+        and not verify_gate_outcome.passed
+        and not verify_gate_outcome.environment_unverifiable
+    ):
+        # The criterion's own verify gate rejects it. ``_apply_verify_gate``
+        # below decides that rejection from the cached outcome and records it
+        # (``execution.verify.failed``, with the missing artifacts), with or
+        # without a check package gate, so the run's failure cause can name it
+        # (#3072). This criterion gets no retry to record it later.
+        error = None
     success = error is None
     if success and executor._execution_profile is not None and typed_evidence is not None:
         typed_evidence = _scoped_evidence_record_for_ac(
@@ -251,8 +267,39 @@ async def settle_from_shared_attempt(
     return result
 
 
+async def report_progress(
+    executor: ParallelACExecutor,
+    session_id: str,
+    execution_id: str,
+    seed: Seed,
+    ac_statuses: Mapping[int, str],
+    progress_state: Mapping[str, int],
+) -> None:
+    """Emit the workflow snapshot before the next criterion is judged from the shared attempt.
+
+    It is the snapshot the periodic ``Monitoring`` emitter sends, from the same
+    inputs, sent now instead of at its next tick. Every criterion judged so far
+    (root 0 and the ones before) shows its status, and the rest stay
+    ``executing``: each tile settles as soon as its criterion is judged, the
+    last one in the level's completion snapshot that follows.
+    """
+    await executor._emit_workflow_progress(
+        session_id=session_id,
+        execution_id=execution_id,
+        seed=seed,
+        ac_statuses=dict(ac_statuses),
+        ac_retry_attempts=None,
+        executing_indices=[i for i, s in ac_statuses.items() if s == "executing"],
+        completed_count=sum(1 for s in ac_statuses.values() if s == "completed"),
+        current_level=progress_state.get("current_level", 0),
+        total_levels=progress_state.get("total_levels", 0),
+        activity="Monitoring",
+    )
+
+
 __all__ = [
     "SHARED_ATTEMPT_ROOT",
+    "report_progress",
     "settle_from_shared_attempt",
     "shared_attempt_graph",
     "shares_one_attempt",

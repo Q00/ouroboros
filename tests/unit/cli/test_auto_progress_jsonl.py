@@ -49,6 +49,13 @@ def _events() -> list[AutoProgressEvent]:
             answer="Ignore punctuation as well.",
             answer_source="assumption",
         ),
+    ]
+
+
+def _historical_events() -> list[AutoProgressEvent]:
+    """Kinds only sessions recorded before #3064 carry; the writer keeps them."""
+    session = "auto_0123456789ab"
+    return [
         AutoProgressEvent(session, "review", "grade", "Seed grade B", grade="B"),
         AutoProgressEvent(session, "repair", "repair", "repair round 1", round=1),
     ]
@@ -63,7 +70,7 @@ def test_each_event_is_one_flushed_json_line_with_every_field(tmp_path: Path) ->
     write = auto_command._make_progress_jsonl_writer(path)
     names = [field.name for field in fields(AutoProgressEvent)]
 
-    for count, event in enumerate(_events(), start=1):
+    for count, event in enumerate([*_events(), *_historical_events()], start=1):
         write(event)
         # Readable as soon as the call returns: a follower sees whole events.
         rows = _lines(path)
@@ -189,7 +196,6 @@ def test_cli_writes_every_event_and_keeps_the_text_trace_as_it_was(
         assert "[auto]" not in output  # --quiet silences the text, not the file
     else:
         assert "[auto] interview — interview round 1/50" in output
-        assert "[auto] grade B — Seed grade B" in output
 
 
 @pytest.mark.usefixtures("auto_project_cwd")
@@ -211,7 +217,7 @@ def test_an_unwritable_file_never_breaks_the_pipeline(
     assert result.exit_code == 0, result.output
     assert "Auto pipeline completed" in _strip_ansi(result.stdout)
     assert result.stderr.count("could not write auto progress") == 1
-    assert "[auto] grade B — Seed grade B" in _strip_ansi(result.stdout)
+    assert "[auto] interview — interview round 1/50" in _strip_ansi(result.stdout)
     assert not path.exists()
 
 
@@ -266,13 +272,45 @@ async def test_the_run_wait_follows_quiet_not_whether_a_callback_is_wired(
         resume=None,
         runtime=None,
         max_interview_rounds=1,
-        max_repair_rounds=1,
         skip_run=False,
         progress_callback=(lambda _event: None) if callback else None,
         quiet=quiet,
     )
 
     assert waited["quiet"] is expected
+
+
+@pytest.mark.usefixtures("auto_project_cwd")
+def test_max_repair_rounds_is_accepted_ignored_and_warned(
+    fake_pipeline: type[_Pipeline], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3064: the repair loop is gone; the old flag warns instead of failing."""
+    bounds: list[int] = []
+
+    async def run(self: _Pipeline, run_state: Any) -> AutoPipelineResult:  # noqa: ARG001
+        bounds.append(run_state.max_repair_rounds)
+        return AutoPipelineResult(
+            status="complete", auto_session_id=run_state.auto_session_id, phase="complete"
+        )
+
+    monkeypatch.setattr(fake_pipeline, "run", run)
+
+    result = CliRunner().invoke(app, ["auto", "Build a CLI", "--quiet", "--max-repair-rounds", "0"])
+
+    assert result.exit_code == 0, result.output
+    assert "--max-repair-rounds is deprecated and ignored" in " ".join(
+        _strip_ansi(result.output).split()
+    )
+    assert bounds == [5]  # the state keeps its default, never the flag
+
+
+def test_help_says_skip_run_stops_after_the_seed_is_written() -> None:
+    result = CliRunner().invoke(app, ["auto", "--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    output = " ".join(_strip_ansi(result.output).replace("│", " ").split())
+    assert "Stop after the Seed is written." in output
+    assert "A-grade" not in output
+    assert "grade/repair" not in output
 
 
 def test_help_documents_the_option() -> None:

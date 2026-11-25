@@ -247,6 +247,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # off the repository reading, so a cloned repo must not set it.
         "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS",
         "OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS",
+        # ``ooo auto`` expected-experience research timeout (auto/expectations.py): 0
+        # turns the research off, so a project's own ``.env`` must not set it.
+        "OUROBOROS_AUTO_EXPECTATIONS_TIMEOUT",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",

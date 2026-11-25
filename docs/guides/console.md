@@ -84,25 +84,33 @@ and Spanish (side rail → language).
 - **It reads as a live view, not a terminal.** The console starts
   `ouroboros auto` with `--progress-jsonl` (a file under
   `~/.ouroboros/gui/chats/auto/`) and follows the events it writes:
-  - a stepper across the top: Interview, Spec, Review, Run, Verify, Result.
-    The Seed repair round shows on Review, and Ralph, evaluation and the
-    lateral recovery on Verify;
+  - a stepper across the top: Interview, Spec, Run, Verify, Result. Ralph,
+    evaluation and the lateral recovery show on Verify. Auto no longer
+    reviews or grades the Seed it writes, so there is no review step;
   - the automatic interview: each question, the answer Auto chose, and where
     the answer came from (the goal, the code, an existing convention, a safe
     default, an assumption, out of scope, and so on). The ambiguity the
     interview reports with a question (its `(ambiguity: 0.43)` prefix) is
     kept out of the question text; the card header shows the latest value
     with a small trend line, and each question's value is in its number's
-    tooltip. A chat saved by an older console is brought to the current
-    shape when the console starts, losing nothing: its progress file is
-    folded again only when it still holds the whole saved history, and
-    otherwise the saved rounds are migrated in place. Once the interview is over it folds to one line, which opens;
-  - the Seed card the interview uses, with its review grade, how the grade
-    moved (for example B → A), the repair rounds, and what the review asked
-    for;
+    tooltip. Once the interview is over it folds to one line, which opens;
+  - the Seed card the interview uses: the goal, the acceptance criteria and
+    constraints, and the Seed's YAML (its file path when it is too long to
+    keep in the chat);
   - the run card with its acceptance-criterion tiles, once the run has an
     execution id. Until the run has planned its tasks, which can take
-    minutes, the card says it is preparing them.
+    minutes, the card says it is preparing them. An Auto Seed runs one
+    worker attempt for all of its criteria, so every tile shows as executing
+    while that attempt runs, and each one settles as its criterion is judged
+    after it; the done count moves then;
+  - under the tiles, once the criteria pass, the completion pass: the run job
+    uses the app in a browser like a first-time user, fixes what it found and
+    uses it again, which can take 10 to 25 minutes. The card says the stage it
+    is on ("Using it in a browser · round 2", "Fixing 16 problems"), a line of
+    steps so far (Review, Try 1, Fix 16, Try 2, …, Pick) and the latest play's
+    screenshots from the folder's `.ouroboros/playtest/round-<n>/`, each opening
+    large. The Verify step names the stage too. It ends with how the pass
+    ended (*Tried it and fixed it*, *Checked it: nothing to fix*, …).
 
   The header and side pane name the agent and Execute model the job runs
   on, resolved as `ouroboros auto` resolves them when the chat starts: the
@@ -114,6 +122,15 @@ and Spanish (side rail → language).
   hidden until asked for. The view is saved with the chat, and is bounded (the
   last 60 rounds, cut texts). Auto chats started before this view existed show
   their log as before.
+
+  A chat saved by an older console is brought to the current shape when the
+  console starts: its progress file is folded again only when it still holds
+  the whole saved history, and otherwise the saved view is migrated in place.
+  Every round, phase and fact is kept. A chat from an Auto that still
+  reviewed its Seed, saved or still running, also shows five steps: its
+  review and repair phases sit on Spec, the grades, findings and repair
+  rounds it recorded are dropped, and the `grade` and `repair` lines of its
+  progress file are read but add nothing.
 - **It ends with a result.** When the job ends the chat shows how it ended
   (*Completed* only when its run reported completion; *Not verified* when the
   job succeeded without that report), a link to the run board, the folder,

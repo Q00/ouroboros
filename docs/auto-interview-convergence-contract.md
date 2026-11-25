@@ -26,7 +26,11 @@ classes:
 3. **Safe auto assumption** — the missing detail is local, reversible, and
    non-destructive, so auto mode may choose a conservative default.  The entry
    must be source-tagged as a default/assumption and retain enough rationale for
-   review and later repair.
+   review and later repair.  It never binds the Seed.  When the answer refiner
+   wrote it for an interview question, it reaches the worker verbatim as a
+   labelled assumption (`Seed.sourced_scope.assumptions`), apart from the
+   constraints and acceptance criteria; a question auto decided nothing for
+   stays in `Seed.open_questions`, which the worker never sees.
 4. **Explicit blocker** — the gap requires human authority, secrets, external or
    destructive side effects, production/billing decisions, regulated-domain
    judgment, or another unsafe choice.  The session must block instead of
@@ -45,7 +49,7 @@ local, reversible, and observable.
 
 Proceeding does **not** mean merely avoiding `blocked`: the resulting ledger must
 include auditable assumptions, non-goals, acceptance criteria, and a verification
-plan so seed generation and review can reject weak or untestable work.
+plan, so the Seed written from it can be run and each criterion verified.
 
 ## Unsafe or authority-requiring goals
 

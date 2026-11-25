@@ -64,7 +64,7 @@ from ouroboros.mcp.tools.job_observer import (
     build_job_observer_contract,
 )
 from ouroboros.mcp.tools.run_ac_tally import derive_terminal_run_meta
-from ouroboros.mcp.tools.run_failure_meta import launch_error
+from ouroboros.mcp.tools.run_failure_meta import failure_cause_text, launch_error
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -2092,7 +2092,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     )
                     meta.update(terminal_meta)
                     if "failure_cause" in terminal_meta:
-                        message += f"Failure Cause: {terminal_meta['failure_cause']}\n"
+                        message += f"Failure Cause: {failure_cause_text(terminal_meta)}\n"
                 if session_status == SessionStatus.PAUSED:
                     meta["paused"] = True
                     meta.update(pause_metadata)
@@ -2400,13 +2400,8 @@ class StartExecuteSeedHandler:
         # ``_subagent`` envelope without triggering a second
         # subagent_dispatched event.  Keyed by idempotency_key.
         self._idempotency_plugin_payload: dict[str, dict[str, Any]] = {}
-        # Per-key serialization lock so two concurrent handle() calls with
-        # the same idempotency_key dedupe correctly. Without this, both
-        # callers can miss the cache (entries are written *after* dispatch)
-        # and each enqueues a fresh execution. ``dict.setdefault`` is
-        # atomic in single-threaded asyncio so the lock-creation path is
-        # race-free; the lock is held across the cache check + dispatch +
-        # cache write so the second caller observes a populated cache.
+        # Serialize calls sharing an idempotency key so only one dispatches on a cache miss.
+        # In single-threaded asyncio, setdefault creates or gets the lock without a yield.
         self._idempotency_locks: dict[str, asyncio.Lock] = {}
 
     @property
@@ -2743,23 +2738,30 @@ class StartExecuteSeedHandler:
             if result.is_err:
                 raise job_work_error(result.error)
             run_result = result.value
-            run_session_id = _result_session_id(
-                run_result,
-                session_id or new_session_id,
-            )
+            run_session_id = _result_session_id(run_result, session_id or new_session_id)
             # Failed AC execution is evaluable; pauses and cancellation are not.
             from ouroboros.mcp.tools import run_evaluate_chain
+            from ouroboros.orchestrator.completion_pass import complete_after_run
 
+            work_dir = run_evaluate_chain.result_evaluation_working_dir(run_result, resolved_cwd)
+            run_result = await complete_after_run(  # before evaluation judges the product
+                run_result,
+                seed_content=seed_content,
+                working_dir=work_dir,
+                runtime_backend=self.agent_runtime_backend,
+                opencode_mode=self.opencode_mode,
+                llm_backend=self._execute_handler.llm_backend,
+                event_store=self._event_store,
+                execution_id=execution_id,
+                run_arguments=arguments,
+            )
             evaluable = run_evaluate_chain.is_evaluable_run_result(run_result)
             if auto_evaluate_enabled and run_session_id and evaluable:
                 return await run_evaluate_chain.enqueue_chained_evaluation(
                     run_result,
                     session_id=run_session_id,
                     seed_content=seed_content,
-                    working_dir=run_evaluate_chain.result_evaluation_working_dir(
-                        run_result,
-                        resolved_cwd,
-                    ),
+                    working_dir=work_dir,
                     auto_evolve=auto_evolve_enabled,
                     start_evaluate_handler=self.start_evaluate_handler,
                 )
