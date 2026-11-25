@@ -10,7 +10,9 @@ handler instance has no memory of prior keys (process-restart bound).
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 from datetime import UTC, datetime
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -152,6 +154,45 @@ async def test_inline_worker_uses_accepted_default_snapshot(
     assert preferences.efficiency_mode.value == selected
     assert raw_mode == initial
     assert raw_assurance is None
+
+
+@pytest.mark.parametrize("save_fails", [False, True])
+async def test_allocated_id_is_saved_before_job_acceptance(tmp_path, save_fails) -> None:
+    db_path = tmp_path / "jobs.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+    manager = JobManager(store)
+    execute = AsyncMock(return_value=Result.ok(MCPToolResult(content=())))
+    handler = StartExecuteSeedHandler(
+        event_store=store, job_manager=manager, execute_handler=MagicMock(handle=execute)
+    )
+    saved_ids = []
+
+    def record_job(job_id: str) -> None:
+        with closing(sqlite3.connect(db_path)) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type = 'mcp.job.created'"
+            ).fetchone() == (0,)
+        saved_ids.append(job_id)
+        if save_fails:
+            raise OSError("Could not save the pending job ID")
+
+    arguments = {"seed_content": "goal: test\n", "cwd": str(tmp_path), "auto_evaluate": False}
+    try:
+        if save_fails:
+            with pytest.raises(OSError, match="Could not save"):
+                await handler.handle(arguments, on_job_allocated=record_job)
+        else:
+            receipt = await handler.handle(arguments, on_job_allocated=record_job)
+            assert receipt.is_ok
+            assert receipt.value.meta["job_id"] == saved_ids[0]
+        assert len(saved_ids) == 1
+        events, _ = await store.get_events_after("job", saved_ids[0])
+        assert sum(event.type == "mcp.job.created" for event in events) == int(not save_fails)
+        if save_fails:
+            execute.assert_not_awaited()
+    finally:
+        await manager.drain(grace_seconds=1)
+        await store.close()
 
 
 @pytest.mark.asyncio

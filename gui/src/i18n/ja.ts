@@ -681,6 +681,7 @@ const ja: Catalog = {
   "error.no_interview": "仕様にできるインタビューがまだありません。",
   "error.no_spec": "引き渡す前に仕様を書いてください。",
   "error.already_running": "この仕様はすでに実行中です。",
+  "error.previous_run_unconfirmed": "前回の実行が終了してから、もう一度実行してください。",
   "error.bad_prepare_git": "prepare_git は true か false にしてください。",
   "error.no_question": "回答すべき質問がありません。",
   "error.suggestion_pending": "回答の提案をすでに作成中です。",

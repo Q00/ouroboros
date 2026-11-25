@@ -549,6 +549,7 @@ export interface ChatSession extends ChatSessionRow {
   interview_session_id?: string;
   seed_yaml?: string;
   execution_id?: string | null;
+  run_job_id?: string | null;
   auto_job_id?: string;
   /** Auto chats started since the structured view exists; older ones have only their log. */
   auto?: AutoView | null;

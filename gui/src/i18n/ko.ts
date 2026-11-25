@@ -681,6 +681,7 @@ const ko: Catalog = {
   "error.no_interview": "아직 스펙으로 만들 인터뷰가 없어요.",
   "error.no_spec": "넘기기 전에 스펙을 먼저 쓰세요.",
   "error.already_running": "이 스펙은 이미 실행 중이에요.",
+  "error.previous_run_unconfirmed": "이전 실행이 끝난 뒤 다시 시도해 주세요.",
   "error.bad_prepare_git": "prepare_git은 true나 false여야 해요.",
   "error.no_question": "답할 질문이 없어요.",
   "error.suggestion_pending": "이미 답변 제안을 만드는 중이에요.",

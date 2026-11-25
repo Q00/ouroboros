@@ -681,6 +681,7 @@ const es: Catalog = {
   "error.no_interview": "Aún no hay una entrevista para convertir en especificación.",
   "error.no_spec": "Redacta la especificación antes de delegarla.",
   "error.already_running": "Esta especificación ya está en curso.",
+  "error.previous_run_unconfirmed": "Espera a que termine la ejecución anterior para volver a intentarlo.",
   "error.bad_prepare_git": "prepare_git debe ser true o false.",
   "error.no_question": "No hay ninguna pregunta abierta que responder.",
   "error.suggestion_pending": "Ya se está redactando una sugerencia.",
