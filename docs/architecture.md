@@ -316,7 +316,10 @@ everything a user of that kind of product expects. For new work (a workspace
 with no existing code), `ooo auto` researches that list once, beside the
 interview: `auto/expectations.py` runs one read-only agent session, with live
 web search where the backend offers it, and the Seed carries the result as
-`SourcedScope.expected_experience`. The run's worker is told to build to it.
+`SourcedScope.expected_experience`. The list covers capabilities and what the
+product looks and feels like in use. When typical products of the requested
+scope share a quantity, size, speed, or visual treatment, the research includes
+it so the worker and the review can check it.
 
 One worker attempt can still miss lines of that list, or break the request's
 basic use while it adds them, and the formal evaluation judges only the Seed's
@@ -331,7 +334,9 @@ criteria. So after a run of such a Seed completes, and before evaluation,
    writes a short first-time-user play script, `orchestrator/playtest.py` runs
    it in that browser headless over `--remote-debugging-pipe`, serving the app
    read-only on a loopback port, and a reviewer looks at the screenshots and
-   lists what that user sees broken. The play also notes what the reviewer
+   lists what that user sees broken. The reviewer flags text too small or faint
+   to read at a glance and required controls that appear only on hover, so the
+   worker sees both in the repair list. The play also notes what the reviewer
    should not take for the app's fault: typing that reached no text field, and
    a step during which the page drew far fewer frames than at its best (it
    counts them from an isolated world the page cannot see). It counts the
